@@ -1,11 +1,10 @@
 mod allocate_locals;
 
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{BTreeMap, btree_map::Entry},
     str::FromStr,
 };
 
-use powdr_syscalls::Syscall;
 use wasmparser::{
     BlockType, CompositeInnerType, ElementItems, FuncType, MemoryType, Operator, OperatorsReader,
     Parser, Payload, RefType, SubType, TableInit, TypeRef, ValType,
@@ -38,6 +37,11 @@ pub enum MemoryEntry {
     Value(u32),
     /// Refers to a code label.
     Label(u32),
+}
+
+/// Valid system calls known by the system.
+pub trait SystemCall: Sized + FromStr {
+    fn function_type(&self) -> (Vec<ValType>, Vec<ValType>);
 }
 
 /// Helper struct to track unallocated memory.
@@ -155,15 +159,15 @@ pub struct Program<'a> {
     pub data_segments: Vec<Segment>,
 }
 
-struct ModuleContext<'a> {
+struct ModuleContext<'a, S: SystemCall> {
     types: Vec<SubType>,
     func_types: Vec<u32>,
-    imported_functions: Vec<Syscall>,
+    imported_functions: Vec<S>,
     table_types: Vec<RefType>,
     p: Program<'a>,
 }
 
-impl ModuleContext<'_> {
+impl<S: SystemCall> ModuleContext<'_, S> {
     fn get_type(&self, type_idx: u32) -> &FuncType {
         let subtype = &self.types[type_idx as usize];
         match &subtype.composite_type.inner {
@@ -252,7 +256,9 @@ impl ModuleContext<'_> {
                 / PAGE_SIZE;
 
             if maximum_size < mem_type.initial as u32 {
-                panic!("Not enough address space available to allocate the initial memory plus the stack");
+                panic!(
+                    "Not enough address space available to allocate the initial memory plus the stack"
+                );
             }
 
             let maximum_size = mem_type
@@ -297,7 +303,7 @@ fn many_sz(val_types: &[ValType]) -> u32 {
 
 /// A function definition that just calls the syscall. This is useful
 /// in case there is an indirect call to a system call.
-fn proxy_syscall(label: u32, syscall: Syscall, ty: &FuncType) -> Vec<Directive<'static>> {
+fn proxy_syscall<S: SystemCall>(label: u32, syscall: S, ty: &FuncType) -> Vec<Directive<'static>> {
     fn alloc_vars(types: &[ValType]) -> (Vec<AllocatedVar>, u32) {
         let mut address = 0;
         let mut vars = Vec::new();
@@ -358,7 +364,7 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
     words
 }
 
-pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
+pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
     let parser = Parser::new(0);
 
     let mut ctx = ModuleContext {
@@ -456,21 +462,12 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                     }
                     if let TypeRef::Func(type_idx) = import.ty {
                         // Lets see if the name is known
-                        if let Ok(syscall) = Syscall::from_str(import.name) {
+                        if let Ok(syscall) = S::from_str(import.name) {
                             // Lets see if the type matches the expectations.
                             let ty = ctx.get_type(type_idx);
-                            assert!(ty.params().iter().all(|&ty| sz(ty) == 4), "Syscall parameters must be 32-bit, but was imported with a type of {ty:?}");
-                            assert!(ty.results().iter().all(|&ty| sz(ty) == 4), "Syscall results must be 32-bit, but was imported with a type of {ty:?}");
-
-                            let given_arity = (ty.params().len() as u32, ty.results().len() as u32);
-
-                            let expected_arity = syscall.arity();
-                            if given_arity != expected_arity {
-                                panic!(
-                                    "Syscall \"{}\" expects {} 32-bit inputs and {} 32-bit outputs, but was imported with {} 32-bit inputs and {} 32-bit outputs",
-                                    import.name, expected_arity.0, expected_arity.1, given_arity.0, given_arity.1
-                                );
-                            }
+                            let (expected_params, expected_results) = syscall.function_type();
+                            assert_eq!(expected_params, ty.params());
+                            assert_eq!(expected_results, ty.results());
 
                             log::debug!("Imported syscall: {}", import.name);
 
@@ -682,7 +679,9 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                                 panic!("Offset is not a u32 value");
                             };
 
-                            log::debug!("Active table segment found. Table index: {idx}, offset: {offset}, number of elements: {num_elems}");
+                            log::debug!(
+                                "Active table segment found. Table index: {idx}, offset: {offset}, number of elements: {num_elems}"
+                            );
 
                             let MemoryEntry::Value(table_size) = initial_memory.get(table.start)
                             else {
