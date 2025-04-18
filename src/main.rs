@@ -4,6 +4,7 @@ use loader::SystemCall;
 
 mod loader;
 
+#[derive(Clone, Copy)]
 enum NoSystemCall {}
 
 impl FromStr for NoSystemCall {

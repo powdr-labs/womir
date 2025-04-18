@@ -40,7 +40,7 @@ pub enum MemoryEntry {
 }
 
 /// Valid system calls known by the system.
-pub trait SystemCall: Sized + FromStr {
+pub trait SystemCall: Sized + FromStr + Copy {
     fn function_type(&self) -> (Vec<ValType>, Vec<ValType>);
 }
 
@@ -138,9 +138,9 @@ impl InitialMemory {
     }
 }
 
-pub struct Program<'a> {
+pub struct Program<'a, S: SystemCall> {
     /// The functions defined in the module.
-    pub functions: Vec<Vec<Directive<'a>>>,
+    pub functions: Vec<Vec<Directive<'a, S>>>,
     /// The start function, if any.
     pub start_function: Option<u32>,
     /// The main function, if any.
@@ -164,7 +164,7 @@ struct ModuleContext<'a, S: SystemCall> {
     func_types: Vec<u32>,
     imported_functions: Vec<S>,
     table_types: Vec<RefType>,
-    p: Program<'a>,
+    p: Program<'a, S>,
 }
 
 impl<S: SystemCall> ModuleContext<'_, S> {
@@ -303,7 +303,11 @@ fn many_sz(val_types: &[ValType]) -> u32 {
 
 /// A function definition that just calls the syscall. This is useful
 /// in case there is an indirect call to a system call.
-fn proxy_syscall<S: SystemCall>(label: u32, syscall: S, ty: &FuncType) -> Vec<Directive<'static>> {
+fn proxy_syscall<S: SystemCall>(
+    label: u32,
+    syscall: S,
+    ty: &FuncType,
+) -> Vec<Directive<'static, S>> {
     fn alloc_vars(types: &[ValType]) -> (Vec<AllocatedVar>, u32) {
         let mut address = 0;
         let mut vars = Vec::new();
@@ -364,7 +368,7 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
     words
 }
 
-pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
+pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<S>> {
     let parser = Parser::new(0);
 
     let mut ctx = ModuleContext {

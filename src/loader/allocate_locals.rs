@@ -1,15 +1,14 @@
 use std::{iter::Peekable, ops::RangeFrom};
 
 use itertools::Itertools;
-use powdr_syscalls::Syscall;
 use wasmparser::{
     BlockType, ContType, FuncType, FunctionBody, LocalsReader, ModuleArity, Operator,
     OperatorsIterator, RefType, SubType, ValType,
 };
 
-use crate::loader::{sz, ModuleContext};
+use crate::loader::{ModuleContext, sz};
 
-use super::many_sz;
+use super::{SystemCall, many_sz};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatedVar {
@@ -20,14 +19,14 @@ pub struct AllocatedVar {
 }
 
 #[derive(Debug)]
-pub enum Directive<'a> {
+pub enum Directive<'a, S: SystemCall> {
     WasmOp {
         op: Operator<'a>,
         inputs: Vec<AllocatedVar>,
         output: Option<AllocatedVar>,
     },
     Syscall {
-        syscall: Syscall,
+        syscall: S,
         inputs: Vec<AllocatedVar>,
         outputs: Vec<AllocatedVar>,
     },
@@ -222,8 +221,8 @@ impl Stack {
     }
 }
 
-struct StackTracker<'a> {
-    module: &'a ModuleContext<'a>,
+struct StackTracker<'a, S: SystemCall> {
+    module: &'a ModuleContext<'a, S>,
     locals: Vec<AllocatedVar>,
     /// In the middle of the locals, right after the function arguments, in a place
     /// "call" will be able to write, we have the return address and the frame pointer
@@ -233,9 +232,9 @@ struct StackTracker<'a> {
     control_stack: Vec<Frame>,
 }
 
-impl<'a> StackTracker<'a> {
+impl<'a, S: SystemCall> StackTracker<'a, S> {
     fn new(
-        module: &'a ModuleContext,
+        module: &'a ModuleContext<'_, S>,
         func_idx: u32,
         locals_reader: LocalsReader<'a>,
     ) -> wasmparser::Result<(Self, u32)> {
@@ -325,10 +324,12 @@ impl<'a> StackTracker<'a> {
     fn assert_types_on_stack(&self, types: &[ValType]) {
         let stack = self.stack.slice();
         assert!(stack.len() >= types.len());
-        assert!(stack[stack.len() - types.len()..]
-            .iter()
-            .zip(types)
-            .all(|(stack_var, ty)| stack_var.val_type == *ty));
+        assert!(
+            stack[stack.len() - types.len()..]
+                .iter()
+                .zip(types)
+                .all(|(stack_var, ty)| stack_var.val_type == *ty)
+        );
     }
 
     /// Return the height of the stack where the frame inputs and outputs sits on top of.
@@ -348,12 +349,12 @@ impl<'a> StackTracker<'a> {
     }
 
     /// Generate the code of a return, ensuring the outputs are at the expected height.
-    fn return_code<'b>(&self) -> Vec<Directive<'b>> {
+    fn return_code<'b>(&self) -> Vec<Directive<'b, S>> {
         self.br_code(self.control_stack.len() as u32 - 1)
     }
 
     /// Generate the code of a break ("br"), ensuring the outputs are at the expected height.
-    fn br_code<'b>(&self, relative_depth: u32) -> Vec<Directive<'b>> {
+    fn br_code<'b>(&self, relative_depth: u32) -> Vec<Directive<'b, S>> {
         // When breaking, the stack might be bigger than the required height for the target label.
         // If so, we must copy the outputs to the expected height.
         let cs_len = self.control_stack.len();
@@ -802,7 +803,7 @@ impl<'a> StackTracker<'a> {
     }
 }
 
-impl ModuleArity for StackTracker<'_> {
+impl<S: SystemCall> ModuleArity for StackTracker<'_, S> {
     fn sub_type_at(&self, type_idx: u32) -> Option<&SubType> {
         self.module.types.get(type_idx as usize)
     }
@@ -845,12 +846,12 @@ impl ModuleArity for StackTracker<'_> {
 
 /// Allocates the locals and the stack at addresses starting
 /// from 0, assuming one byte per address.
-pub fn infinite_registers_allocation<'a>(
-    module: &ModuleContext,
+pub fn infinite_registers_allocation<'a, S: SystemCall>(
+    module: &ModuleContext<'_, S>,
     func_idx: u32,
     labels: &mut RangeFrom<u32>,
     body: FunctionBody<'a>,
-) -> wasmparser::Result<Vec<Directive<'a>>> {
+) -> wasmparser::Result<Vec<Directive<'a, S>>> {
     // Tracks the frame stack. Used to calculate arity.
     let (mut tracker, first_explicit_local) =
         StackTracker::new(module, func_idx, body.get_locals_reader()?)?;
