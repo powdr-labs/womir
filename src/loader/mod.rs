@@ -1,16 +1,18 @@
 mod allocate_locals;
+mod dag;
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     str::FromStr,
 };
 
+use dag::Dag;
 use wasmparser::{
     BlockType, CompositeInnerType, ElementItems, FuncType, MemoryType, Operator, OperatorsReader,
     Parser, Payload, RefType, SubType, TableInit, TypeRef, ValType,
 };
 
-use allocate_locals::{AllocatedVar, Directive};
+use allocate_locals::AllocatedVar;
 
 /// WASM defined page size is 64 KiB.
 const PAGE_SIZE: u32 = 65536;
@@ -140,7 +142,7 @@ impl InitialMemory {
 
 pub struct Program<'a, S: SystemCall> {
     /// The functions defined in the module.
-    pub functions: Vec<Vec<Directive<'a, S>>>,
+    pub functions: Vec<Dag<'a, S>>,
     /// The start function, if any.
     pub start_function: Option<u32>,
     /// The main function, if any.
@@ -301,50 +303,6 @@ fn many_sz(val_types: &[ValType]) -> u32 {
     val_types.iter().map(|&ty| sz(ty)).sum()
 }
 
-/// A function definition that just calls the syscall. This is useful
-/// in case there is an indirect call to a system call.
-fn proxy_syscall<S: SystemCall>(
-    label: u32,
-    syscall: S,
-    ty: &FuncType,
-) -> Vec<Directive<'static, S>> {
-    fn alloc_vars(types: &[ValType]) -> (Vec<AllocatedVar>, u32) {
-        let mut address = 0;
-        let mut vars = Vec::new();
-        for ty in types {
-            let var = AllocatedVar {
-                val_type: *ty,
-                address,
-            };
-            address += sz(*ty);
-            vars.push(var);
-        }
-
-        (vars, address)
-    }
-
-    let (inputs, inputs_len) = alloc_vars(ty.params());
-    let (outputs, outputs_len) = alloc_vars(ty.results());
-
-    let mut directives = Vec::new();
-    directives.push(Directive::Label(label));
-
-    directives.push(Directive::Syscall {
-        syscall,
-        inputs,
-        outputs,
-    });
-
-    let return_info = AllocatedVar {
-        val_type: ValType::I64,
-        address: inputs_len.max(outputs_len),
-    };
-
-    directives.push(Directive::Return { return_info });
-
-    directives
-}
-
 /// Arranges the bytes in little-endian words.
 ///
 /// Alignment mod 4 is the byte offset of the first word.
@@ -380,7 +338,7 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
             functions: Vec::new(),
             start_function: None,
             main_function: None,
-            // This is actually left empty, and will be filled just before returning.
+            // This is left empty for most of this function, and will be filled just before returning.
             initial_memory: BTreeMap::new(),
             globals: Vec::new(),
             memory: None,
@@ -411,8 +369,6 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
     let mut mem_allocator = MemoryAllocator::new();
 
     let mut initial_memory = InitialMemory::new();
-
-    let mut internal_labels = None;
 
     // TODO: validate while parsing
 
@@ -477,9 +433,6 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
 
                             // Each function uses as label its own index.
                             let label = ctx.func_types.len() as u32;
-
-                            // Adds a proxy function that just calls the system call
-                            ctx.p.functions.push(proxy_syscall(label, syscall, ty));
 
                             ctx.func_types.push(type_idx);
                             ctx.imported_functions.push(syscall);
@@ -713,23 +666,13 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
             Payload::CodeSectionStart { count, .. } => {
                 log::debug!("Code Section Start found. Count: {count}");
                 assert_eq!(ctx.p.functions.len() + count as usize, ctx.func_types.len());
-
-                // The labels used internally in the functions must be globally unique.
-                // This is the label generator, starting from label available after the
-                // function labels.
-                internal_labels = Some((ctx.func_types.len() as u32)..);
             }
             Payload::CodeSectionEntry(function) => {
                 log::debug!("Code Section Entry found");
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
-                let definition = allocate_locals::infinite_registers_allocation(
-                    &ctx,
-                    ctx.p.functions.len() as u32,
-                    internal_labels.as_mut().unwrap(),
-                    function,
-                )?;
+                let definition = Dag::load_function(&ctx, ctx.p.functions.len() as u32, function)?;
                 ctx.p.functions.push(definition);
             }
             Payload::DataSection(section) => {
