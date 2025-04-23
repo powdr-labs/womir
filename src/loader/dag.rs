@@ -1,6 +1,7 @@
+use core::slice;
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
     mem::MaybeUninit,
 };
@@ -17,12 +18,19 @@ enum Operation<'a> {
     Inputs,
     WASMOp(Operator<'a>),
     Block {
+        // TODO: This local_idx_to_input doesn't really belong in the final output,
+        // as it is used only to fixup the breaks. Find a better place to store it.
+        local_idx_to_input: BTreeMap<u32, u32>,
         nodes: Vec<Node<'a>>,
     },
     Loop {
+        local_idx_to_input: BTreeMap<u32, u32>,
         nodes: Vec<Node<'a>>,
     },
+    // TODO: trasnform all the if ... else ... into block { block { br_if 0 ... bn 1 } ... },
+    // Then we don't need to handle the complicated IfElse block.
     IfElse {
+        local_idx_to_input: BTreeMap<u32, u32>,
         if_nodes: Vec<Node<'a>>,
         else_nodes: Vec<Node<'a>>,
     },
@@ -279,7 +287,10 @@ fn build_dag_for_block<'a, S: SystemCall>(
                     });
 
                     // Save the path to the node in the breaks list.
-                    let mut path = ctrl_stack.dag_path.clone();
+                    // The path is relative to the block that is being broken.
+                    let mut path = ctrl_stack.dag_path
+                        [(ctrl_stack.dag_path.len() - relative_depth as usize)..]
+                        .to_vec();
                     path.push(node_idx as u32);
                     target_block.breaks.push(ReferencingBreak {
                         path,
@@ -330,7 +341,7 @@ fn build_dag_for_block<'a, S: SystemCall>(
                 let mut inputs = stack.split_off(stack.len() - stack_inputs.len());
                 assert!(types_matches(&nodes, &stack_inputs, &inputs));
 
-                let (block_nodes, block_local_roles) =
+                let (mut block_nodes, block_local_roles) =
                     build_dag_for_block(ctrl_stack, operators, stack_inputs, locals_types)?;
 
                 // Undo the pushes to the control stack
@@ -341,11 +352,13 @@ fn build_dag_for_block<'a, S: SystemCall>(
                 // are inputs/outputs.
 
                 // For a block, local inputs are whatever returned:
+                let mut local_idx_to_input = BTreeMap::new();
                 let local_inputs: std::vec::IntoIter<(u32, u32)> = block_local_roles
                     .iter()
                     .enumerate()
                     .filter_map(|(local_index, role)| {
                         if let Some(input_index) = role.as_input {
+                            local_idx_to_input.insert(local_index as u32, input_index);
                             Some((input_index, local_index as u32))
                         } else {
                             None
@@ -401,16 +414,21 @@ fn build_dag_for_block<'a, S: SystemCall>(
                     locals_roles[*idx as usize].as_output = true;
                 }
 
-                // Fixup the breaks to include all the locals that must be output
-                for br in ctrl_block.breaks {
-                    fixup_break(&mut nodes, br, &output_types, &local_outputs);
-                }
-
-                nodes.push(Node {
-                    operation: Operation::Block { nodes: block_nodes },
+                let mut node = Node {
+                    operation: Operation::Block {
+                        nodes: block_nodes,
+                        local_idx_to_input,
+                    },
                     inputs,
                     output_types: Cow::Owned(output_types),
-                });
+                };
+
+                // Fixup the breaks to include all the locals that must be output
+                for br in ctrl_block.breaks {
+                    fixup_break(&mut node, &local_outputs, &locals_types, br);
+                }
+
+                nodes.push(node);
             }
             _ => todo!(),
         }
@@ -420,13 +438,115 @@ fn build_dag_for_block<'a, S: SystemCall>(
 }
 
 fn fixup_break(
-    nodes: &mut Vec<Node>,
-    br: ReferencingBreak,
-    output_types: &[ValType],
+    toplevel_node: &mut Node,
     local_outputs: &BTreeSet<u32>,
+    locals_types: &[ValType],
+    br: ReferencingBreak,
 ) {
-    // TODO: use the opportunity to sanity check the types
+    // Find out what local inputs we will need.
+    let new_inputs = local_outputs
+        .iter()
+        .filter_map(|local_index| {
+            (!br.locals_written.contains_key(local_index)).then(|| {
+                // The local was not known as an output at parse time, which means we
+                // will have to forward it from the block inputs.
+                *local_index
+            })
+        })
+        .collect_vec();
+
+    // Ensure the needed local inputs are available all the way to the toplevel node.
+    ensure_local_is_input(toplevel_node, without_last(&br.path), new_inputs);
+
+    // Get the break node that is missing the outputs from the locals.
+    let (break_node, local_inputs_map) = get_nodes_from_path(toplevel_node, &br.path);
+
+    // Adds the extra inputs to the break node.
+    for local_index in local_outputs.iter() {
+        // The outputs registered at the time of the parsing
+        // are a subset of the outputs that we need to add.
+        let value = match br.locals_written.get(local_index) {
+            Some(value) => *value,
+            None => {
+                // The output was not known at the time, so we just forward the
+                // unmodified local from the block inputs.
+
+                // By this point, we already ensured the local is a block input.
+                let input_idx = local_inputs_map[local_index];
+
+                ValueOrigin {
+                    node: 0,
+                    output_idx: input_idx,
+                }
+            }
+        };
+
+        break_node.inputs.push(value);
+    }
+}
+
+fn without_last<T>(slice: &[T]) -> &[T] {
+    let len = slice.len();
+    &slice[..len - 1]
+}
+
+fn ensure_local_is_input<'a, 'b>(
+    node: &'a mut Node<'b>,
+    path: &[u32],
+    required_inputs: Vec<u32>,
+) -> u32 {
     todo!()
+}
+
+fn get_nodes_from_path<'a, 'b, 'ret>(
+    mut node: &'a mut Node<'b>,
+    path: &[u32],
+) -> (&'ret mut Node<'b>, &'ret mut BTreeMap<u32, u32>)
+where
+    'a: 'ret,
+    'b: 'ret,
+{
+    let mut path_iter = path.iter();
+
+    // We know path has at least one element.
+    let mut node_idx = *path_iter.next().unwrap();
+    loop {
+        let (local_inputs_map, nodes) = match &mut node.operation {
+            Operation::Block {
+                local_idx_to_input,
+                nodes,
+            }
+            | Operation::Loop {
+                local_idx_to_input,
+                nodes,
+            } => (local_idx_to_input, nodes),
+
+            Operation::IfElse {
+                local_idx_to_input,
+                if_nodes,
+                else_nodes,
+            } => {
+                // Consume one extra path element to choose branch
+                let branch = *path_iter.next().unwrap();
+                (
+                    local_idx_to_input,
+                    match branch {
+                        0 => if_nodes,
+                        1 => else_nodes,
+                        _ => unreachable!(),
+                    },
+                )
+            }
+            _ => unreachable!(),
+        };
+
+        node = &mut nodes[node_idx as usize];
+        if let Some(next_idx) = path_iter.next() {
+            node_idx = *next_idx;
+        } else {
+            return (node, local_inputs_map);
+        }
+    }
 }
 
 fn local_get(
