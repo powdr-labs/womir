@@ -2,7 +2,7 @@ use std::{iter::Peekable, rc::Rc};
 
 use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader};
 
-use super::{ModuleContext, SystemCall};
+use super::{Instruction, ModuleContext, SystemCall};
 
 /// BlockTree is a simplified representation of a WASM function.
 ///
@@ -40,7 +40,7 @@ use super::{ModuleContext, SystemCall};
 /// The block contents are simplified: `return` is turned into the appropriate
 /// `br`, and dead code after `br`, `br_table` and `unreachable` instructions is removed.
 pub struct BlockTree<'a> {
-    elements: Vec<Element<'a>>,
+    pub elements: Vec<Element<'a>>,
 }
 
 impl<'a> BlockTree<'a> {
@@ -76,7 +76,7 @@ fn parse_contents<'a, S: SystemCall>(
         match op {
             Operator::If { blockty } => {
                 // Parse the if contents of the if tranformation.
-                let mut elements = vec![Element::WASMOp(Operator::Nop)]; // Placeholder for the conditional break
+                let mut elements = vec![Instruction::WASMOp(Operator::Nop).into()]; // Placeholder for the conditional break
                 let ending =
                     parse_contents(ctx, op_reader, stack_level + 1, stack_offset, &mut elements)?;
 
@@ -86,13 +86,13 @@ fn parse_contents<'a, S: SystemCall>(
                     Ending::End => {
                         // Emit the simpler version of the if without an else, using BrIfZero
                         // Skips the if elements when condition is false.
-                        elements[0] = Element::BrIfZero { relative_depth: 0 };
+                        elements[0] = Instruction::BrIfZero { relative_depth: 0 }.into();
                     }
                     Ending::Else => {
                         // The condition of the if is checked at the start of the inner block, skipping the
                         // else elements in it if the condition is true.
                         let mut inner_elements =
-                            vec![Element::WASMOp(Operator::BrIf { relative_depth: 0 })];
+                            vec![Instruction::WASMOp(Operator::BrIf { relative_depth: 0 }).into()];
 
                         // Read the else block. It will end up one level deeper than the original block,
                         // so we need to add an offset to the relative depth of its inner breaks.
@@ -107,7 +107,8 @@ fn parse_contents<'a, S: SystemCall>(
 
                         // At the end of the else block, the if part must be skipped, so
                         // we jump to the end of the outer block.
-                        inner_elements.push(Element::WASMOp(Operator::Br { relative_depth: 1 }));
+                        inner_elements
+                            .push(Instruction::WASMOp(Operator::Br { relative_depth: 1 }).into());
 
                         // The inputs of the inner block are the same as the outer block, but it has
                         // no proper output.
@@ -163,39 +164,48 @@ fn parse_contents<'a, S: SystemCall>(
                 });
             }
             Operator::Br { relative_depth } => {
-                output_elements.push(Element::WASMOp(Operator::Br {
-                    relative_depth: relative_depth + stack_offset,
-                }));
+                output_elements.push(
+                    Instruction::WASMOp(Operator::Br {
+                        relative_depth: relative_depth + stack_offset,
+                    })
+                    .into(),
+                );
                 discard_dead_code(op_reader)?;
             }
             Operator::BrIf { relative_depth } => {
-                output_elements.push(Element::WASMOp(Operator::BrIf {
-                    relative_depth: relative_depth + stack_offset,
-                }));
+                output_elements.push(
+                    Instruction::WASMOp(Operator::BrIf {
+                        relative_depth: relative_depth + stack_offset,
+                    })
+                    .into(),
+                );
             }
             Operator::BrTable { targets } => {
                 let targets = targets
                     .targets()
                     .map(|target| target.map(|t| t + stack_offset))
                     .collect::<wasmparser::Result<Vec<u32>>>()?;
-                output_elements.push(Element::BrTable { targets });
+                output_elements.push(Instruction::BrTable { targets }.into());
 
                 discard_dead_code(op_reader)?;
             }
             Operator::Return => {
                 // Add the equivalent br operator to the contents
-                output_elements.push(Element::WASMOp(Operator::Br {
-                    relative_depth: stack_level,
-                }));
+                output_elements.push(
+                    Instruction::WASMOp(Operator::Br {
+                        relative_depth: stack_level,
+                    })
+                    .into(),
+                );
                 discard_dead_code(op_reader)?;
             }
             Operator::Unreachable => {
-                output_elements.push(Element::WASMOp(op));
+                output_elements.push(Instruction::WASMOp(op).into());
                 discard_dead_code(op_reader)?;
             }
             op => {
                 // Add the operator to the contents
-                output_elements.push(Element::WASMOp(op));
+                output_elements.push(Instruction::WASMOp(op).into());
             }
         }
     };
@@ -254,21 +264,16 @@ pub enum Kind {
 }
 
 pub enum Element<'a> {
-    WASMOp(Operator<'a>),
-    /// BrTable needs to be transformed, so we can't use the original
-    /// Operator::BrTable.
-    BrTable {
-        targets: Vec<u32>,
-    },
-    /// BrIfZero is the the complementary to Operator::BrIf. I've added it
-    /// because there is a small optimization that can be done when emmiting
-    /// an if without an else.
-    BrIfZero {
-        relative_depth: u32,
-    },
+    Instruction(Instruction<'a>),
     Child {
         block_kind: Kind,
         interface_type: Rc<FuncType>,
         elements: Vec<Element<'a>>,
     },
+}
+
+impl<'a> From<Instruction<'a>> for Element<'a> {
+    fn from(instruction: Instruction<'a>) -> Self {
+        Element::Instruction(instruction)
+    }
 }

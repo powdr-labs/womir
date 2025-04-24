@@ -1,6 +1,7 @@
 mod allocate_locals;
 mod block_tree;
 mod dag;
+mod locals_data_flow;
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -12,7 +13,7 @@ use block_tree::BlockTree;
 use dag::Dag;
 use wasmparser::{
     BlockType, CompositeInnerType, ElementItems, FuncType, MemoryType, Operator, OperatorsReader,
-    Parser, Payload, RefType, SubType, TableInit, TypeRef, ValType,
+    Parser, Payload, RefType, TableInit, TypeRef, ValType,
 };
 
 use allocate_locals::AllocatedVar;
@@ -180,6 +181,7 @@ impl<S: SystemCall> ModuleContext<'_, S> {
     fn get_func_type(&self, func_idx: u32) -> &FuncType {
         self.get_type(self.func_types[func_idx as usize])
     }
+
     fn get_func_type_rc(&self, func_idx: u32) -> Rc<FuncType> {
         self.types[self.func_types[func_idx as usize] as usize].clone()
     }
@@ -680,6 +682,14 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
                 // Loads the function to memory in the BlockTree format.
                 let block_tree = BlockTree::load_function(&ctx, function.get_operators_reader()?)?;
 
+                // Expose the reads and writes to locals inside blocks as inputs and outputs.
+                let lifted_blocks = locals_data_flow::lift_data_flow(
+                    &ctx,
+                    ctx.p.functions.len() as u32,
+                    function.get_locals_reader()?,
+                    block_tree,
+                );
+
                 let definition = todo!(); //Dag::load_function(&ctx, ctx.p.functions.len() as u32, function)?;
                 ctx.p.functions.push(definition);
             }
@@ -800,4 +810,19 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
     ctx.p.initial_memory = initial_memory.0;
 
     Ok(ctx.p)
+}
+
+enum Instruction<'a> {
+    WASMOp(Operator<'a>),
+    /// BrTable needs to be transformed, so we can't use the original
+    /// Operator::BrTable.
+    BrTable {
+        targets: Vec<u32>,
+    },
+    /// BrIfZero is the the complementary to Operator::BrIf. I've added it
+    /// because there is a small optimization that can be done when emmiting
+    /// an if without an else.
+    BrIfZero {
+        relative_depth: u32,
+    },
 }
