@@ -50,7 +50,8 @@ impl<'a> BlockTree<'a> {
     ) -> wasmparser::Result<Self> {
         let mut op_reader = op_reader.into_iter().peekable();
 
-        let (elements, ending) = parse_contents(ctx, &mut op_reader, 0, 0)?;
+        let mut elements = Vec::new();
+        let ending = parse_contents(ctx, &mut op_reader, 0, 0, &mut elements)?;
         assert_eq!(ending, Ending::End);
 
         Ok(Self { elements })
@@ -68,15 +69,16 @@ fn parse_contents<'a, S: SystemCall>(
     op_reader: &mut Peekable<OperatorsIterator<'a>>,
     stack_level: u32,
     stack_offset: u32,
-) -> wasmparser::Result<(Vec<Element<'a>>, Ending)> {
-    let mut contents = Vec::new();
+    output_elements: &mut Vec<Element<'a>>,
+) -> wasmparser::Result<Ending> {
     let ending = loop {
         let op = op_reader.next().unwrap()?;
         match op {
             Operator::If { blockty } => {
                 // Parse the if contents of the if tranformation.
-                let (mut elements, ending) =
-                    parse_contents(ctx, op_reader, stack_level + 1, stack_offset)?;
+                let mut elements = vec![Element::WASMOp(Operator::Nop)]; // Placeholder for the conditional break
+                let ending =
+                    parse_contents(ctx, op_reader, stack_level + 1, stack_offset, &mut elements)?;
 
                 let interface_type = get_type(ctx, blockty);
 
@@ -84,23 +86,28 @@ fn parse_contents<'a, S: SystemCall>(
                     Ending::End => {
                         // Emit the simpler version of the if without an else, using BrIfZero
                         // Skips the if elements when condition is false.
-                        elements.insert(0, Element::BrIfZero { relative_depth: 0 });
+                        elements[0] = Element::BrIfZero { relative_depth: 0 };
                     }
                     Ending::Else => {
-                        // Read the else block. It will end up one level deeper than the original block,
-                        // so we need to add an offset to the relative depth of its inner breaks.
-                        let (mut else_elements, ending) =
-                            parse_contents(ctx, op_reader, stack_level + 2, stack_offset + 1)?;
-                        assert_eq!(ending, Ending::End);
-
                         // The condition of the if is checked at the start of the inner block, skipping the
                         // else elements in it if the condition is true.
-                        else_elements
-                            .insert(0, Element::WASMOp(Operator::BrIf { relative_depth: 0 }));
+                        let mut inner_elements =
+                            vec![Element::WASMOp(Operator::BrIf { relative_depth: 0 })];
+
+                        // Read the else block. It will end up one level deeper than the original block,
+                        // so we need to add an offset to the relative depth of its inner breaks.
+                        let ending = parse_contents(
+                            ctx,
+                            op_reader,
+                            stack_level + 2,
+                            stack_offset + 1,
+                            &mut inner_elements,
+                        )?;
+                        assert_eq!(ending, Ending::End);
 
                         // At the end of the else block, the if part must be skipped, so
                         // we jump to the end of the outer block.
-                        else_elements.push(Element::WASMOp(Operator::Br { relative_depth: 1 }));
+                        inner_elements.push(Element::WASMOp(Operator::Br { relative_depth: 1 }));
 
                         // The inputs of the inner block are the same as the outer block, but it has
                         // no proper output.
@@ -111,13 +118,13 @@ fn parse_contents<'a, S: SystemCall>(
                         let inner_block = Element::Child {
                             block_kind: Kind::Block,
                             interface_type: inner_type,
-                            elements: else_elements,
+                            elements: inner_elements,
                         };
-                        elements.insert(0, inner_block);
+                        elements[0] = inner_block;
                     }
                 }
 
-                contents.push(Element::Child {
+                output_elements.push(Element::Child {
                     block_kind: Kind::Block,
                     interface_type: get_type(ctx, blockty),
                     elements,
@@ -139,24 +146,30 @@ fn parse_contents<'a, S: SystemCall>(
                     _ => unreachable!(),
                 };
 
-                let (block_contents, ending) =
-                    parse_contents(ctx, op_reader, stack_level + 1, stack_offset)?;
+                let mut block_contents = Vec::new();
+                let ending = parse_contents(
+                    ctx,
+                    op_reader,
+                    stack_level + 1,
+                    stack_offset,
+                    &mut block_contents,
+                )?;
                 assert_eq!(ending, Ending::End);
 
-                contents.push(Element::Child {
+                output_elements.push(Element::Child {
                     block_kind: block_type,
                     interface_type: get_type(ctx, blockty),
                     elements: block_contents,
                 });
             }
             Operator::Br { relative_depth } => {
-                contents.push(Element::WASMOp(Operator::Br {
+                output_elements.push(Element::WASMOp(Operator::Br {
                     relative_depth: relative_depth + stack_offset,
                 }));
                 discard_dead_code(op_reader)?;
             }
             Operator::BrIf { relative_depth } => {
-                contents.push(Element::WASMOp(Operator::BrIf {
+                output_elements.push(Element::WASMOp(Operator::BrIf {
                     relative_depth: relative_depth + stack_offset,
                 }));
             }
@@ -165,29 +178,29 @@ fn parse_contents<'a, S: SystemCall>(
                     .targets()
                     .map(|target| target.map(|t| t + stack_offset))
                     .collect::<wasmparser::Result<Vec<u32>>>()?;
-                contents.push(Element::BrTable { targets });
+                output_elements.push(Element::BrTable { targets });
 
                 discard_dead_code(op_reader)?;
             }
             Operator::Return => {
                 // Add the equivalent br operator to the contents
-                contents.push(Element::WASMOp(Operator::Br {
+                output_elements.push(Element::WASMOp(Operator::Br {
                     relative_depth: stack_level,
                 }));
                 discard_dead_code(op_reader)?;
             }
             Operator::Unreachable => {
-                contents.push(Element::WASMOp(op));
+                output_elements.push(Element::WASMOp(op));
                 discard_dead_code(op_reader)?;
             }
             op => {
                 // Add the operator to the contents
-                contents.push(Element::WASMOp(op));
+                output_elements.push(Element::WASMOp(op));
             }
         }
     };
 
-    Ok((contents, ending))
+    Ok(ending)
 }
 
 fn get_type<S: SystemCall>(ctx: &ModuleContext<S>, blockty: BlockType) -> Rc<FuncType> {
