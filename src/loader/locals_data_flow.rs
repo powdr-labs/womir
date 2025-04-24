@@ -6,8 +6,17 @@
 //!
 //! This module makes explicit what locals are used either as inputs
 //! or outputs to blocks.
+//!
+//! TODO: There is an optimization opportunity here, which is to track
+//! locals permutation: if some locals are read into a block, but in
+//! the end they are just output unmodified (either on stack or on some
+//! local), this can be resolved statically when building the DAG,
+//! eliding copies.
 
-use std::{collections::BTreeSet, rc::Rc};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    rc::Rc,
+};
 
 use itertools::Itertools;
 use wasmparser::{FuncType, LocalsReader, Operator, ValType};
@@ -37,22 +46,23 @@ pub fn lift_data_flow<'a, S: SystemCall>(
 
     for elem in block_tree.elements {
         let elem = match elem {
-            block_tree::Element::Instruction(instruction) => instruction.into(),
+            block_tree::Element::Instruction(instruction) => Element::Ins(instruction),
             block_tree::Element::Child {
                 block_kind,
                 interface_type,
                 elements,
-            } => process_block(
+            } => Element::Block(process_block(
                 ctx,
-                &local_types,
-                &mut Vec::new(),
+                &mut VecDeque::new(),
                 block_kind,
                 interface_type,
                 elements,
-            ),
+            )),
         };
         elements.push(elem);
     }
+
+    // TODO: iterate again, until all the inputs and outputs are exposed.
 
     Ok(LiftedBlockTree {
         func_type,
@@ -80,78 +90,99 @@ fn read_locals<'a>(
 
 fn process_block<'a, S: SystemCall>(
     ctx: &ModuleContext<'a, S>,
-    local_types: &[ValType],
-    control_stack: &mut Vec<BlockStackEntry>,
+    control_stack: &mut VecDeque<BlockStackEntry>,
     block_kind: Kind,
     interface_type: Rc<FuncType>,
     elements: Vec<block_tree::Element<'a>>,
-) -> Element<'a> {
-    control_stack.push(BlockStackEntry {});
+) -> Block<'a> {
+    // Push and pop from the front because it is indexed by the relative depth.
+    control_stack.push_front(BlockStackEntry {
+        break_locals: BTreeSet::new(),
+    });
+    let (new_elements, mut input_locals, mut output_locals) =
+        process_elems(ctx, control_stack, BTreeSet::new(), elements);
+    let this_entry = control_stack.pop_front().unwrap();
 
-    match block_kind {
+    let (block_kind, carried_locals) = match block_kind {
         Kind::Block => {
-            process_block_block(ctx, local_types, control_stack, interface_type, elements)
+            // In a Block, breaks to it are outputs.
+            output_locals.extend(this_entry.break_locals.iter());
+            (Kind::Block, BTreeSet::new())
         }
-        Kind::Loop => process_loop_block(ctx, local_types, control_stack, interface_type, elements),
+        Kind::Loop => {
+            // In a Loop, breaks to it are inputs.
+            input_locals.extend(this_entry.break_locals.iter());
+            (Kind::Loop, this_entry.break_locals)
+        }
+    };
+
+    Block {
+        block_kind,
+        interface_type,
+        input_locals,
+        output_locals,
+        carried_locals,
+        elements: new_elements,
     }
-}
-
-fn process_block_block<'a, S: SystemCall>(
-    ctx: &ModuleContext<'a, S>,
-    local_types: &[ValType],
-    control_stack: &mut Vec<BlockStackEntry>,
-    interface_type: Rc<FuncType>,
-    elements: Vec<block_tree::Element<'a>>,
-) -> Element<'a> {
-    let elements = process_elems(ctx, elements);
-
-    todo!()
-}
-
-fn process_loop_block<'a, S: SystemCall>(
-    ctx: &ModuleContext<'a, S>,
-    local_types: &[ValType],
-    control_stack: &mut Vec<BlockStackEntry>,
-    interface_type: Rc<FuncType>,
-    elements: Vec<block_tree::Element<'a>>,
-) -> Element<'a> {
-    todo!()
 }
 
 fn process_elems<'a, S: SystemCall>(
     ctx: &ModuleContext<'a, S>,
+    control_stack: &mut VecDeque<BlockStackEntry>,
+    mut local_outputs: BTreeSet<u32>,
     elements: Vec<block_tree::Element<'a>>,
-) -> Vec<Element<'a>> {
+) -> (Vec<Element<'a>>, BTreeSet<u32>, BTreeSet<u32>) {
     let mut local_inputs = BTreeSet::new();
-    let mut local_outputs = BTreeSet::new();
 
     let mut block_can_end = true;
 
-    elements
+    let elements = elements
         .into_iter()
         .map(|elem| match elem {
+            block_tree::Element::Child {
+                block_kind,
+                interface_type,
+                elements,
+            } => {
+                let block = process_block(ctx, control_stack, block_kind, interface_type, elements);
+
+                local_inputs.extend(block.input_locals.iter());
+                local_outputs.extend(block.output_locals.iter());
+
+                Element::Block(block)
+            }
             block_tree::Element::Instruction(ins) => {
-                match ins {
+                match &ins {
                     // Local variables operations
                     Ins::WASMOp(Operator::LocalGet { local_index }) => {
-                        local_inputs.insert(local_index);
+                        local_inputs.insert(*local_index);
                     }
                     Ins::WASMOp(Operator::LocalSet { local_index })
                     | Ins::WASMOp(Operator::LocalTee { local_index }) => {
-                        local_outputs.insert(local_index);
+                        local_outputs.insert(*local_index);
                     }
 
                     // Break operations
                     Ins::WASMOp(Operator::Br { relative_depth }) => {
                         block_can_end = false;
-                        todo!()
+                        control_stack[*relative_depth as usize]
+                            .break_locals
+                            .extend(local_outputs.iter());
                     }
                     Ins::BrTable { targets } => {
                         block_can_end = false;
-                        todo!()
+                        for relative_depth in targets {
+                            control_stack[*relative_depth as usize]
+                                .break_locals
+                                .extend(local_outputs.iter());
+                        }
                     }
                     Ins::WASMOp(Operator::BrIf { relative_depth })
-                    | Ins::BrIfZero { relative_depth } => {}
+                    | Ins::BrIfZero { relative_depth } => {
+                        control_stack[*relative_depth as usize]
+                            .break_locals
+                            .extend(local_outputs.iter());
+                    }
 
                     // Unreachable operation
                     Ins::WASMOp(Operator::Unreachable) => {
@@ -162,32 +193,37 @@ fn process_elems<'a, S: SystemCall>(
                     Ins::WASMOp(_) => {}
                 }
 
-                ins.into()
+                Element::Ins(ins)
             }
-            block_tree::Element::Child {
-                block_kind,
-                interface_type,
-                elements,
-            } => process_block(ctx, &mut Vec::new(), block_kind, interface_type, elements),
         })
-        .collect()
+        .collect();
+
+    // This block ended with a break or unreachable instruction,
+    // so it has no fallthrough outputs.
+    if !block_can_end {
+        local_outputs.clear();
+    }
+
+    (elements, local_inputs, local_outputs)
 }
 
-struct BlockStackEntry {}
+struct BlockStackEntry {
+    break_locals: BTreeSet<u32>,
+}
+
+struct Block<'a> {
+    block_kind: Kind,
+    interface_type: Rc<FuncType>,
+    input_locals: BTreeSet<u32>,
+    output_locals: BTreeSet<u32>,
+    // Carried locals are a subset of the inputs that must be carried over to any breaks and output.
+    // This is used in loops, so that if a previous iteration changed some local, the new value must
+    // be carried through all the breaks and output in the future iterations.
+    carried_locals: BTreeSet<u32>,
+    elements: Vec<Element<'a>>,
+}
 
 pub enum Element<'a> {
     Ins(Ins<'a>),
-    Block {
-        block_kind: Kind,
-        interface_type: Rc<FuncType>,
-        input_locals: Vec<u32>,  // sorted
-        output_locals: Vec<u32>, // sorted
-        elements: Vec<Element<'a>>,
-    },
-}
-
-impl<'a> From<Ins<'a>> for Element<'a> {
-    fn from(instruction: Ins<'a>) -> Self {
-        Element::Ins(instruction)
-    }
+    Block(Block<'a>),
 }
