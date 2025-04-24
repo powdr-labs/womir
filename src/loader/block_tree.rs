@@ -1,0 +1,261 @@
+use std::{iter::Peekable, rc::Rc};
+
+use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader};
+
+use super::{ModuleContext, SystemCall};
+
+/// BlockTree is a simplified representation of a WASM function.
+///
+/// It is a tree of blocks, whose root is the Function block.
+///
+/// There are only two kinds of blocks: "Block" and "Loop". The if-else sequence:
+/// ```
+/// if
+///     <if_block>
+/// else
+///     <else_block>
+/// end
+/// ```
+///
+/// is turned into:
+/// ```
+/// block
+///     block
+///         br_if 0
+///         <else_block>
+///         br 1
+///     end
+///     <if_block>
+/// end
+/// ```
+///
+/// or, in the case else is empty:
+/// ```
+/// block
+///     br_if_zero 0
+///     <if_block>
+/// end
+/// ```
+///
+/// The block contents are simplified: `return` is turned into the appropriate
+/// `br`, and dead code after `br`, `br_table` and `unreachable` instructions is removed.
+pub struct BlockTree<'a> {
+    elements: Vec<Element<'a>>,
+}
+
+impl<'a> BlockTree<'a> {
+    pub fn load_function<S: SystemCall>(
+        ctx: &ModuleContext<S>,
+        op_reader: OperatorsReader<'a>,
+    ) -> wasmparser::Result<Self> {
+        let mut op_reader = op_reader.into_iter().peekable();
+
+        let (elements, ending) = parse_contents(ctx, &mut op_reader, 0, 0)?;
+        assert_eq!(ending, Ending::End);
+
+        Ok(Self { elements })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Ending {
+    End,
+    Else,
+}
+
+fn parse_contents<'a, S: SystemCall>(
+    ctx: &ModuleContext<S>,
+    op_reader: &mut Peekable<OperatorsIterator<'a>>,
+    stack_level: u32,
+    stack_offset: u32,
+) -> wasmparser::Result<(Vec<Element<'a>>, Ending)> {
+    let mut contents = Vec::new();
+    let ending = loop {
+        let op = op_reader.next().unwrap()?;
+        match op {
+            Operator::If { blockty } => {
+                // Parse the if contents of the if tranformation.
+                let (mut elements, ending) =
+                    parse_contents(ctx, op_reader, stack_level + 1, stack_offset)?;
+
+                let interface_type = get_type(ctx, blockty);
+
+                match ending {
+                    Ending::End => {
+                        // Emit the simpler version of the if without an else, using BrIfZero
+                        // Skips the if elements when condition is false.
+                        elements.insert(0, Element::BrIfZero { relative_depth: 0 });
+                    }
+                    Ending::Else => {
+                        // Read the else block. It will end up one level deeper than the original block,
+                        // so we need to add an offset to the relative depth of its inner breaks.
+                        let (mut else_elements, ending) =
+                            parse_contents(ctx, op_reader, stack_level + 2, stack_offset + 1)?;
+                        assert_eq!(ending, Ending::End);
+
+                        // The condition of the if is checked at the start of the inner block, skipping the
+                        // else elements in it if the condition is true.
+                        else_elements
+                            .insert(0, Element::WASMOp(Operator::BrIf { relative_depth: 0 }));
+
+                        // At the end of the else block, the if part must be skipped, so
+                        // we jump to the end of the outer block.
+                        else_elements.push(Element::WASMOp(Operator::Br { relative_depth: 1 }));
+
+                        // The inputs of the inner block are the same as the outer block, but it has
+                        // no proper output.
+                        let inner_type =
+                            Rc::new(FuncType::new(interface_type.params().iter().cloned(), []));
+
+                        // The first thing in the outer block is the inner block
+                        let inner_block = Element::Child {
+                            block_kind: Kind::Block,
+                            interface_type: inner_type,
+                            elements: else_elements,
+                        };
+                        elements.insert(0, inner_block);
+                    }
+                }
+
+                contents.push(Element::Child {
+                    block_kind: Kind::Block,
+                    interface_type: get_type(ctx, blockty),
+                    elements,
+                });
+            }
+            Operator::Else => {
+                // End of the current block with and Else
+                break Ending::Else;
+            }
+            Operator::End => {
+                // End of the current block with and End
+                break Ending::End;
+            }
+            Operator::Block { blockty } | Operator::Loop { blockty } => {
+                // Start of a new block
+                let block_type = match op {
+                    Operator::Block { .. } => Kind::Block,
+                    Operator::Loop { .. } => Kind::Loop,
+                    _ => unreachable!(),
+                };
+
+                let (block_contents, ending) =
+                    parse_contents(ctx, op_reader, stack_level + 1, stack_offset)?;
+                assert_eq!(ending, Ending::End);
+
+                contents.push(Element::Child {
+                    block_kind: block_type,
+                    interface_type: get_type(ctx, blockty),
+                    elements: block_contents,
+                });
+            }
+            Operator::Br { relative_depth } => {
+                contents.push(Element::WASMOp(Operator::Br {
+                    relative_depth: relative_depth + stack_offset,
+                }));
+                discard_dead_code(op_reader)?;
+            }
+            Operator::BrIf { relative_depth } => {
+                contents.push(Element::WASMOp(Operator::BrIf {
+                    relative_depth: relative_depth + stack_offset,
+                }));
+            }
+            Operator::BrTable { targets } => {
+                let targets = targets
+                    .targets()
+                    .map(|target| target.map(|t| t + stack_offset))
+                    .collect::<wasmparser::Result<Vec<u32>>>()?;
+                contents.push(Element::BrTable { targets });
+
+                discard_dead_code(op_reader)?;
+            }
+            Operator::Return => {
+                // Add the equivalent br operator to the contents
+                contents.push(Element::WASMOp(Operator::Br {
+                    relative_depth: stack_level,
+                }));
+                discard_dead_code(op_reader)?;
+            }
+            Operator::Unreachable => {
+                contents.push(Element::WASMOp(op));
+                discard_dead_code(op_reader)?;
+            }
+            op => {
+                // Add the operator to the contents
+                contents.push(Element::WASMOp(op));
+            }
+        }
+    };
+
+    Ok((contents, ending))
+}
+
+fn get_type<S: SystemCall>(ctx: &ModuleContext<S>, blockty: BlockType) -> Rc<FuncType> {
+    match blockty {
+        BlockType::Empty => Rc::new(FuncType::new([], [])),
+        BlockType::FuncType(idx) => ctx.get_func_type_rc(idx),
+        BlockType::Type(t) => Rc::new(FuncType::new([t], [])),
+    }
+}
+
+/// Some instructions unconditionally divert the control flow, leaving everithing between
+/// themselves and the end of the current block unreachable.
+///
+/// Call this function after processing such instructions to discard the unreachable code.
+fn discard_dead_code(op_reader: &mut Peekable<OperatorsIterator<'_>>) -> wasmparser::Result<()> {
+    // Discard unreachable code
+    let mut stack_count = 0;
+
+    // We do a peek loop so we leave Else and End operators in the iterator,
+    // to be handled by the caller.
+    while let Some(operator) = op_reader.peek() {
+        match operator {
+            Ok(Operator::Block { .. }) | Ok(Operator::Loop { .. }) | Ok(Operator::If { .. }) => {
+                stack_count += 1;
+            }
+            Ok(Operator::Else) => {
+                if stack_count == 0 {
+                    break;
+                }
+            }
+            Ok(Operator::End) => {
+                if stack_count == 0 {
+                    break;
+                }
+                stack_count -= 1;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Err(op_reader.next().unwrap().unwrap_err());
+            }
+        }
+        op_reader.next();
+    }
+
+    Ok(())
+}
+
+pub enum Kind {
+    Block,
+    Loop,
+}
+
+pub enum Element<'a> {
+    WASMOp(Operator<'a>),
+    /// BrTable needs to be transformed, so we can't use the original
+    /// Operator::BrTable.
+    BrTable {
+        targets: Vec<u32>,
+    },
+    /// BrIfZero is the the complementary to Operator::BrIf. I've added it
+    /// because there is a small optimization that can be done when emmiting
+    /// an if without an else.
+    BrIfZero {
+        relative_depth: u32,
+    },
+    Child {
+        block_kind: Kind,
+        interface_type: Rc<FuncType>,
+        elements: Vec<Element<'a>>,
+    },
+}

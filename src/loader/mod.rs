@@ -1,11 +1,14 @@
 mod allocate_locals;
+mod block_tree;
 mod dag;
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
+    rc::Rc,
     str::FromStr,
 };
 
+use block_tree::BlockTree;
 use dag::Dag;
 use wasmparser::{
     BlockType, CompositeInnerType, ElementItems, FuncType, MemoryType, Operator, OperatorsReader,
@@ -162,7 +165,7 @@ pub struct Program<'a, S: SystemCall> {
 }
 
 struct ModuleContext<'a, S: SystemCall> {
-    types: Vec<SubType>,
+    types: Vec<Rc<FuncType>>,
     func_types: Vec<u32>,
     imported_functions: Vec<S>,
     table_types: Vec<RefType>,
@@ -171,15 +174,14 @@ struct ModuleContext<'a, S: SystemCall> {
 
 impl<S: SystemCall> ModuleContext<'_, S> {
     fn get_type(&self, type_idx: u32) -> &FuncType {
-        let subtype = &self.types[type_idx as usize];
-        match &subtype.composite_type.inner {
-            CompositeInnerType::Func(f) => f,
-            _ => panic!("gc proposal not supported"),
-        }
+        &self.types[type_idx as usize]
     }
 
     fn get_func_type(&self, func_idx: u32) -> &FuncType {
         self.get_type(self.func_types[func_idx as usize])
+    }
+    fn get_func_type_rc(&self, func_idx: u32) -> Rc<FuncType> {
+        self.types[self.func_types[func_idx as usize] as usize].clone()
     }
 
     fn blockty_inputs(&self, blockty: BlockType) -> &[ValType] {
@@ -387,7 +389,10 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
                     let mut iter = rec_group?.into_types();
                     let ty = match (iter.next(), iter.next()) {
                         (Some(subtype), None) => match &subtype.composite_type.inner {
-                            CompositeInnerType::Func(_) => subtype,
+                            CompositeInnerType::Func(_) => match subtype.composite_type.inner {
+                                CompositeInnerType::Func(f) => f,
+                                _ => panic!("gc proposal not supported"),
+                            },
                             _ => {
                                 unsupported_feature_found = true;
                                 log::error!("unsupported types from GC proposal found");
@@ -404,7 +409,7 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
                         }
                     };
                     let type_idx = ctx.types.len() as u32;
-                    ctx.types.push(ty);
+                    ctx.types.push(Rc::new(ty));
                     log::debug!("Type read: {:?}", ctx.get_type(type_idx));
                 }
             }
@@ -672,7 +677,10 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
-                let definition = Dag::load_function(&ctx, ctx.p.functions.len() as u32, function)?;
+                // Loads the function to memory in the BlockTree format.
+                let block_tree = BlockTree::load_function(&ctx, function.get_operators_reader()?)?;
+
+                let definition = todo!(); //Dag::load_function(&ctx, ctx.p.functions.len() as u32, function)?;
                 ctx.p.functions.push(definition);
             }
             Payload::DataSection(section) => {

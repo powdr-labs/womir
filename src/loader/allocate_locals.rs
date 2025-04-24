@@ -805,7 +805,7 @@ impl<'a, S: SystemCall> StackTracker<'a, S> {
 
 impl<S: SystemCall> ModuleArity for StackTracker<'_, S> {
     fn sub_type_at(&self, type_idx: u32) -> Option<&SubType> {
-        self.module.types.get(type_idx as usize)
+        todo!() //self.module.types.get(type_idx as usize)
     }
 
     fn tag_type_arity(&self, _at: u32) -> Option<(u32, u32)> {
