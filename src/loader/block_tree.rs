@@ -1,8 +1,8 @@
-use std::{iter::Peekable, rc::Rc};
+use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
 
 use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader};
 
-use super::{Instruction, ModuleContext, SystemCall};
+use super::{Block, BlockKind, Element, Instruction, ModuleContext, SystemCall};
 
 /// BlockTree is a simplified representation of a WASM function.
 ///
@@ -116,20 +116,30 @@ fn parse_contents<'a, S: SystemCall>(
                             Rc::new(FuncType::new(interface_type.params().iter().cloned(), []));
 
                         // The first thing in the outer block is the inner block
-                        let inner_block = Element::Child {
-                            block_kind: Kind::Block,
+                        let inner_block = Block {
+                            block_kind: BlockKind::Block,
                             interface_type: inner_type,
                             elements: inner_elements,
-                        };
+                            input_locals: BTreeSet::new(),
+                            output_locals: BTreeSet::new(),
+                            carried_locals: BTreeSet::new(),
+                        }
+                        .into();
                         elements[0] = inner_block;
                     }
                 }
 
-                output_elements.push(Element::Child {
-                    block_kind: Kind::Block,
-                    interface_type: get_type(ctx, blockty),
-                    elements,
-                });
+                output_elements.push(
+                    Block {
+                        block_kind: BlockKind::Block,
+                        interface_type: get_type(ctx, blockty),
+                        elements,
+                        input_locals: BTreeSet::new(),
+                        output_locals: BTreeSet::new(),
+                        carried_locals: BTreeSet::new(),
+                    }
+                    .into(),
+                );
             }
             Operator::Else => {
                 // End of the current block with and Else
@@ -142,8 +152,8 @@ fn parse_contents<'a, S: SystemCall>(
             Operator::Block { blockty } | Operator::Loop { blockty } => {
                 // Start of a new block
                 let block_type = match op {
-                    Operator::Block { .. } => Kind::Block,
-                    Operator::Loop { .. } => Kind::Loop,
+                    Operator::Block { .. } => BlockKind::Block,
+                    Operator::Loop { .. } => BlockKind::Loop,
                     _ => unreachable!(),
                 };
 
@@ -157,11 +167,17 @@ fn parse_contents<'a, S: SystemCall>(
                 )?;
                 assert_eq!(ending, Ending::End);
 
-                output_elements.push(Element::Child {
-                    block_kind: block_type,
-                    interface_type: get_type(ctx, blockty),
-                    elements: block_contents,
-                });
+                output_elements.push(
+                    Block {
+                        block_kind: block_type,
+                        interface_type: get_type(ctx, blockty),
+                        elements: block_contents,
+                        input_locals: BTreeSet::new(),
+                        output_locals: BTreeSet::new(),
+                        carried_locals: BTreeSet::new(),
+                    }
+                    .into(),
+                );
             }
             Operator::Br { relative_depth } => {
                 output_elements.push(
@@ -256,24 +272,4 @@ fn discard_dead_code(op_reader: &mut Peekable<OperatorsIterator<'_>>) -> wasmpar
     }
 
     Ok(())
-}
-
-pub enum Kind {
-    Block,
-    Loop,
-}
-
-pub enum Element<'a> {
-    Instruction(Instruction<'a>),
-    Child {
-        block_kind: Kind,
-        interface_type: Rc<FuncType>,
-        elements: Vec<Element<'a>>,
-    },
-}
-
-impl<'a> From<Instruction<'a>> for Element<'a> {
-    fn from(instruction: Instruction<'a>) -> Self {
-        Element::Instruction(instruction)
-    }
 }

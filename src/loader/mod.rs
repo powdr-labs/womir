@@ -4,7 +4,7 @@ mod dag;
 mod locals_data_flow;
 
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     rc::Rc,
     str::FromStr,
 };
@@ -679,16 +679,15 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
+                let func_idx = ctx.p.functions.len() as u32;
+                let func_type = ctx.get_func_type(func_idx);
+                let locals_types = read_locals(func_type, function.get_locals_reader()?)?;
+
                 // Loads the function to memory in the BlockTree format.
                 let block_tree = BlockTree::load_function(&ctx, function.get_operators_reader()?)?;
 
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
-                let lifted_blocks = locals_data_flow::lift_data_flow(
-                    &ctx,
-                    ctx.p.functions.len() as u32,
-                    function.get_locals_reader()?,
-                    block_tree,
-                );
+                let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
                 let definition = todo!(); //Dag::load_function(&ctx, ctx.p.functions.len() as u32, function)?;
                 ctx.p.functions.push(definition);
@@ -812,6 +811,23 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
     Ok(ctx.p)
 }
 
+/// Reads the function arguments and the explicit locals declaration.
+fn read_locals<'a>(
+    func_type: &'a FuncType,
+    locals_reader: LocalsReader<'a>,
+) -> wasmparser::Result<Vec<ValType>> {
+    // The first locals are the function arguments.
+    let mut local_types = func_type.params().iter().map(|t| *t).collect_vec();
+
+    // The rest of the locals are explicitly defined local variables.
+    for local in locals_reader {
+        let (count, val_type) = local?;
+        local_types.extend((0..count).map(|_| val_type));
+    }
+
+    Ok(local_types)
+}
+
 enum Instruction<'a> {
     WASMOp(Operator<'a>),
     /// BrTable needs to be transformed, so we can't use the original
@@ -825,4 +841,40 @@ enum Instruction<'a> {
     BrIfZero {
         relative_depth: u32,
     },
+}
+
+enum BlockKind {
+    Block,
+    Loop,
+}
+
+struct Block<'a> {
+    block_kind: BlockKind,
+    interface_type: Rc<FuncType>,
+    elements: Vec<Element<'a>>,
+
+    input_locals: BTreeSet<u32>,
+    output_locals: BTreeSet<u32>,
+
+    // Carried locals are a subset of the inputs that must be carried over to any breaks and output.
+    // This is used when calculating locals data flow of loops: if a previous iteration changed some
+    // local, the new value must be carried through all the breaks and output in the future iterations.
+    carried_locals: BTreeSet<u32>,
+}
+
+enum Element<'a> {
+    Ins(Instruction<'a>),
+    Block(Block<'a>),
+}
+
+impl<'a> From<Instruction<'a>> for Element<'a> {
+    fn from(instruction: Instruction<'a>) -> Self {
+        Element::Ins(instruction)
+    }
+}
+
+impl<'a> From<Block<'a>> for Element<'a> {
+    fn from(block: Block<'a>) -> Self {
+        Element::Block(block)
+    }
 }
