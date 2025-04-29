@@ -145,9 +145,9 @@ impl InitialMemory {
     }
 }
 
-pub struct Program<'a, S: SystemCall> {
+pub struct Program<'a> {
     /// The functions defined in the module.
-    pub functions: Vec<Dag<'a, S>>,
+    pub functions: Vec<Dag<'a>>,
     /// The start function, if any.
     pub start_function: Option<u32>,
     /// The main function, if any.
@@ -171,7 +171,7 @@ struct ModuleContext<'a, S: SystemCall> {
     func_types: Vec<u32>,
     imported_functions: Vec<S>,
     table_types: Vec<RefType>,
-    p: Program<'a, S>,
+    p: Program<'a>,
 }
 
 impl<S: SystemCall> ModuleContext<'_, S> {
@@ -331,7 +331,7 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
     words
 }
 
-pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<S>> {
+pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
     let parser = Parser::new(0);
 
     let mut ctx = ModuleContext {
@@ -422,11 +422,11 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
                 // but this is not a very used feature in WASM and modules are usually
                 // self-contained.
                 //
-                // For now, the imports only deal with powdr provided functions.
+                // For now, the imports only deal with user provided functions.
                 for import in section {
                     let import = import?;
-                    if import.module == "powdr" {
-                        panic!("Only \"powdr\" module is available for imports");
+                    if import.module == "env" {
+                        panic!("Only \"env\" module is available for imports");
                     }
                     if let TypeRef::Func(type_idx) = import.ty {
                         // Lets see if the name is known
@@ -682,7 +682,7 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
 
                 let func_idx = ctx.p.functions.len() as u32;
                 let func_type = ctx.get_func_type(func_idx);
-                let locals_types = read_locals(func_type, function.get_locals_reader()?)?;
+                let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
 
                 // Loads the function to memory in the BlockTree format.
                 let block_tree = BlockTree::load_function(&ctx, function.get_operators_reader()?)?;
@@ -690,7 +690,7 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program<
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
                 let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
-                let definition = todo!(); //Dag::load_function(&ctx, ctx.p.functions.len() as u32, function)?;
+                let definition = Dag::new(func_type, &locals_types, lifted_blocks)?;
                 ctx.p.functions.push(definition);
             }
             Payload::DataSection(section) => {

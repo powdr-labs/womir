@@ -1,573 +1,481 @@
-use core::slice;
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
-    marker::PhantomData,
+    collections::{BTreeSet, HashMap, VecDeque},
     mem::MaybeUninit,
 };
 
 use itertools::Itertools;
-use wasmparser::{
-    BlockType, ContType, FuncType, FunctionBody, ModuleArity, Operator, OperatorsIterator, RefType,
-    SubType, ValType,
+use wasmparser::{FuncType, Operator as Op, RefType, ValType};
+
+use super::{
+    Block, BlockKind, Element, Instruction as Ins, ModuleContext, SystemCall,
+    locals_data_flow::LiftedBlockTree,
 };
 
-use super::{ModuleContext, SystemCall};
-
-enum Operation<'a> {
+pub enum Operation<'a> {
     Inputs,
-    WASMOp(Operator<'a>),
-    Block {
-        // TODO: This local_idx_to_input doesn't really belong in the final output,
-        // as it is used only to fixup the breaks. Find a better place to store it.
-        local_idx_to_input: BTreeMap<u32, u32>,
-        nodes: Vec<Node<'a>>,
-    },
-    Loop {
-        local_idx_to_input: BTreeMap<u32, u32>,
-        nodes: Vec<Node<'a>>,
-    },
-    // TODO: trasnform all the if ... else ... into block { block { br_if 0 ... bn 1 } ... },
-    // Then we don't need to handle the complicated IfElse block.
-    IfElse {
-        local_idx_to_input: BTreeMap<u32, u32>,
-        if_nodes: Vec<Node<'a>>,
-        else_nodes: Vec<Node<'a>>,
-    },
+    WASMOp(Op<'a>),
+    BrIfZero { relative_depth: u32 },
+    BrTable { targets: Vec<BrTableTarget> },
+    Block { kind: BlockKind, sub_dag: Dag<'a> },
+}
+
+pub struct BrTableTarget {
+    pub relative_depth: u32,
+    /// For each of the nodes inputs, this is the permutation of the inputs that
+    /// each break target will receive.
+    pub input_permutation: Vec<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct ValueOrigin {
-    node: usize,
-    output_idx: u32,
+pub struct ValueOrigin {
+    pub node: usize,
+    pub output_idx: u32,
 }
 
 pub struct Node<'a> {
-    operation: Operation<'a>,
-    inputs: Vec<ValueOrigin>,
-    output_types: Cow<'a, [ValType]>,
+    pub operation: Operation<'a>,
+    pub inputs: Vec<ValueOrigin>,
+    pub output_types: Vec<ValType>,
 }
 
-pub struct Dag<'a, S: SystemCall> {
-    _todo: PhantomData<&'a S>,
+pub struct Dag<'a> {
+    pub nodes: Vec<Node<'a>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BlockKind {
-    Block,
-    Loop,
-    If,
-    Else,
-}
-
-struct ReferencingBreak {
-    path: Vec<u32>,
-    /// Maps the local index to the value that it contained at the time of the break.
-    locals_written: BTreeMap<u32, ValueOrigin>,
-}
-
-struct Block {
-    blockty: BlockType,
-    block_kind: BlockKind,
-    /// As we traverse the program, we need to keep track of the breaks into this block,
-    /// so we can consolidate the inputs and outputs of the block.
-    breaks: Vec<ReferencingBreak>,
-}
-
-impl Block {
-    /// The expected stack arguments when breaking into this block.
-    /// Does not include the implict arguments given through the locals.
-    fn break_args<'a, S: SystemCall>(&self, ctx: &'a ModuleContext<'a, S>) -> Cow<'a, [ValType]> {
-        match self.block_kind {
-            BlockKind::Loop => match self.blockty {
-                // For loop, we need to return the inputs of the block.
-                BlockType::Empty | BlockType::Type(_) => Cow::Owned(Vec::new()),
-                BlockType::FuncType(f_idx) => {
-                    let func_type = ctx.get_func_type(f_idx);
-                    Cow::Borrowed(func_type.params())
-                }
-            },
-            BlockKind::Block | BlockKind::If | BlockKind::Else => match self.blockty {
-                // For block and if, we need to return the outputs of the block.
-                BlockType::Empty => Cow::Owned(Vec::new()),
-                BlockType::Type(ty) => Cow::Owned(vec![ty]),
-                BlockType::FuncType(f_idx) => {
-                    let func_type = ctx.get_func_type(f_idx);
-                    Cow::Borrowed(func_type.results())
-                }
-            },
-        }
-    }
-}
-
-struct StackTracker<'a, S: SystemCall> {
-    ctx: &'a ModuleContext<'a, S>,
-    control_stack: Vec<Block>,
-    dag_path: Vec<u32>,
-}
-
-impl<S: SystemCall> ModuleArity for StackTracker<'_, S> {
-    fn sub_type_at(&self, type_idx: u32) -> Option<&SubType> {
-        todo!() //self.ctx.types.get(type_idx as usize)
-    }
-
-    fn tag_type_arity(&self, _at: u32) -> Option<(u32, u32)> {
-        panic!("exception handling proposal not supported")
-    }
-
-    fn type_index_of_function(&self, function_idx: u32) -> Option<u32> {
-        self.ctx.func_types.get(function_idx as usize).copied()
-    }
-
-    fn func_type_of_cont_type(&self, _c: &ContType) -> Option<&FuncType> {
-        panic!("continuations proposal not supported")
-    }
-
-    fn sub_type_of_ref_type(&self, _rt: &RefType) -> Option<&SubType> {
-        panic!("gc proposal not supported")
-    }
-
-    fn control_stack_height(&self) -> u32 {
-        self.control_stack.len() as u32
-    }
-
-    fn label_block(&self, depth: u32) -> Option<(wasmparser::BlockType, wasmparser::FrameKind)> {
-        self.control_stack.get(depth as usize + 1).map(|frame| {
-            (
-                frame.blockty,
-                match frame.block_kind {
-                    BlockKind::Block => wasmparser::FrameKind::Block,
-                    BlockKind::Loop => wasmparser::FrameKind::Loop,
-                    BlockKind::If => wasmparser::FrameKind::If,
-                    BlockKind::Else => wasmparser::FrameKind::Else,
-                    _ => unreachable!(),
-                },
-            )
-        })
-    }
-}
-
-impl<'a, S: SystemCall> Dag<'a, S> {
-    pub fn load_function(
-        ctx: &ModuleContext<'_, S>,
-        func_idx: u32,
-        body: FunctionBody,
+impl<'a> Dag<'a> {
+    pub fn new(
+        func_type: &FuncType,
+        locals_types: &[ValType],
+        block_tree: LiftedBlockTree<'a>,
     ) -> wasmparser::Result<Self> {
         // Lets assemble a kind of directed graph, where the nodes are the operations that
         // can input and output values, and the edges are the values. It is directed in a
         // sense that variables have one origin and multiple destinations.
 
-        // We start by reading the input and local variables.
-        let func_type = ctx.get_func_type(func_idx);
-        let (mut nodes, mut locals) = read_locals(func_type, &body)?;
+        // Sanity check: the first locals are the function arguments.
+        assert_eq!(
+            func_type.params(),
+            &locals_types[..func_type.params().len()]
+        );
 
-        // Now we follow the instructions in the function body.
-        // For that we need to keep track of the stack and of which of our hypergraph edge is
-        // currently each local variable. When a local is assigned, it becames a new edge.
-        //
-        // It is a little tricky with blocks, because we only know if a local is either read or
-        // written after we have parsed the block. If a local is read, it becames a block input.
-        // If a local is written, it becames a block output.
-        let mut stack: Vec<ValueOrigin> = Vec::new();
+        let mut locals = Vec::with_capacity(locals_types.len());
 
-        let ctrl_stack = StackTracker {
-            ctx,
-            control_stack: Vec::new(),
-            dag_path: Vec::new(),
-        };
+        // For the function body, the inputs are given as locals:
+        locals.extend((0..func_type.params().len() as u32).map(|output_idx| {
+            Value::Defined(ValueOrigin {
+                node: 0,
+                output_idx,
+            })
+        }));
 
-        todo!()
+        // The rest of the locals starts as unused.
+        locals.extend(
+            (&locals_types[func_type.params().len()..])
+                .iter()
+                .copied()
+                .map(|val_type| Value::UnusedLocal { val_type }),
+        );
+
+        let mut block_stack = VecDeque::from([BreakArgs {
+            stack: func_type.results().to_vec(),
+            locals: BTreeSet::new(),
+        }]);
+
+        let nodes = build_dag(
+            locals_types,
+            func_type.params().to_vec(),
+            &mut block_stack,
+            Vec::new(),
+            locals,
+            block_tree.elements,
+            &get_local_or_default,
+        )?;
+
+        Ok(Dag { nodes })
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct LocalRole {
-    as_input: Option<u32>,
-    as_output: bool,
+struct BreakArgs {
+    stack: Vec<ValType>,
+    locals: BTreeSet<u32>,
 }
 
-/// Builds a DAG for a block of instructions.
-fn build_dag_for_block<'a, S: SystemCall>(
-    ctrl_stack: &mut StackTracker<'a, S>,
-    operators: &mut OperatorsIterator<'a>,
-    inputs: Cow<'a, [ValType]>,
+/// Follows the instructions sequence of a block to build the DAG.
+///
+/// For that we need to keep track of the stack and of which of our hypergraph edges is
+/// currently each local variable. When a local is assigned, it becames a new edge.
+fn build_dag<'a>(
     locals_types: &[ValType],
-) -> wasmparser::Result<(Vec<Node<'a>>, Vec<LocalRole>)> {
-    // We must track whether each local is an input and/or an output.
-    let mut locals_roles: Vec<LocalRole> = vec![Default::default(); locals_types.len()];
+    input_types: Vec<ValType>,
+    block_stack: &mut VecDeque<BreakArgs>,
+    mut stack: Vec<ValueOrigin>,
+    mut locals: Vec<Value>,
+    block_elements: Vec<Element<'a>>,
+    local_getter: &dyn Fn(&mut Vec<Node>, &mut [Value], u32) -> ValueOrigin,
+) -> wasmparser::Result<Vec<Node<'a>>> {
+    let mut nodes = Vec::new();
 
-    // We must track what each local is relative to the local DAG
-    let mut locals = locals_types
-        .iter()
-        .map(|val_type| Value::UnusedLocal {
-            val_type: *val_type,
-        })
-        .collect::<Vec<_>>();
-
-    // The first node in a block are the inputs, but we still don't know the complete
-    // picture, as locals may be read, which will make them inputs.
-    let num_inputs = inputs.len() as u32;
-    let mut nodes = vec![Node {
+    // The first node in a block are the inputs
+    nodes.push(Node {
         operation: Operation::Inputs,
         inputs: Vec::new(),
-        output_types: inputs,
-    }];
+        output_types: input_types,
+    });
 
-    // To follow the instructions in the block body, we need to keep track of the stack.
-    let mut stack: Vec<ValueOrigin> = (0..num_inputs)
-        .map(|output_idx| ValueOrigin {
-            node: 0,
-            output_idx,
-        })
-        .collect();
+    for elem in block_elements {
+        match elem {
+            // Most instructions creates a new node that consumes some inputs and produces
+            // some outputs. We will have special handlers for cases that are no so simple.
+            Element::Ins(inst) => match inst {
+                // First we handle the special stack and local manipulation instructions
+                // that don't create nodes. Instructions local.* and drop simply move
+                // around the references between the stack and the locals, and most of the
+                // time can be resolved statically.
+                Ins::WASMOp(Op::LocalGet { local_index }) => {
+                    // LocalGet simply pushes a local value to the stack, and it can be
+                    // resolved immediatelly without creating a new node.
 
-    while let Some(operator) = operators.next() {
-        let operator = operator?;
+                    // We may need to mark the local as an input, if it is not already.
+                    let value = local_getter(&mut nodes, &mut locals, local_index);
+                    stack.push(value);
+                }
+                Ins::WASMOp(Op::LocalSet { local_index }) => {
+                    // LocalSet pops a value from the stack and sets it to a local.
+                    locals[local_index as usize] = Value::Defined(stack.pop().unwrap());
+                }
+                Ins::WASMOp(Op::LocalTee { local_index }) => {
+                    // LocalTee copies the value from the stack to a local.
+                    locals[local_index as usize] = Value::Defined(stack.last().unwrap().clone());
+                }
+                Ins::WASMOp(Op::Drop) => {
+                    // Drop could be a node that consumes a value and produces nothing,
+                    // but since it has no side effects, we can just resolve it statically.
+                    stack.pop().unwrap();
+                }
 
-        // Most operators creates a new node that consumes some inputs and produces
-        // some outputs. We will handle here the special cases that are no so simple.
-        match operator {
-            // First we handle the special stack and local manipulation operators that
-            // don't create nodes. Instructions local.* and drop simply move around
-            // the references between the stack and the locals, and most of the time
-            // can be resolved statically.
-            Operator::LocalGet { local_index } => {
-                // LocalGet simply pushes a local value to the stack, and it can be
-                // resolved immediatelly without creating a new node.
+                // We now handle the break instructions. They are special because they
+                // take inputs both from the stack and from the locals, and to know
+                // which locals are inputs we need to look up at the block stack.
+                Ins::WASMOp(op @ Op::Br { relative_depth }) => {
+                    let target = &block_stack[relative_depth as usize];
 
-                // We may need to mark the local as an input, if it is not already.
-                let value = local_get(&mut nodes, &mut locals, &mut locals_roles, local_index);
-                stack.push(value);
-            }
-            Operator::LocalSet { local_index } => {
-                locals[local_index as usize] = Value::Defined(stack.pop().unwrap());
-                locals_roles[local_index as usize].as_output = true;
-            }
-            Operator::LocalTee { local_index } => {
-                locals[local_index as usize] = Value::Defined(stack.last().unwrap().clone());
-                locals_roles[local_index as usize].as_output = true;
-            }
-            Operator::Drop => {
-                // Drop could be a node that consumes a value and produces nothing,
-                // but since it has no side effects, we can just resolve it statically.
-                stack.pop().unwrap();
-            }
-            // We now handle the break and return operators. They generate data consuming
-            // nodes, but breaks are very special in that we don't fully know the locals
-            // that migh become outputs until we finish parsing the block, so we need to keep
-            // track of all the breaks, pending
-            Operator::Return => {
-                todo!()
-            }
-            Operator::Br { relative_depth } => {
-                if relative_depth as usize == ctrl_stack.control_stack.len() {
-                    // This is a return
-                    todo!()
-                } else {
-                    // This is a inner block break
-                    let target_block = ctrl_stack
-                        .control_stack
-                        .get_mut(relative_depth as usize)
+                    // The stack part of the input
+                    let mut inputs = stack.split_off(stack.len() - target.stack.len());
+                    assert!(types_matches(&nodes, &target.stack, &inputs));
+
+                    // The locals part of the input
+                    for local_index in target.locals.iter() {
+                        let value = local_getter(&mut nodes, &mut locals, *local_index);
+                        inputs.push(value);
+                    }
+
+                    nodes.push(Node {
+                        operation: Operation::WASMOp(op),
+                        inputs,
+                        output_types: Vec::new(),
+                    });
+                }
+                Ins::WASMOp(Op::BrIf { relative_depth }) | Ins::BrIfZero { relative_depth } => {
+                    let operation = match inst {
+                        Ins::WASMOp(Op::BrIf { .. }) => {
+                            Operation::WASMOp(Op::BrIf { relative_depth })
+                        }
+                        Ins::BrIfZero { .. } => Operation::BrIfZero { relative_depth },
+                        _ => unreachable!(),
+                    };
+
+                    let target = &block_stack[relative_depth as usize];
+
+                    // Pop the condition to reinsert it after the locals:
+                    let cond = stack.pop().unwrap();
+                    // Assert the condition type is I32.
+                    assert_eq!(
+                        nodes[cond.node].output_types[cond.output_idx as usize],
+                        ValType::I32
+                    );
+
+                    // The stack part of the input
+                    let mut inputs = stack.split_off(stack.len() - target.stack.len());
+                    assert!(types_matches(&nodes, &target.stack, &inputs));
+
+                    // The locals part of the input
+                    for local_index in target.locals.iter() {
+                        let value = local_getter(&mut nodes, &mut locals, *local_index);
+                        inputs.push(value);
+                    }
+
+                    // Push the condition back to the inputs
+                    inputs.push(cond);
+
+                    nodes.push(Node {
+                        operation,
+                        inputs,
+                        output_types: Vec::new(),
+                    });
+                }
+                Ins::BrTable { targets } => {
+                    // The stack input for the br_table is the choice value, plus the
+                    // stack inputs for the largest target.
+
+                    // Take the choice to insert it back later.
+                    let choice = stack.pop().unwrap();
+                    // Assert the choice type is I32.
+                    assert_eq!(
+                        nodes[choice.node].output_types[choice.output_idx as usize],
+                        ValType::I32
+                    );
+
+                    // Calculate how much of the stack to take
+                    let largest_stack = targets
+                        .iter()
+                        .map(|target| &block_stack[*target as usize].stack)
+                        .max_by_key(|t| t.len())
                         .unwrap();
 
-                    let expected_inputs = target_block.break_args(ctrl_stack.ctx);
-                    assert!(stack.len() >= expected_inputs.len());
-                    let inputs = stack.split_off(stack.len() - expected_inputs.len());
-                    assert!(types_matches(&nodes, &expected_inputs, &inputs));
+                    // The stack part of the input
+                    let mut inputs = stack.split_off(stack.len() - largest_stack.len());
+                    assert!(types_matches(&nodes, largest_stack, &inputs));
 
-                    let node_idx = nodes.len();
+                    // The locals part of the input is the union of the locals inputs
+                    // for all the targets.
+                    let mut locals_inputs = BTreeSet::new();
+                    for target in targets.iter() {
+                        let target = &block_stack[*target as usize];
+                        locals_inputs.extend(target.locals.iter().copied());
+                    }
+
+                    // The locals part of the input
+                    let mut locals_inputs_map = HashMap::new();
+                    for local_index in locals_inputs.iter() {
+                        locals_inputs_map.insert(*local_index, inputs.len() as u32);
+
+                        let value = local_getter(&mut nodes, &mut locals, *local_index);
+                        inputs.push(value);
+                    }
+
+                    // Push the choice back to the inputs
+                    inputs.push(choice);
+
+                    // Only a subset of the inputs are passed to each target.
+                    // We need to calculate the permutation of the inputs for each target.
+                    let targets = targets
+                        .into_iter()
+                        .map(|relative_depth| {
+                            let target = &block_stack[relative_depth as usize];
+                            let mut input_permutation = Vec::new();
+
+                            // The stack part of the input
+                            for i in 0..target.stack.len() {
+                                let input_idx = largest_stack.len() - target.stack.len() + i;
+                                input_permutation.push(input_idx as u32);
+                            }
+
+                            // The locals part of the input
+                            for local_index in target.locals.iter() {
+                                let input_idx = locals_inputs_map[local_index];
+                                input_permutation.push(input_idx);
+                            }
+
+                            BrTableTarget {
+                                relative_depth,
+                                input_permutation,
+                            }
+                        })
+                        .collect_vec();
+
                     nodes.push(Node {
-                        operation: Operation::WASMOp(operator),
-                        // These inputs are not completely resolved yet. They will be
-                        // resolved when we finish parsing the block they refer to.
-                        // We will include the outputs from locals that were written
-                        // at every break to this block.
+                        operation: Operation::BrTable { targets },
                         inputs,
-                        output_types: Cow::Owned(Vec::new()),
-                    });
-
-                    // Save the path to the node in the breaks list.
-                    // The path is relative to the block that is being broken.
-                    let mut path = ctrl_stack.dag_path
-                        [(ctrl_stack.dag_path.len() - relative_depth as usize)..]
-                        .to_vec();
-                    path.push(node_idx as u32);
-                    target_block.breaks.push(ReferencingBreak {
-                        path,
-                        locals_written: locals_roles
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, role)| {
-                                if role.as_output {
-                                    let Value::Defined(local) = locals[i] else {
-                                        unreachable!()
-                                    };
-                                    Some((i as u32, local))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect(),
+                        output_types: Vec::new(),
                     });
                 }
-            }
-            Operator::BrIf { relative_depth } => {
-                todo!()
-            }
-            Operator::BrTable { targets } => {
-                todo!()
-            }
-            // Blocks are the last set of special operators. They call this function
-            // recursively to build the DAG for the block, and then must use its control stack output
-            // to compute the final inputs and outputs of the block, and ajust the referenced breaks.
-            Operator::Block { blockty } => {
-                // We need to push the block to the control stack, and then call this function
-                // recursively to build the DAG for the block.
-                ctrl_stack.control_stack.push(Block {
-                    blockty,
-                    block_kind: BlockKind::Block,
-                    breaks: Vec::new(),
-                });
-                ctrl_stack.dag_path.push(nodes.len() as u32);
-
-                let stack_inputs = match blockty {
-                    BlockType::Empty | BlockType::Type(_) => Cow::Owned(Vec::new()),
-                    BlockType::FuncType(f_idx) => {
-                        let func_type = ctrl_stack.ctx.get_func_type(f_idx);
-                        Cow::Borrowed(func_type.params())
-                    }
-                };
-                assert!(stack_inputs.len() <= stack.len());
-                let mut inputs = stack.split_off(stack.len() - stack_inputs.len());
-                assert!(types_matches(&nodes, &stack_inputs, &inputs));
-
-                let (mut block_nodes, block_local_roles) =
-                    build_dag_for_block(ctrl_stack, operators, stack_inputs, locals_types)?;
-
-                // Undo the pushes to the control stack
-                let ctrl_block = ctrl_stack.control_stack.pop().unwrap();
-                ctrl_stack.dag_path.pop();
-
-                // Before creating a node for this block, we need to calculate which locals
-                // are inputs/outputs.
-
-                // For a block, local inputs are whatever returned:
-                let mut local_idx_to_input = BTreeMap::new();
-                let local_inputs: std::vec::IntoIter<(u32, u32)> = block_local_roles
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(local_index, role)| {
-                        if let Some(input_index) = role.as_input {
-                            local_idx_to_input.insert(local_index as u32, input_index);
-                            Some((input_index, local_index as u32))
-                        } else {
-                            None
-                        }
-                    })
-                    .sorted();
-
-                // Extend the inputs with the locals that were found to be inputs.
-                for (input_index, local_index) in local_inputs {
-                    assert_eq!(input_index, inputs.len() as u32);
-                    inputs.push(local_get(
-                        &mut nodes,
-                        &mut locals,
-                        &mut locals_roles,
-                        local_index,
-                    ));
+                // The rest of the instructions are normal operations that creates a new node
+                // that consumes some inputs and produces some outputs.
+                Ins::WASMOp(op) => {
+                    todo!()
                 }
+            },
+            Element::Block(block) => {
+                // Blocks are not much different from a normal instruction. But instead of
+                // taking and returning values just from the stack, they take and return
+                // values from the locals and the stack.
 
-                // For a block, local outputs are the merge of the outputs in all the breaks
-                let mut local_outputs = BTreeSet::new();
-                for br in ctrl_block.breaks.iter() {
-                    for local_index in br.locals_written.keys() {
-                        local_outputs.insert(*local_index);
-                    }
-                }
+                // Block inputs are the concatenation of the stack inputs and the locals inputs.
+                let mut inputs =
+                    stack.split_off(stack.len() - block.interface_type.params().len() as usize);
 
-                let mut output_types = match blockty {
-                    BlockType::Empty => Vec::new(),
-                    BlockType::Type(ty) => vec![ty],
-                    BlockType::FuncType(f_idx) => {
-                        let func_type = ctrl_stack.ctx.get_func_type(f_idx);
-                        func_type.results().to_vec()
-                    }
-                };
+                // Sanity check the types
+                assert!(types_matches(
+                    &nodes,
+                    block.interface_type.params(),
+                    &inputs
+                ));
 
-                // Push the stack outputs
-                for i in 0..output_types.len() {
-                    stack.push(ValueOrigin {
-                        node: nodes.len(),
-                        output_idx: i as u32,
-                    })
-                }
+                inputs.extend(
+                    block
+                        .input_locals
+                        .iter()
+                        .map(|local_idx| local_getter(&mut nodes, &mut locals, *local_idx)),
+                );
 
-                // Extend the outputs with the locals that were found to be outputs.
-                for idx in local_outputs.iter() {
-                    output_types.push(locals_types[*idx as usize]);
+                // Of the outputs, the first ones goes to the stack.
+                let node_idx = nodes.len();
+                let stack_results_len = block.interface_type.results().len() as u32;
+                stack.extend((0..stack_results_len).map(|output_idx| ValueOrigin {
+                    node: node_idx,
+                    output_idx,
+                }));
 
-                    // Also set the local with the value of the output.
-                    locals[*idx as usize] = Value::Defined(ValueOrigin {
-                        node: nodes.len(),
-                        output_idx: (output_types.len() - 1) as u32,
+                // The rest of the outputs goes to the locals.
+                for (i, output_local) in block.output_locals.iter().enumerate() {
+                    locals[*output_local as usize] = Value::Defined(ValueOrigin {
+                        node: node_idx,
+                        output_idx: (i as u32 + stack_results_len),
                     });
-                    locals_roles[*idx as usize].as_output = true;
                 }
 
-                let mut node = Node {
-                    operation: Operation::Block {
-                        nodes: block_nodes,
-                        local_idx_to_input,
-                    },
+                // Build the DAG for the block and push it
+                nodes.push(build_dag_for_block2(
+                    locals_types,
                     inputs,
-                    output_types: Cow::Owned(output_types),
-                };
-
-                // Fixup the breaks to include all the locals that must be output
-                for br in ctrl_block.breaks {
-                    fixup_break(&mut node, &local_outputs, &locals_types, br);
-                }
-
-                nodes.push(node);
+                    block_stack,
+                    block,
+                )?);
             }
-            _ => todo!(),
         }
     }
 
-    Ok((nodes, locals_roles))
+    Ok(nodes)
 }
 
-fn fixup_break(
-    toplevel_node: &mut Node,
-    local_outputs: &BTreeSet<u32>,
+fn build_dag_for_block2<'a>(
     locals_types: &[ValType],
-    br: ReferencingBreak,
-) {
-    // Find out what local inputs we will need.
-    let new_inputs = local_outputs
+    inputs: Vec<ValueOrigin>,
+    block_stack: &mut VecDeque<BreakArgs>,
+    block: Block<'a>,
+) -> wasmparser::Result<Node<'a>> {
+    let Block {
+        block_kind,
+        interface_type,
+        elements,
+
+        input_locals,
+        output_locals,
+        ..
+    } = block;
+
+    // For a block, the inputs are given in a mix between the stack and the locals.
+    // We place the stack inputs first on the new node:
+    let mut input_types = interface_type.params().to_vec();
+
+    // We place the locals inputs last:
+    let mut local_idx_to_input = HashMap::new();
+    for local_idx in input_locals.iter() {
+        local_idx_to_input.insert(*local_idx as u32, input_types.len() as u32);
+        input_types.push(locals_types[*local_idx as usize]);
+    }
+
+    // The stack inputs are the first elements in the stack.
+    let stack = interface_type
+        .params()
         .iter()
-        .filter_map(|local_index| {
-            (!br.locals_written.contains_key(local_index)).then(|| {
-                // The local was not known as an output at parse time, which means we
-                // will have to forward it from the block inputs.
-                *local_index
-            })
+        .enumerate()
+        .map(|(i, _)| ValueOrigin {
+            node: 0,
+            output_idx: i as u32,
         })
         .collect_vec();
 
-    // Ensure the needed local inputs are available all the way to the toplevel node.
-    ensure_local_is_input(toplevel_node, without_last(&br.path), new_inputs);
-
-    // Get the break node that is missing the outputs from the locals.
-    let (break_node, local_inputs_map) = get_nodes_from_path(toplevel_node, &br.path);
-
-    // Adds the extra inputs to the break node.
-    for local_index in local_outputs.iter() {
-        // The outputs registered at the time of the parsing
-        // are a subset of the outputs that we need to add.
-        let value = match br.locals_written.get(local_index) {
-            Some(value) => *value,
-            None => {
-                // The output was not known at the time, so we just forward the
-                // unmodified local from the block inputs.
-
-                // By this point, we already ensured the local is a block input.
-                let input_idx = local_inputs_map[local_index];
-
-                ValueOrigin {
+    // Locals that are inputs points to the first node in the block.
+    let locals = locals_types
+        .iter()
+        .enumerate()
+        .map(|(local_idx, val_type)| {
+            if input_locals.contains(&(local_idx as u32)) {
+                Value::Defined(ValueOrigin {
                     node: 0,
-                    output_idx: input_idx,
-                }
+                    output_idx: local_idx_to_input[&(local_idx as u32)],
+                })
+            } else {
+                let val_type = *val_type;
+                Value::UnusedLocal { val_type }
             }
-        };
+        })
+        .collect_vec();
 
-        break_node.inputs.push(value);
-    }
+    // Output types are the concatenation of the stack outputs and the locals outputs.
+    let mut output_types = interface_type.results().to_vec();
+    output_types.extend(
+        output_locals
+            .iter()
+            .map(|local_idx| locals_types[*local_idx as usize]),
+    );
+
+    // What types are expected at a break depends wether this is a block or a loop.
+    block_stack.push_front(match block_kind {
+        BlockKind::Block => BreakArgs {
+            stack: interface_type.results().to_vec(),
+            locals: output_locals,
+        },
+        BlockKind::Loop => BreakArgs {
+            stack: interface_type.params().to_vec(),
+            locals: input_locals,
+        },
+    });
+
+    let nodes = build_dag(
+        locals_types,
+        input_types,
+        block_stack,
+        stack,
+        locals,
+        elements,
+        &get_local_or_panic,
+    )?;
+
+    block_stack.pop_front();
+
+    Ok(Node {
+        operation: Operation::Block {
+            kind: block_kind,
+            sub_dag: Dag { nodes },
+        },
+        inputs,
+        output_types,
+    })
 }
 
-fn without_last<T>(slice: &[T]) -> &[T] {
-    let len = slice.len();
-    &slice[..len - 1]
-}
-
-fn ensure_local_is_input<'a, 'b>(
-    node: &'a mut Node<'b>,
-    path: &[u32],
-    required_inputs: Vec<u32>,
-) -> u32 {
-    todo!()
-}
-
-fn get_nodes_from_path<'a, 'b, 'ret>(
-    mut node: &'a mut Node<'b>,
-    path: &[u32],
-) -> (&'ret mut Node<'b>, &'ret mut BTreeMap<u32, u32>)
-where
-    'a: 'ret,
-    'b: 'ret,
-{
-    let mut path_iter = path.iter();
-
-    // We know path has at least one element.
-    let mut node_idx = *path_iter.next().unwrap();
-    loop {
-        let (local_inputs_map, nodes) = match &mut node.operation {
-            Operation::Block {
-                local_idx_to_input,
-                nodes,
-            }
-            | Operation::Loop {
-                local_idx_to_input,
-                nodes,
-            } => (local_idx_to_input, nodes),
-
-            Operation::IfElse {
-                local_idx_to_input,
-                if_nodes,
-                else_nodes,
-            } => {
-                // Consume one extra path element to choose branch
-                let branch = *path_iter.next().unwrap();
-                (
-                    local_idx_to_input,
-                    match branch {
-                        0 => if_nodes,
-                        1 => else_nodes,
-                        _ => unreachable!(),
-                    },
-                )
-            }
-            _ => unreachable!(),
-        };
-
-        node = &mut nodes[node_idx as usize];
-        if let Some(next_idx) = path_iter.next() {
-            node_idx = *next_idx;
-        } else {
-            return (node, local_inputs_map);
-        }
-    }
-}
-
-fn local_get(
-    nodes: &mut [Node],
+fn get_local_or_panic(
+    _nodes: &mut Vec<Node>,
     locals: &mut [Value],
-    locals_roles: &mut [LocalRole],
+    local_index: u32,
+) -> ValueOrigin {
+    let local = &mut locals[local_index as usize];
+    match local {
+        Value::UnusedLocal { .. } => panic!("Local {local_index} should be defined"),
+        Value::Defined(value) => *value,
+    }
+}
+
+fn get_local_or_default(
+    nodes: &mut Vec<Node>,
+    locals: &mut [Value],
     local_index: u32,
 ) -> ValueOrigin {
     let local = &mut locals[local_index as usize];
     match local {
         Value::UnusedLocal { val_type } => {
-            // We are reading a value from an unused local, we need mark it as an input.
-            let block_inputs = &mut nodes[0].output_types;
-            let output_idx = block_inputs.len() as u32;
-            block_inputs.to_mut().push(*val_type);
-            locals_roles[local_index as usize].as_input = Some(output_idx);
+            let node_idx = nodes.len();
 
-            // The local is now an input, we need to reference it.
+            nodes.push(Node {
+                operation: default_const_for_type(*val_type),
+                inputs: Vec::new(),
+                output_types: vec![*val_type],
+            });
+
             let value = ValueOrigin {
-                node: 0,
-                output_idx,
+                node: node_idx,
+                output_idx: 0,
             };
 
             *local = Value::Defined(value);
@@ -578,6 +486,9 @@ fn local_get(
 }
 
 fn types_matches(nodes: &[Node], expected_types: &[ValType], inputs: &[ValueOrigin]) -> bool {
+    if inputs.len() != expected_types.len() {
+        return false;
+    }
     for (input, expected_type) in inputs.iter().zip(expected_types.iter()) {
         let node = &nodes[input.node];
         if node.output_types[input.output_idx as usize] != *expected_type {
@@ -593,58 +504,290 @@ enum Value {
     Defined(ValueOrigin),
 }
 
-/// Reads the function arguments and the explicit locals declaration.
-fn read_locals<'a>(
-    func_type: &'a FuncType,
-    body: &FunctionBody,
-) -> wasmparser::Result<(Vec<Node<'a>>, Vec<Value>)> {
-    // The locals are the function arguments and the explicit locals declaration.
-
-    // Function arguments originates from the special FunctionArgs node.
-    let num_args = func_type.params().len() as u32;
-    let args = Node {
-        operation: Operation::Inputs,
-        inputs: Vec::new(),
-        output_types: Cow::Borrowed(func_type.params()),
-    };
-
-    let mut locals: Vec<Value> = (0..num_args as u32)
-        .map(|output_idx| {
-            Value::Defined(ValueOrigin {
-                node: 0,
-                output_idx,
-            })
-        })
-        .collect();
-
-    let nodes = vec![args];
-
-    // Explicit locals are not materialized until used.
-    for local in body.get_locals_reader()? {
-        let (count, val_type) = local?;
-        for _ in 0..count {
-            locals.push(Value::UnusedLocal { val_type });
-        }
-    }
-
-    Ok((nodes, locals))
-}
-
 /// Returns a constant with the default value for the given type.
 /// This is used to materialize the locals that are read before being written.
 fn default_const_for_type(value_type: ValType) -> Operation<'static> {
     match value_type {
-        ValType::I32 => Operation::WASMOp(Operator::I32Const { value: 0 }),
-        ValType::I64 => Operation::WASMOp(Operator::I64Const { value: 0 }),
-        ValType::F32 => Operation::WASMOp(Operator::F32Const { value: 0.0.into() }),
-        ValType::F64 => Operation::WASMOp(Operator::F64Const { value: 0.0.into() }),
-        ValType::V128 => Operation::WASMOp(Operator::V128Const {
+        ValType::I32 => Operation::WASMOp(Op::I32Const { value: 0 }),
+        ValType::I64 => Operation::WASMOp(Op::I64Const { value: 0 }),
+        ValType::F32 => Operation::WASMOp(Op::F32Const { value: 0.0.into() }),
+        ValType::F64 => Operation::WASMOp(Op::F64Const { value: 0.0.into() }),
+        ValType::V128 => Operation::WASMOp(Op::V128Const {
             // Apparently there is no way to instantiate a V128 value.
             // TODO: Fix this when issue is resolved: https://github.com/bytecodealliance/wasm-tools/issues/2101
             value: unsafe { MaybeUninit::zeroed().assume_init() },
         }),
-        ValType::Ref(ref_type) => Operation::WASMOp(Operator::RefNull {
+        ValType::Ref(ref_type) => Operation::WASMOp(Op::RefNull {
             hty: ref_type.heap_type(),
         }),
+    }
+}
+
+struct StackTracker<'a, 'b, S: SystemCall> {
+    module: &'b ModuleContext<'a, S>,
+    nodes: Vec<Node<'a>>,
+    stack: Vec<ValueOrigin>,
+}
+
+impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
+    fn stack_type(&self, idx: usize) -> ValType {
+        let val_type = &self.stack[idx];
+        let node = &self.nodes[val_type.node];
+        node.output_types[val_type.output_idx as usize]
+    }
+
+    /// Returns the list of input types and output types of an operator.
+    fn get_operator_type(&self, op: &Op) -> Option<(Vec<ValType>, Option<ValType>)> {
+        let ty = match op {
+            // # Numeric instructions
+            // ## const
+            Op::I32Const { .. } => (vec![], Some(ValType::I32)),
+            Op::I64Const { .. } => (vec![], Some(ValType::I64)),
+            Op::F32Const { .. } => (vec![], Some(ValType::F32)),
+            Op::F64Const { .. } => (vec![], Some(ValType::F64)),
+            // ## unop
+            Op::I32Clz | Op::I32Ctz | Op::I32Popcnt | Op::I32Extend8S | Op::I32Extend16S => {
+                (vec![ValType::I32], Some(ValType::I32))
+            }
+            Op::I64Clz
+            | Op::I64Ctz
+            | Op::I64Popcnt
+            | Op::I64Extend8S
+            | Op::I64Extend16S
+            | Op::I64Extend32S => (vec![ValType::I64], Some(ValType::I64)),
+            Op::F32Abs
+            | Op::F32Neg
+            | Op::F32Sqrt
+            | Op::F32Ceil
+            | Op::F32Floor
+            | Op::F32Trunc
+            | Op::F32Nearest => (vec![ValType::F32], Some(ValType::F32)),
+            Op::F64Abs
+            | Op::F64Neg
+            | Op::F64Sqrt
+            | Op::F64Ceil
+            | Op::F64Floor
+            | Op::F64Trunc
+            | Op::F64Nearest => (vec![ValType::F64], Some(ValType::F64)),
+            // ## binop
+            Op::I32Add
+            | Op::I32Sub
+            | Op::I32Mul
+            | Op::I32DivU
+            | Op::I32DivS
+            | Op::I32RemU
+            | Op::I32RemS
+            | Op::I32And
+            | Op::I32Or
+            | Op::I32Xor
+            | Op::I32Shl
+            | Op::I32ShrU
+            | Op::I32ShrS
+            | Op::I32Rotl
+            | Op::I32Rotr => (vec![ValType::I32, ValType::I32], Some(ValType::I32)),
+            Op::I64Add
+            | Op::I64Sub
+            | Op::I64Mul
+            | Op::I64DivU
+            | Op::I64DivS
+            | Op::I64RemU
+            | Op::I64RemS
+            | Op::I64And
+            | Op::I64Or
+            | Op::I64Xor
+            | Op::I64Shl
+            | Op::I64ShrU
+            | Op::I64ShrS
+            | Op::I64Rotl
+            | Op::I64Rotr => (vec![ValType::I64, ValType::I64], Some(ValType::I64)),
+            Op::F32Add
+            | Op::F32Sub
+            | Op::F32Mul
+            | Op::F32Div
+            | Op::F32Min
+            | Op::F32Max
+            | Op::F32Copysign => (vec![ValType::F32, ValType::F32], Some(ValType::F32)),
+            Op::F64Add
+            | Op::F64Sub
+            | Op::F64Mul
+            | Op::F64Div
+            | Op::F64Min
+            | Op::F64Max
+            | Op::F64Copysign => (vec![ValType::F64, ValType::F64], Some(ValType::F64)),
+            // ## testop
+            Op::I32Eqz => (vec![ValType::I32], Some(ValType::I32)),
+            Op::I64Eqz => (vec![ValType::I64], Some(ValType::I32)),
+            // ## relop
+            Op::I32Eq
+            | Op::I32Ne
+            | Op::I32LtU
+            | Op::I32LtS
+            | Op::I32GtU
+            | Op::I32GtS
+            | Op::I32LeU
+            | Op::I32LeS
+            | Op::I32GeU
+            | Op::I32GeS => (vec![ValType::I32, ValType::I32], Some(ValType::I32)),
+            Op::I64Eq
+            | Op::I64Ne
+            | Op::I64LtU
+            | Op::I64LtS
+            | Op::I64GtU
+            | Op::I64GtS
+            | Op::I64LeU
+            | Op::I64LeS
+            | Op::I64GeU
+            | Op::I64GeS => (vec![ValType::I64, ValType::I64], Some(ValType::I32)),
+            Op::F32Eq | Op::F32Ne | Op::F32Lt | Op::F32Gt | Op::F32Le | Op::F32Ge => {
+                (vec![ValType::F32, ValType::F32], Some(ValType::I32))
+            }
+            // ## cvtop
+            Op::I32WrapI64 => (vec![ValType::I64], Some(ValType::I32)),
+            Op::I64ExtendI32U | Op::I64ExtendI32S => (vec![ValType::I32], Some(ValType::I64)),
+            Op::I32TruncF32U
+            | Op::I32TruncF32S
+            | Op::I32TruncSatF32U
+            | Op::I32TruncSatF32S
+            | Op::I32ReinterpretF32 => (vec![ValType::F32], Some(ValType::I32)),
+            Op::I64TruncF32U | Op::I64TruncF32S | Op::I64TruncSatF32U | Op::I64TruncSatF32S => {
+                (vec![ValType::F32], Some(ValType::I64))
+            }
+            Op::I32TruncF64U | Op::I32TruncF64S | Op::I32TruncSatF64U | Op::I32TruncSatF64S => {
+                (vec![ValType::F64], Some(ValType::I32))
+            }
+            Op::I64TruncF64U
+            | Op::I64TruncF64S
+            | Op::I64TruncSatF64U
+            | Op::I64TruncSatF64S
+            | Op::I64ReinterpretF64 => (vec![ValType::F64], Some(ValType::I64)),
+            Op::F32DemoteF64 => (vec![ValType::F64], Some(ValType::F32)),
+            Op::F64PromoteF32 => (vec![ValType::F32], Some(ValType::F64)),
+            Op::F32ConvertI32U | Op::F32ConvertI32S | Op::F32ReinterpretI32 => {
+                (vec![ValType::I32], Some(ValType::F32))
+            }
+            Op::F64ConvertI32U | Op::F64ConvertI32S => (vec![ValType::I32], Some(ValType::F64)),
+            Op::F32ConvertI64U | Op::F32ConvertI64S => (vec![ValType::I64], Some(ValType::F32)),
+            Op::F64ConvertI64U | Op::F64ConvertI64S | Op::F64ReinterpretI64 => {
+                (vec![ValType::I64], Some(ValType::F64))
+            }
+
+            // # Reference instructions
+            Op::RefNull { hty } => (
+                vec![],
+                Some(ValType::Ref(RefType::new(true, *hty).unwrap())),
+            ),
+            Op::RefIsNull => {
+                let ValType::Ref(ref_type) = self.stack_type(self.stack.len() - 1) else {
+                    panic!("ref.is_null expects a reference type")
+                };
+                assert!(ref_type.is_func_ref() || ref_type.is_extern_ref());
+                (vec![ValType::Ref(ref_type)], Some(ValType::I32))
+            }
+            Op::RefFunc { .. } => (vec![], Some(ValType::Ref(RefType::FUNCREF))),
+
+            // TODO: # Vector instructions
+
+            // # Parametric instructions
+            Op::Select => {
+                let len = self.stack.len();
+                let ty = self.stack_type(len - 3);
+                assert_eq!(ty, self.stack_type(len - 2));
+                (vec![ty, ty, ValType::I32], Some(ty))
+            }
+
+            // # Variable instructions
+            Op::GlobalGet { global_index } => {
+                let global = &self.module.p.globals[*global_index as usize];
+                (vec![], Some(global.val_type))
+            }
+            Op::GlobalSet { global_index } => {
+                let global = &self.module.p.globals[*global_index as usize];
+                (vec![global.val_type], None)
+            }
+
+            // # Table instructions
+            Op::TableGet { table } => {
+                let ty = &self.module.table_types[*table as usize];
+                (vec![ValType::I32], Some(ValType::Ref(*ty)))
+            }
+            Op::TableSet { table } => {
+                let ty = &self.module.table_types[*table as usize];
+                (vec![ValType::I32, ValType::Ref(*ty)], None)
+            }
+            Op::TableSize { .. } => (vec![], Some(ValType::I32)),
+            Op::TableGrow { table } => {
+                let ty = &self.module.table_types[*table as usize];
+                (vec![ValType::Ref(*ty), ValType::I32], Some(ValType::I32))
+            }
+            Op::TableFill { table } => {
+                let ty = &self.module.table_types[*table as usize];
+                (vec![ValType::I32, ValType::Ref(*ty), ValType::I32], None)
+            }
+            Op::TableCopy { .. } | Op::TableInit { .. } => {
+                (vec![ValType::I32, ValType::I32, ValType::I32], None)
+            }
+            Op::ElemDrop { .. } => (vec![], None),
+
+            // # Memory instructions
+            // TODO: implement the vector instructions
+            Op::I32Load { .. }
+            | Op::I32Load8U { .. }
+            | Op::I32Load8S { .. }
+            | Op::I32Load16U { .. }
+            | Op::I32Load16S { .. }
+            | Op::MemoryGrow { .. } => (vec![ValType::I32], Some(ValType::I32)),
+            Op::I64Load { .. }
+            | Op::I64Load8U { .. }
+            | Op::I64Load8S { .. }
+            | Op::I64Load16U { .. }
+            | Op::I64Load16S { .. }
+            | Op::I64Load32U { .. }
+            | Op::I64Load32S { .. } => (vec![ValType::I32], Some(ValType::I64)),
+            Op::F32Load { .. } => (vec![ValType::I32], Some(ValType::F32)),
+            Op::F64Load { .. } => (vec![ValType::I32], Some(ValType::F64)),
+            Op::I32Store { .. } | Op::I32Store8 { .. } | Op::I32Store16 { .. } => {
+                (vec![ValType::I32, ValType::I32], None)
+            }
+            Op::I64Store { .. }
+            | Op::I64Store8 { .. }
+            | Op::I64Store16 { .. }
+            | Op::I64Store32 { .. } => (vec![ValType::I32, ValType::I64], None),
+            Op::F32Store { .. } => (vec![ValType::I32, ValType::F32], None),
+            Op::F64Store { .. } => (vec![ValType::I32, ValType::F64], None),
+            Op::MemorySize { .. } => (vec![], Some(ValType::I32)),
+            Op::MemoryFill { .. } | Op::MemoryCopy { .. } | Op::MemoryInit { .. } => {
+                (vec![ValType::I32, ValType::I32, ValType::I32], None)
+            }
+            Op::DataDrop { .. } => (vec![], None),
+
+            // # Control instructions
+            Op::Nop => (vec![], None),
+            Op::Call { .. } => {
+                todo!()
+            }
+            Op::CallIndirect { .. } => {
+                todo!()
+            }
+
+            // Instructions below must be handled separately.
+            // We return None for them:
+            Op::LocalGet { .. }
+            | Op::LocalSet { .. }
+            | Op::LocalTee { .. }
+            | Op::Drop
+            | Op::Unreachable
+            | Op::Block { .. }
+            | Op::Loop { .. }
+            | Op::If { .. }
+            | Op::Else
+            | Op::End
+            | Op::Br { .. }
+            | Op::BrIf { .. }
+            | Op::BrTable { .. }
+            | Op::Return => return None,
+            _ => todo!(),
+        };
+
+        Some(ty)
     }
 }
