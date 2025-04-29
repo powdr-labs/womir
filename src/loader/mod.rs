@@ -11,9 +11,10 @@ use std::{
 
 use block_tree::BlockTree;
 use dag::Dag;
+use itertools::Itertools;
 use wasmparser::{
-    BlockType, CompositeInnerType, ElementItems, FuncType, MemoryType, Operator, OperatorsReader,
-    Parser, Payload, RefType, TableInit, TypeRef, ValType,
+    BlockType, CompositeInnerType, ElementItems, FuncType, LocalsReader, MemoryType, Operator,
+    OperatorsReader, Parser, Payload, RefType, TableInit, TypeRef, ValType,
 };
 
 use allocate_locals::AllocatedVar;
