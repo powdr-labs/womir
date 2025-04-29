@@ -37,8 +37,17 @@ use super::{Block, BlockKind, Element, Instruction, ModuleContext, SystemCall};
 /// end
 /// ```
 ///
-/// The block contents are simplified: `return` is turned into the appropriate
-/// `br`, and dead code after `br`, `br_table` and `unreachable` instructions is removed.
+/// The block contents are simplified:
+///  - `return` is turned into the appropriate `br`;
+///  - explicit `br` is inserted at the end of every block that would otherwise fall through (function body included);
+///  - a consequence of the previous, loops are only exited through breaks. An outer block is added to the loop if
+///    needed to break out of it;
+///  - dead code is removed after non-fallthrough loops and `br`, `br_table` and `unreachable` instructions;
+///
+/// TODO: track whether a block is ever broken to (explicitly or implictly), so that we know if anything after it is
+/// dead code to be removed. Dead code removal translates to less data dependency in the DAG, which translates to
+/// possibly less data copies in the final code. But there shouldn't be any already, if the WASM is from an optimizing
+/// compiler.
 pub struct BlockTree<'a> {
     pub elements: Vec<Element<'a>>,
 }
@@ -51,8 +60,13 @@ impl<'a> BlockTree<'a> {
         let mut op_reader = op_reader.into_iter().peekable();
 
         let mut elements = Vec::new();
-        let ending = parse_contents(ctx, &mut op_reader, 0, 0, &mut elements)?;
+        let (ending, can_falltrhough) = parse_contents(ctx, &mut op_reader, 0, &mut elements)?;
         assert_eq!(ending, Ending::End);
+
+        if can_falltrhough {
+            // Emit the implicit br at the end of the function
+            elements.push(Instruction::WASMOp(Operator::Br { relative_depth: 0 }).into());
+        }
 
         Ok(Self { elements })
     }
@@ -68,20 +82,24 @@ fn parse_contents<'a, S: SystemCall>(
     ctx: &ModuleContext<S>,
     op_reader: &mut Peekable<OperatorsIterator<'a>>,
     stack_level: u32,
-    stack_offset: u32,
     output_elements: &mut Vec<Element<'a>>,
-) -> wasmparser::Result<Ending> {
-    let ending = loop {
+) -> wasmparser::Result<(Ending, bool)> {
+    let mut last_can_fallthrough = true;
+    let (ending, can_fallthrough) = loop {
         let op = op_reader.next().unwrap()?;
-        match op {
+        last_can_fallthrough = match op {
             Operator::If { blockty } => {
                 // Parse the if contents of the if tranformation.
                 let mut elements = vec![Instruction::WASMOp(Operator::Nop).into()]; // Placeholder for the conditional break
-                let ending =
-                    parse_contents(ctx, op_reader, stack_level + 1, stack_offset, &mut elements)?;
+                let (ending, if_can_fallthrough) =
+                    parse_contents(ctx, op_reader, stack_level + 1, &mut elements)?;
+
+                if if_can_fallthrough {
+                    // Emit the implict br at the end of the block
+                    elements.push(Instruction::WASMOp(Operator::Br { relative_depth: 0 }).into());
+                }
 
                 let interface_type = get_type(ctx, blockty);
-
                 match ending {
                     Ending::End => {
                         // Emit the simpler version of the if without an else, using BrIfZero
@@ -94,21 +112,26 @@ fn parse_contents<'a, S: SystemCall>(
                         let mut inner_elements =
                             vec![Instruction::WASMOp(Operator::BrIf { relative_depth: 0 }).into()];
 
-                        // Read the else block. It will end up one level deeper than the original block,
-                        // so we need to add an offset to the relative depth of its inner breaks.
-                        let ending = parse_contents(
-                            ctx,
-                            op_reader,
-                            stack_level + 2,
-                            stack_offset + 1,
-                            &mut inner_elements,
-                        )?;
+                        // Read the else block.
+                        let (ending, else_can_fallthrough) =
+                            parse_contents(ctx, op_reader, stack_level + 1, &mut inner_elements)?;
                         assert_eq!(ending, Ending::End);
 
+                        // The else block is one level deeper than the outer block, so we need to
+                        // adjust all the external br references in it, including 0 (which becomes
+                        // 1, the outer block).
+                        for element in &mut inner_elements {
+                            increment_outer_br_references(element, 0);
+                        }
+
                         // At the end of the else block, the if part must be skipped, so
-                        // we jump to the end of the outer block.
-                        inner_elements
-                            .push(Instruction::WASMOp(Operator::Br { relative_depth: 1 }).into());
+                        // we jump to the end of the outer block (unless else is already being
+                        // skipped by some br inside it).
+                        if else_can_fallthrough {
+                            inner_elements.push(
+                                Instruction::WASMOp(Operator::Br { relative_depth: 1 }).into(),
+                            );
+                        }
 
                         // The inputs of the inner block are the same as the outer block, but it has
                         // no proper output.
@@ -140,36 +163,33 @@ fn parse_contents<'a, S: SystemCall>(
                     }
                     .into(),
                 );
+
+                true
             }
             Operator::Else => {
                 // End of the current block with and Else
-                break Ending::Else;
+                break (Ending::Else, last_can_fallthrough);
             }
             Operator::End => {
                 // End of the current block with and End
-                break Ending::End;
+                break (Ending::End, last_can_fallthrough);
             }
-            Operator::Block { blockty } | Operator::Loop { blockty } => {
+            Operator::Block { blockty } => {
                 // Start of a new block
-                let block_type = match op {
-                    Operator::Block { .. } => BlockKind::Block,
-                    Operator::Loop { .. } => BlockKind::Loop,
-                    _ => unreachable!(),
-                };
-
                 let mut block_contents = Vec::new();
-                let ending = parse_contents(
-                    ctx,
-                    op_reader,
-                    stack_level + 1,
-                    stack_offset,
-                    &mut block_contents,
-                )?;
+                let (ending, can_fallthrough) =
+                    parse_contents(ctx, op_reader, stack_level + 1, &mut block_contents)?;
                 assert_eq!(ending, Ending::End);
+
+                if can_fallthrough {
+                    // Emit the implict br at the end of the block
+                    block_contents
+                        .push(Instruction::WASMOp(Operator::Br { relative_depth: 0 }).into());
+                }
 
                 output_elements.push(
                     Block {
-                        block_kind: block_type,
+                        block_kind: BlockKind::Block,
                         interface_type: get_type(ctx, blockty),
                         elements: block_contents,
                         input_locals: BTreeSet::new(),
@@ -178,32 +198,89 @@ fn parse_contents<'a, S: SystemCall>(
                     }
                     .into(),
                 );
+
+                true
+            }
+            Operator::Loop { blockty } => {
+                // Start of a new loop
+
+                let mut elements = Vec::new();
+                let (ending, can_fallthrough) =
+                    parse_contents(ctx, op_reader, stack_level + 1, &mut elements)?;
+                assert_eq!(ending, Ending::End);
+
+                let interface_type = get_type(ctx, blockty);
+                let input_type =
+                    Rc::new(FuncType::new(interface_type.params().iter().cloned(), []));
+
+                let mut loop_block = Block {
+                    block_kind: BlockKind::Loop,
+                    // After the transformatin, a loop block only has inputs.
+                    // Because either it doesn't fall through, or the output belongs
+                    // to the generated outer block.
+                    interface_type: input_type,
+                    elements,
+                    input_locals: BTreeSet::new(),
+                    output_locals: BTreeSet::new(),
+                    carried_locals: BTreeSet::new(),
+                };
+
+                let block = if can_fallthrough {
+                    // We need to place a Block around this loop, so we can emit the implicit br.
+                    // For that, we must adjust the break references that are >= 1.
+                    for element in &mut loop_block.elements {
+                        increment_outer_br_references(element, 1);
+                    }
+
+                    // Emit the implicit br to out of the loop.
+                    loop_block
+                        .elements
+                        .push(Instruction::WASMOp(Operator::Br { relative_depth: 1 }).into());
+
+                    let outer_elements = vec![
+                        loop_block.into(),
+                        // No br instruction needed because the loop was adjusted to not fall through.
+                    ];
+
+                    Block {
+                        block_kind: BlockKind::Block,
+                        interface_type,
+                        elements: outer_elements,
+                        input_locals: BTreeSet::new(),
+                        output_locals: BTreeSet::new(),
+                        carried_locals: BTreeSet::new(),
+                    }
+                } else {
+                    loop_block
+                };
+
+                output_elements.push(block.into());
+
+                can_fallthrough
             }
             Operator::Br { relative_depth } => {
-                output_elements.push(
-                    Instruction::WASMOp(Operator::Br {
-                        relative_depth: relative_depth + stack_offset,
-                    })
-                    .into(),
-                );
-                discard_dead_code(op_reader)?;
+                output_elements.push(Instruction::WASMOp(Operator::Br { relative_depth }).into());
+
+                false
             }
             Operator::BrIf { relative_depth } => {
                 output_elements.push(
                     Instruction::WASMOp(Operator::BrIf {
-                        relative_depth: relative_depth + stack_offset,
+                        relative_depth: relative_depth,
                     })
                     .into(),
                 );
+
+                true
             }
             Operator::BrTable { targets } => {
                 let targets = targets
                     .targets()
-                    .map(|target| target.map(|t| t + stack_offset))
+                    .map(|target| target)
                     .collect::<wasmparser::Result<Vec<u32>>>()?;
                 output_elements.push(Instruction::BrTable { targets }.into());
 
-                discard_dead_code(op_reader)?;
+                false
             }
             Operator::Return => {
                 // Add the equivalent br operator to the contents
@@ -213,27 +290,60 @@ fn parse_contents<'a, S: SystemCall>(
                     })
                     .into(),
                 );
-                discard_dead_code(op_reader)?;
+
+                false
             }
             Operator::Unreachable => {
                 output_elements.push(Instruction::WASMOp(op).into());
-                discard_dead_code(op_reader)?;
+
+                false
             }
             op => {
                 // Add the operator to the contents
                 output_elements.push(Instruction::WASMOp(op).into());
+
+                true
             }
+        };
+
+        if !last_can_fallthrough {
+            discard_dead_code(op_reader)?;
         }
     };
 
-    Ok(ending)
+    Ok((ending, can_fallthrough))
+}
+
+fn increment_outer_br_references(element: &mut Element, minimum_depth: u32) {
+    match element {
+        Element::Ins(Instruction::WASMOp(Operator::Br { relative_depth }))
+        | Element::Ins(Instruction::WASMOp(Operator::BrIf { relative_depth }))
+        | Element::Ins(Instruction::BrIfZero { relative_depth }) => {
+            if *relative_depth >= minimum_depth {
+                *relative_depth += 1;
+            }
+        }
+        Element::Ins(Instruction::BrTable { targets }) => {
+            for target in targets {
+                if *target >= minimum_depth {
+                    *target += 1;
+                }
+            }
+        }
+        Element::Block(block) => {
+            for element in &mut block.elements {
+                increment_outer_br_references(element, minimum_depth + 1);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn get_type<S: SystemCall>(ctx: &ModuleContext<S>, blockty: BlockType) -> Rc<FuncType> {
     match blockty {
         BlockType::Empty => Rc::new(FuncType::new([], [])),
         BlockType::FuncType(idx) => ctx.get_func_type_rc(idx),
-        BlockType::Type(t) => Rc::new(FuncType::new([t], [])),
+        BlockType::Type(t) => Rc::new(FuncType::new([], [t])),
     }
 }
 
