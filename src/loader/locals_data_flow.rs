@@ -73,7 +73,7 @@ fn process_block<'a>(
     } = block;
 
     let mut new_input_locals;
-    let mut new_output_locals;
+    let new_output_locals;
     let new_carried_locals;
     let new_elements;
     let has_changed;
@@ -86,16 +86,14 @@ fn process_block<'a>(
                 new_break_locals: BTreeSet::new(),
             });
 
-            (
-                new_elements,
-                new_input_locals,
-                new_output_locals,
-                has_changed,
-            ) = process_elems(control_stack, BTreeSet::new(), elements);
+            (new_elements, new_input_locals, has_changed) =
+                process_elems(control_stack, BTreeSet::new(), elements);
 
             let this_entry = control_stack.pop_front().unwrap();
 
-            new_output_locals.extend(this_entry.new_break_locals.iter());
+            // Since the previous pass guarantees that no block falls through,
+            // all the direct outputs are what we get through the breaks.
+            new_output_locals = this_entry.new_break_locals;
             let old_output_locals = this_entry.old_break_locals;
 
             assert!(old_carried_locals.is_empty());
@@ -110,12 +108,12 @@ fn process_block<'a>(
                 new_break_locals: BTreeSet::new(),
             });
 
-            (
-                new_elements,
-                new_input_locals,
-                new_output_locals,
-                has_changed,
-            ) = process_elems(control_stack, old_carried_locals, elements);
+            (new_elements, new_input_locals, has_changed) =
+                process_elems(control_stack, old_carried_locals, elements);
+
+            // Due to previous pass transformation, loops never fall through, thus
+            // they never have direct outputs.
+            new_output_locals = BTreeSet::new();
 
             let this_entry = control_stack.pop_front().unwrap();
             let old_input_locals = this_entry.old_break_locals;
@@ -150,10 +148,8 @@ fn process_elems<'a>(
     control_stack: &mut VecDeque<BlockStackEntry>,
     mut local_outputs: BTreeSet<u32>,
     elements: Vec<Element<'a>>,
-) -> (Vec<Element<'a>>, BTreeSet<u32>, BTreeSet<u32>, bool) {
+) -> (Vec<Element<'a>>, BTreeSet<u32>, bool) {
     let mut local_inputs = BTreeSet::new();
-
-    let mut block_can_end = true;
 
     let mut has_changed = false;
 
@@ -182,17 +178,7 @@ fn process_elems<'a>(
                     }
 
                     // Break operations
-                    Ins::WASMOp(Operator::Br { relative_depth }) => {
-                        block_can_end = false;
-                        process_break_target(
-                            control_stack,
-                            &mut local_inputs,
-                            &local_outputs,
-                            *relative_depth,
-                        );
-                    }
                     Ins::BrTable { targets } => {
-                        block_can_end = false;
                         for relative_depth in targets {
                             process_break_target(
                                 control_stack,
@@ -202,7 +188,8 @@ fn process_elems<'a>(
                             );
                         }
                     }
-                    Ins::WASMOp(Operator::BrIf { relative_depth })
+                    Ins::WASMOp(Operator::Br { relative_depth })
+                    | Ins::WASMOp(Operator::BrIf { relative_depth })
                     | Ins::BrIfZero { relative_depth } => {
                         process_break_target(
                             control_stack,
@@ -210,11 +197,6 @@ fn process_elems<'a>(
                             &local_outputs,
                             *relative_depth,
                         );
-                    }
-
-                    // Unreachable operation
-                    Ins::WASMOp(Operator::Unreachable) => {
-                        block_can_end = false;
                     }
 
                     // All other operations
@@ -226,13 +208,7 @@ fn process_elems<'a>(
         })
         .collect();
 
-    // This block ended with a break or unreachable instruction,
-    // so it has no fallthrough outputs.
-    if !block_can_end {
-        local_outputs.clear();
-    }
-
-    (elements, local_inputs, local_outputs, has_changed)
+    (elements, local_inputs, has_changed)
 }
 
 fn process_break_target(
