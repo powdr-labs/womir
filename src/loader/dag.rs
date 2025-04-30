@@ -7,8 +7,7 @@ use itertools::Itertools;
 use wasmparser::{FuncType, Operator as Op, RefType, ValType};
 
 use super::{
-    Block, BlockKind, Element, Instruction as Ins, ModuleContext, SystemCall,
-    locals_data_flow::LiftedBlockTree,
+    Block, BlockKind, Element, Instruction as Ins, ModuleContext, locals_data_flow::LiftedBlockTree,
 };
 
 pub enum Operation<'a> {
@@ -44,6 +43,7 @@ pub struct Dag<'a> {
 
 impl<'a> Dag<'a> {
     pub fn new(
+        module: &ModuleContext<'a>,
         func_type: &FuncType,
         locals_types: &[ValType],
         block_tree: LiftedBlockTree<'a>,
@@ -82,6 +82,7 @@ impl<'a> Dag<'a> {
         }]);
 
         let nodes = build_dag(
+            module,
             locals_types,
             func_type.params().to_vec(),
             &mut block_stack,
@@ -105,22 +106,25 @@ struct BreakArgs {
 /// For that we need to keep track of the stack and of which of our hypergraph edges is
 /// currently each local variable. When a local is assigned, it becames a new edge.
 fn build_dag<'a>(
+    module: &ModuleContext<'a>,
     locals_types: &[ValType],
     input_types: Vec<ValType>,
     block_stack: &mut VecDeque<BreakArgs>,
-    mut stack: Vec<ValueOrigin>,
+    stack: Vec<ValueOrigin>,
     mut locals: Vec<Value>,
     block_elements: Vec<Element<'a>>,
     local_getter: &dyn Fn(&mut Vec<Node>, &mut [Value], u32) -> ValueOrigin,
 ) -> wasmparser::Result<Vec<Node<'a>>> {
-    let mut nodes = Vec::new();
-
-    // The first node in a block are the inputs
-    nodes.push(Node {
-        operation: Operation::Inputs,
-        inputs: Vec::new(),
-        output_types: input_types,
-    });
+    let mut t = StackTracker {
+        module,
+        // The first node in a block are the inputs
+        nodes: vec![Node {
+            operation: Operation::Inputs,
+            inputs: Vec::new(),
+            output_types: input_types.clone(),
+        }],
+        stack,
+    };
 
     for elem in block_elements {
         match elem {
@@ -136,21 +140,21 @@ fn build_dag<'a>(
                     // resolved immediatelly without creating a new node.
 
                     // We may need to mark the local as an input, if it is not already.
-                    let value = local_getter(&mut nodes, &mut locals, local_index);
-                    stack.push(value);
+                    let value = local_getter(&mut t.nodes, &mut locals, local_index);
+                    t.stack.push(value);
                 }
                 Ins::WASMOp(Op::LocalSet { local_index }) => {
                     // LocalSet pops a value from the stack and sets it to a local.
-                    locals[local_index as usize] = Value::Defined(stack.pop().unwrap());
+                    locals[local_index as usize] = Value::Defined(t.stack.pop().unwrap());
                 }
                 Ins::WASMOp(Op::LocalTee { local_index }) => {
                     // LocalTee copies the value from the stack to a local.
-                    locals[local_index as usize] = Value::Defined(stack.last().unwrap().clone());
+                    locals[local_index as usize] = Value::Defined(t.stack.last().unwrap().clone());
                 }
                 Ins::WASMOp(Op::Drop) => {
                     // Drop could be a node that consumes a value and produces nothing,
                     // but since it has no side effects, we can just resolve it statically.
-                    stack.pop().unwrap();
+                    t.stack.pop().unwrap();
                 }
 
                 // We now handle the break instructions. They are special because they
@@ -160,16 +164,16 @@ fn build_dag<'a>(
                     let target = &block_stack[relative_depth as usize];
 
                     // The stack part of the input
-                    let mut inputs = stack.split_off(stack.len() - target.stack.len());
-                    assert!(types_matches(&nodes, &target.stack, &inputs));
+                    let mut inputs = t.stack.split_off(t.stack.len() - target.stack.len());
+                    assert!(types_matches(&t.nodes, &target.stack, &inputs));
 
                     // The locals part of the input
                     for local_index in target.locals.iter() {
-                        let value = local_getter(&mut nodes, &mut locals, *local_index);
+                        let value = local_getter(&mut t.nodes, &mut locals, *local_index);
                         inputs.push(value);
                     }
 
-                    nodes.push(Node {
+                    t.nodes.push(Node {
                         operation: Operation::WASMOp(op),
                         inputs,
                         output_types: Vec::new(),
@@ -187,27 +191,27 @@ fn build_dag<'a>(
                     let target = &block_stack[relative_depth as usize];
 
                     // Pop the condition to reinsert it after the locals:
-                    let cond = stack.pop().unwrap();
+                    let cond = t.stack.pop().unwrap();
                     // Assert the condition type is I32.
                     assert_eq!(
-                        nodes[cond.node].output_types[cond.output_idx as usize],
+                        t.nodes[cond.node].output_types[cond.output_idx as usize],
                         ValType::I32
                     );
 
                     // The stack part of the input
-                    let mut inputs = stack.split_off(stack.len() - target.stack.len());
-                    assert!(types_matches(&nodes, &target.stack, &inputs));
+                    let mut inputs = t.stack.split_off(t.stack.len() - target.stack.len());
+                    assert!(types_matches(&t.nodes, &target.stack, &inputs));
 
                     // The locals part of the input
                     for local_index in target.locals.iter() {
-                        let value = local_getter(&mut nodes, &mut locals, *local_index);
+                        let value = local_getter(&mut t.nodes, &mut locals, *local_index);
                         inputs.push(value);
                     }
 
                     // Push the condition back to the inputs
                     inputs.push(cond);
 
-                    nodes.push(Node {
+                    t.nodes.push(Node {
                         operation,
                         inputs,
                         output_types: Vec::new(),
@@ -218,10 +222,10 @@ fn build_dag<'a>(
                     // stack inputs for the largest target.
 
                     // Take the choice to insert it back later.
-                    let choice = stack.pop().unwrap();
+                    let choice = t.stack.pop().unwrap();
                     // Assert the choice type is I32.
                     assert_eq!(
-                        nodes[choice.node].output_types[choice.output_idx as usize],
+                        t.nodes[choice.node].output_types[choice.output_idx as usize],
                         ValType::I32
                     );
 
@@ -233,8 +237,8 @@ fn build_dag<'a>(
                         .unwrap();
 
                     // The stack part of the input
-                    let mut inputs = stack.split_off(stack.len() - largest_stack.len());
-                    assert!(types_matches(&nodes, largest_stack, &inputs));
+                    let mut inputs = t.stack.split_off(t.stack.len() - largest_stack.len());
+                    assert!(types_matches(&t.nodes, largest_stack, &inputs));
 
                     // The locals part of the input is the union of the locals inputs
                     // for all the targets.
@@ -249,7 +253,7 @@ fn build_dag<'a>(
                     for local_index in locals_inputs.iter() {
                         locals_inputs_map.insert(*local_index, inputs.len() as u32);
 
-                        let value = local_getter(&mut nodes, &mut locals, *local_index);
+                        let value = local_getter(&mut t.nodes, &mut locals, *local_index);
                         inputs.push(value);
                     }
 
@@ -283,7 +287,7 @@ fn build_dag<'a>(
                         })
                         .collect_vec();
 
-                    nodes.push(Node {
+                    t.nodes.push(Node {
                         operation: Operation::BrTable { targets },
                         inputs,
                         output_types: Vec::new(),
@@ -292,7 +296,23 @@ fn build_dag<'a>(
                 // The rest of the instructions are normal operations that creates a new node
                 // that consumes some inputs and produces some outputs.
                 Ins::WASMOp(op) => {
-                    todo!()
+                    let (inputs_types, output_types) = t.get_operator_type(&op).unwrap();
+                    let inputs = t.stack.split_off(t.stack.len() - inputs_types.len());
+                    assert!(types_matches(&t.nodes, &inputs_types, &inputs));
+
+                    let node_idx = t.nodes.len();
+                    t.stack.extend(
+                        (0..output_types.len() as u32).map(|output_idx| ValueOrigin {
+                            node: node_idx,
+                            output_idx,
+                        }),
+                    );
+
+                    t.nodes.push(Node {
+                        operation: Operation::WASMOp(op),
+                        inputs,
+                        output_types,
+                    });
                 }
             },
             Element::Block(block) => {
@@ -301,12 +321,13 @@ fn build_dag<'a>(
                 // values from the locals and the stack.
 
                 // Block inputs are the concatenation of the stack inputs and the locals inputs.
-                let mut inputs =
-                    stack.split_off(stack.len() - block.interface_type.params().len() as usize);
+                let mut inputs = t
+                    .stack
+                    .split_off(t.stack.len() - block.interface_type.params().len() as usize);
 
                 // Sanity check the types
                 assert!(types_matches(
-                    &nodes,
+                    &t.nodes,
                     block.interface_type.params(),
                     &inputs
                 ));
@@ -315,16 +336,17 @@ fn build_dag<'a>(
                     block
                         .input_locals
                         .iter()
-                        .map(|local_idx| local_getter(&mut nodes, &mut locals, *local_idx)),
+                        .map(|local_idx| local_getter(&mut t.nodes, &mut locals, *local_idx)),
                 );
 
                 // Of the outputs, the first ones goes to the stack.
-                let node_idx = nodes.len();
+                let node_idx = t.nodes.len();
                 let stack_results_len = block.interface_type.results().len() as u32;
-                stack.extend((0..stack_results_len).map(|output_idx| ValueOrigin {
-                    node: node_idx,
-                    output_idx,
-                }));
+                t.stack
+                    .extend((0..stack_results_len).map(|output_idx| ValueOrigin {
+                        node: node_idx,
+                        output_idx,
+                    }));
 
                 // The rest of the outputs goes to the locals.
                 for (i, output_local) in block.output_locals.iter().enumerate() {
@@ -335,7 +357,8 @@ fn build_dag<'a>(
                 }
 
                 // Build the DAG for the block and push it
-                nodes.push(build_dag_for_block2(
+                t.nodes.push(build_dag_for_block(
+                    module,
                     locals_types,
                     inputs,
                     block_stack,
@@ -345,10 +368,13 @@ fn build_dag<'a>(
         }
     }
 
+    let nodes = t.nodes;
+
     Ok(nodes)
 }
 
-fn build_dag_for_block2<'a>(
+fn build_dag_for_block<'a>(
+    module: &ModuleContext<'a>,
     locals_types: &[ValType],
     inputs: Vec<ValueOrigin>,
     block_stack: &mut VecDeque<BreakArgs>,
@@ -424,6 +450,7 @@ fn build_dag_for_block2<'a>(
     });
 
     let nodes = build_dag(
+        module,
         locals_types,
         input_types,
         block_stack,
@@ -523,13 +550,13 @@ fn default_const_for_type(value_type: ValType) -> Operation<'static> {
     }
 }
 
-struct StackTracker<'a, 'b, S: SystemCall> {
-    module: &'b ModuleContext<'a, S>,
+struct StackTracker<'a, 'b> {
+    module: &'b ModuleContext<'a>,
     nodes: Vec<Node<'a>>,
     stack: Vec<ValueOrigin>,
 }
 
-impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
+impl<'a, 'b> StackTracker<'a, 'b> {
     fn stack_type(&self, idx: usize) -> ValType {
         let val_type = &self.stack[idx];
         let node = &self.nodes[val_type.node];
@@ -537,38 +564,38 @@ impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
     }
 
     /// Returns the list of input types and output types of an operator.
-    fn get_operator_type(&self, op: &Op) -> Option<(Vec<ValType>, Option<ValType>)> {
+    fn get_operator_type(&self, op: &Op) -> Option<(Vec<ValType>, Vec<ValType>)> {
         let ty = match op {
             // # Numeric instructions
             // ## const
-            Op::I32Const { .. } => (vec![], Some(ValType::I32)),
-            Op::I64Const { .. } => (vec![], Some(ValType::I64)),
-            Op::F32Const { .. } => (vec![], Some(ValType::F32)),
-            Op::F64Const { .. } => (vec![], Some(ValType::F64)),
+            Op::I32Const { .. } => (vec![], vec![ValType::I32]),
+            Op::I64Const { .. } => (vec![], vec![ValType::I64]),
+            Op::F32Const { .. } => (vec![], vec![ValType::F32]),
+            Op::F64Const { .. } => (vec![], vec![ValType::F64]),
             // ## unop
             Op::I32Clz | Op::I32Ctz | Op::I32Popcnt | Op::I32Extend8S | Op::I32Extend16S => {
-                (vec![ValType::I32], Some(ValType::I32))
+                (vec![ValType::I32], vec![ValType::I32])
             }
             Op::I64Clz
             | Op::I64Ctz
             | Op::I64Popcnt
             | Op::I64Extend8S
             | Op::I64Extend16S
-            | Op::I64Extend32S => (vec![ValType::I64], Some(ValType::I64)),
+            | Op::I64Extend32S => (vec![ValType::I64], vec![ValType::I64]),
             Op::F32Abs
             | Op::F32Neg
             | Op::F32Sqrt
             | Op::F32Ceil
             | Op::F32Floor
             | Op::F32Trunc
-            | Op::F32Nearest => (vec![ValType::F32], Some(ValType::F32)),
+            | Op::F32Nearest => (vec![ValType::F32], vec![ValType::F32]),
             Op::F64Abs
             | Op::F64Neg
             | Op::F64Sqrt
             | Op::F64Ceil
             | Op::F64Floor
             | Op::F64Trunc
-            | Op::F64Nearest => (vec![ValType::F64], Some(ValType::F64)),
+            | Op::F64Nearest => (vec![ValType::F64], vec![ValType::F64]),
             // ## binop
             Op::I32Add
             | Op::I32Sub
@@ -584,7 +611,7 @@ impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
             | Op::I32ShrU
             | Op::I32ShrS
             | Op::I32Rotl
-            | Op::I32Rotr => (vec![ValType::I32, ValType::I32], Some(ValType::I32)),
+            | Op::I32Rotr => (vec![ValType::I32, ValType::I32], vec![ValType::I32]),
             Op::I64Add
             | Op::I64Sub
             | Op::I64Mul
@@ -599,24 +626,24 @@ impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
             | Op::I64ShrU
             | Op::I64ShrS
             | Op::I64Rotl
-            | Op::I64Rotr => (vec![ValType::I64, ValType::I64], Some(ValType::I64)),
+            | Op::I64Rotr => (vec![ValType::I64, ValType::I64], vec![ValType::I64]),
             Op::F32Add
             | Op::F32Sub
             | Op::F32Mul
             | Op::F32Div
             | Op::F32Min
             | Op::F32Max
-            | Op::F32Copysign => (vec![ValType::F32, ValType::F32], Some(ValType::F32)),
+            | Op::F32Copysign => (vec![ValType::F32, ValType::F32], vec![ValType::F32]),
             Op::F64Add
             | Op::F64Sub
             | Op::F64Mul
             | Op::F64Div
             | Op::F64Min
             | Op::F64Max
-            | Op::F64Copysign => (vec![ValType::F64, ValType::F64], Some(ValType::F64)),
+            | Op::F64Copysign => (vec![ValType::F64, ValType::F64], vec![ValType::F64]),
             // ## testop
-            Op::I32Eqz => (vec![ValType::I32], Some(ValType::I32)),
-            Op::I64Eqz => (vec![ValType::I64], Some(ValType::I32)),
+            Op::I32Eqz => (vec![ValType::I32], vec![ValType::I32]),
+            Op::I64Eqz => (vec![ValType::I64], vec![ValType::I32]),
             // ## relop
             Op::I32Eq
             | Op::I32Ne
@@ -627,7 +654,7 @@ impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
             | Op::I32LeU
             | Op::I32LeS
             | Op::I32GeU
-            | Op::I32GeS => (vec![ValType::I32, ValType::I32], Some(ValType::I32)),
+            | Op::I32GeS => (vec![ValType::I32, ValType::I32], vec![ValType::I32]),
             Op::I64Eq
             | Op::I64Ne
             | Op::I64LtU
@@ -637,53 +664,53 @@ impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
             | Op::I64LeU
             | Op::I64LeS
             | Op::I64GeU
-            | Op::I64GeS => (vec![ValType::I64, ValType::I64], Some(ValType::I32)),
+            | Op::I64GeS => (vec![ValType::I64, ValType::I64], vec![ValType::I32]),
             Op::F32Eq | Op::F32Ne | Op::F32Lt | Op::F32Gt | Op::F32Le | Op::F32Ge => {
-                (vec![ValType::F32, ValType::F32], Some(ValType::I32))
+                (vec![ValType::F32, ValType::F32], vec![ValType::I32])
             }
             // ## cvtop
-            Op::I32WrapI64 => (vec![ValType::I64], Some(ValType::I32)),
-            Op::I64ExtendI32U | Op::I64ExtendI32S => (vec![ValType::I32], Some(ValType::I64)),
+            Op::I32WrapI64 => (vec![ValType::I64], vec![ValType::I32]),
+            Op::I64ExtendI32U | Op::I64ExtendI32S => (vec![ValType::I32], vec![ValType::I64]),
             Op::I32TruncF32U
             | Op::I32TruncF32S
             | Op::I32TruncSatF32U
             | Op::I32TruncSatF32S
-            | Op::I32ReinterpretF32 => (vec![ValType::F32], Some(ValType::I32)),
+            | Op::I32ReinterpretF32 => (vec![ValType::F32], vec![ValType::I32]),
             Op::I64TruncF32U | Op::I64TruncF32S | Op::I64TruncSatF32U | Op::I64TruncSatF32S => {
-                (vec![ValType::F32], Some(ValType::I64))
+                (vec![ValType::F32], vec![ValType::I64])
             }
             Op::I32TruncF64U | Op::I32TruncF64S | Op::I32TruncSatF64U | Op::I32TruncSatF64S => {
-                (vec![ValType::F64], Some(ValType::I32))
+                (vec![ValType::F64], vec![ValType::I32])
             }
             Op::I64TruncF64U
             | Op::I64TruncF64S
             | Op::I64TruncSatF64U
             | Op::I64TruncSatF64S
-            | Op::I64ReinterpretF64 => (vec![ValType::F64], Some(ValType::I64)),
-            Op::F32DemoteF64 => (vec![ValType::F64], Some(ValType::F32)),
-            Op::F64PromoteF32 => (vec![ValType::F32], Some(ValType::F64)),
+            | Op::I64ReinterpretF64 => (vec![ValType::F64], vec![ValType::I64]),
+            Op::F32DemoteF64 => (vec![ValType::F64], vec![ValType::F32]),
+            Op::F64PromoteF32 => (vec![ValType::F32], vec![ValType::F64]),
             Op::F32ConvertI32U | Op::F32ConvertI32S | Op::F32ReinterpretI32 => {
-                (vec![ValType::I32], Some(ValType::F32))
+                (vec![ValType::I32], vec![ValType::F32])
             }
-            Op::F64ConvertI32U | Op::F64ConvertI32S => (vec![ValType::I32], Some(ValType::F64)),
-            Op::F32ConvertI64U | Op::F32ConvertI64S => (vec![ValType::I64], Some(ValType::F32)),
+            Op::F64ConvertI32U | Op::F64ConvertI32S => (vec![ValType::I32], vec![ValType::F64]),
+            Op::F32ConvertI64U | Op::F32ConvertI64S => (vec![ValType::I64], vec![ValType::F32]),
             Op::F64ConvertI64U | Op::F64ConvertI64S | Op::F64ReinterpretI64 => {
-                (vec![ValType::I64], Some(ValType::F64))
+                (vec![ValType::I64], vec![ValType::F64])
             }
 
             // # Reference instructions
             Op::RefNull { hty } => (
                 vec![],
-                Some(ValType::Ref(RefType::new(true, *hty).unwrap())),
+                vec![ValType::Ref(RefType::new(true, *hty).unwrap())],
             ),
             Op::RefIsNull => {
                 let ValType::Ref(ref_type) = self.stack_type(self.stack.len() - 1) else {
                     panic!("ref.is_null expects a reference type")
                 };
                 assert!(ref_type.is_func_ref() || ref_type.is_extern_ref());
-                (vec![ValType::Ref(ref_type)], Some(ValType::I32))
+                (vec![ValType::Ref(ref_type)], vec![ValType::I32])
             }
-            Op::RefFunc { .. } => (vec![], Some(ValType::Ref(RefType::FUNCREF))),
+            Op::RefFunc { .. } => (vec![], vec![ValType::Ref(RefType::FUNCREF)]),
 
             // TODO: # Vector instructions
 
@@ -692,41 +719,41 @@ impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
                 let len = self.stack.len();
                 let ty = self.stack_type(len - 3);
                 assert_eq!(ty, self.stack_type(len - 2));
-                (vec![ty, ty, ValType::I32], Some(ty))
+                (vec![ty, ty, ValType::I32], vec![ty])
             }
 
             // # Variable instructions
             Op::GlobalGet { global_index } => {
                 let global = &self.module.p.globals[*global_index as usize];
-                (vec![], Some(global.val_type))
+                (vec![], vec![global.val_type])
             }
             Op::GlobalSet { global_index } => {
                 let global = &self.module.p.globals[*global_index as usize];
-                (vec![global.val_type], None)
+                (vec![global.val_type], vec![])
             }
 
             // # Table instructions
             Op::TableGet { table } => {
                 let ty = &self.module.table_types[*table as usize];
-                (vec![ValType::I32], Some(ValType::Ref(*ty)))
+                (vec![ValType::I32], vec![ValType::Ref(*ty)])
             }
             Op::TableSet { table } => {
                 let ty = &self.module.table_types[*table as usize];
-                (vec![ValType::I32, ValType::Ref(*ty)], None)
+                (vec![ValType::I32, ValType::Ref(*ty)], vec![])
             }
-            Op::TableSize { .. } => (vec![], Some(ValType::I32)),
+            Op::TableSize { .. } => (vec![], vec![ValType::I32]),
             Op::TableGrow { table } => {
                 let ty = &self.module.table_types[*table as usize];
-                (vec![ValType::Ref(*ty), ValType::I32], Some(ValType::I32))
+                (vec![ValType::Ref(*ty), ValType::I32], vec![ValType::I32])
             }
             Op::TableFill { table } => {
                 let ty = &self.module.table_types[*table as usize];
-                (vec![ValType::I32, ValType::Ref(*ty), ValType::I32], None)
+                (vec![ValType::I32, ValType::Ref(*ty), ValType::I32], vec![])
             }
             Op::TableCopy { .. } | Op::TableInit { .. } => {
-                (vec![ValType::I32, ValType::I32, ValType::I32], None)
+                (vec![ValType::I32, ValType::I32, ValType::I32], vec![])
             }
-            Op::ElemDrop { .. } => (vec![], None),
+            Op::ElemDrop { .. } => (vec![], vec![]),
 
             // # Memory instructions
             // TODO: implement the vector instructions
@@ -735,41 +762,47 @@ impl<'a, 'b, S: SystemCall> StackTracker<'a, 'b, S> {
             | Op::I32Load8S { .. }
             | Op::I32Load16U { .. }
             | Op::I32Load16S { .. }
-            | Op::MemoryGrow { .. } => (vec![ValType::I32], Some(ValType::I32)),
+            | Op::MemoryGrow { .. } => (vec![ValType::I32], vec![ValType::I32]),
             Op::I64Load { .. }
             | Op::I64Load8U { .. }
             | Op::I64Load8S { .. }
             | Op::I64Load16U { .. }
             | Op::I64Load16S { .. }
             | Op::I64Load32U { .. }
-            | Op::I64Load32S { .. } => (vec![ValType::I32], Some(ValType::I64)),
-            Op::F32Load { .. } => (vec![ValType::I32], Some(ValType::F32)),
-            Op::F64Load { .. } => (vec![ValType::I32], Some(ValType::F64)),
+            | Op::I64Load32S { .. } => (vec![ValType::I32], vec![ValType::I64]),
+            Op::F32Load { .. } => (vec![ValType::I32], vec![ValType::F32]),
+            Op::F64Load { .. } => (vec![ValType::I32], vec![ValType::F64]),
             Op::I32Store { .. } | Op::I32Store8 { .. } | Op::I32Store16 { .. } => {
-                (vec![ValType::I32, ValType::I32], None)
+                (vec![ValType::I32, ValType::I32], vec![])
             }
             Op::I64Store { .. }
             | Op::I64Store8 { .. }
             | Op::I64Store16 { .. }
-            | Op::I64Store32 { .. } => (vec![ValType::I32, ValType::I64], None),
-            Op::F32Store { .. } => (vec![ValType::I32, ValType::F32], None),
-            Op::F64Store { .. } => (vec![ValType::I32, ValType::F64], None),
-            Op::MemorySize { .. } => (vec![], Some(ValType::I32)),
+            | Op::I64Store32 { .. } => (vec![ValType::I32, ValType::I64], vec![]),
+            Op::F32Store { .. } => (vec![ValType::I32, ValType::F32], vec![]),
+            Op::F64Store { .. } => (vec![ValType::I32, ValType::F64], vec![]),
+            Op::MemorySize { .. } => (vec![], vec![ValType::I32]),
             Op::MemoryFill { .. } | Op::MemoryCopy { .. } | Op::MemoryInit { .. } => {
-                (vec![ValType::I32, ValType::I32, ValType::I32], None)
+                (vec![ValType::I32, ValType::I32, ValType::I32], vec![])
             }
-            Op::DataDrop { .. } => (vec![], None),
+            Op::DataDrop { .. } => (vec![], vec![]),
 
             // # Control instructions
-            Op::Nop => (vec![], None),
-            Op::Call { .. } => {
-                todo!()
+            Op::Nop => (vec![], vec![]),
+            Op::Call { function_index } => {
+                let ty = self.module.get_func_type(*function_index);
+                let inputs = ty.params().to_vec();
+                let outputs = ty.results().to_vec();
+                return Some((inputs, outputs));
             }
-            Op::CallIndirect { .. } => {
-                todo!()
+            Op::CallIndirect { type_index, .. } => {
+                let ty = self.module.get_type(*type_index);
+                let inputs = ty.params().to_vec();
+                let outputs = ty.results().to_vec();
+                return Some((inputs, outputs));
             }
 
-            // Instructions below must be handled separately.
+            // Instructions below are handled separately.
             // We return None for them:
             Op::LocalGet { .. }
             | Op::LocalSet { .. }

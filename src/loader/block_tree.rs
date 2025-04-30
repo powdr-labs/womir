@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
 
 use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader};
 
-use super::{Block, BlockKind, Element, Instruction, ModuleContext, SystemCall};
+use super::{Block, BlockKind, Element, Instruction, ModuleContext};
 
 /// BlockTree is a simplified representation of a WASM function.
 ///
@@ -53,8 +53,8 @@ pub struct BlockTree<'a> {
 }
 
 impl<'a> BlockTree<'a> {
-    pub fn load_function<S: SystemCall>(
-        ctx: &ModuleContext<S>,
+    pub fn load_function(
+        ctx: &ModuleContext,
         op_reader: OperatorsReader<'a>,
     ) -> wasmparser::Result<Self> {
         let mut op_reader = op_reader.into_iter().peekable();
@@ -78,8 +78,8 @@ enum Ending {
     Else,
 }
 
-fn parse_contents<'a, S: SystemCall>(
-    ctx: &ModuleContext<S>,
+fn parse_contents<'a>(
+    ctx: &ModuleContext,
     op_reader: &mut Peekable<OperatorsIterator<'a>>,
     stack_level: u32,
     output_elements: &mut Vec<Element<'a>>,
@@ -339,7 +339,7 @@ fn increment_outer_br_references(element: &mut Element, minimum_depth: u32) {
     }
 }
 
-fn get_type<S: SystemCall>(ctx: &ModuleContext<S>, blockty: BlockType) -> Rc<FuncType> {
+fn get_type(ctx: &ModuleContext, blockty: BlockType) -> Rc<FuncType> {
     match blockty {
         BlockType::Empty => Rc::new(FuncType::new([], [])),
         BlockType::FuncType(idx) => ctx.get_func_type_rc(idx),

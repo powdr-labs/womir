@@ -160,21 +160,20 @@ pub struct Program<'a> {
     pub memory: Option<Segment>,
     /// The tables, in order of definition.
     pub tables: Vec<Segment>,
-    /// The special segments for the table initialization.
+    /// The special segments for table initialization.
     pub elem_segments: Vec<Segment>,
-    /// The special segments for the data initialization.
+    /// The special segments for data initialization.
     pub data_segments: Vec<Segment>,
 }
 
-struct ModuleContext<'a, S: SystemCall> {
+struct ModuleContext<'a> {
     types: Vec<Rc<FuncType>>,
     func_types: Vec<u32>,
-    imported_functions: Vec<S>,
     table_types: Vec<RefType>,
     p: Program<'a>,
 }
 
-impl<S: SystemCall> ModuleContext<'_, S> {
+impl ModuleContext<'_> {
     fn get_type(&self, type_idx: u32) -> &FuncType {
         &self.types[type_idx as usize]
     }
@@ -337,7 +336,6 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
     let mut ctx = ModuleContext {
         types: Vec::new(),
         func_types: Vec::new(),
-        imported_functions: Vec::new(),
         table_types: Vec::new(),
         p: Program {
             functions: Vec::new(),
@@ -352,6 +350,9 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
             data_segments: Vec::new(),
         },
     };
+
+    // TODO: figure out what to do with the imported functions.
+    let mut imported_functions = Vec::new();
 
     // This is the memory layout of the program after all the elements have been allocated:
     // - all tables, in sequence, where each table contains:
@@ -439,11 +440,8 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
 
                             log::debug!("Imported syscall: {}", import.name);
 
-                            // Each function uses as label its own index.
-                            let label = ctx.func_types.len() as u32;
-
                             ctx.func_types.push(type_idx);
-                            ctx.imported_functions.push(syscall);
+                            imported_functions.push(syscall);
 
                             continue;
                         }
@@ -690,7 +688,7 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
                 let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
-                let definition = Dag::new(func_type, &locals_types, lifted_blocks)?;
+                let definition = Dag::new(&ctx, func_type, &locals_types, lifted_blocks)?;
                 ctx.p.functions.push(definition);
             }
             Payload::DataSection(section) => {
