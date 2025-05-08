@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
 
-use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader};
+use itertools::Itertools;
+use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader, ValType};
 
 use super::{Block, BlockKind, Element, Instruction, ModuleContext};
 
@@ -100,6 +101,16 @@ fn parse_contents<'a>(
                 }
 
                 let interface_type = get_type(ctx, blockty);
+
+                // The newly generated if block has the same type as the original if block, plus one extra
+                // parameter for the condition.
+                let params = {
+                    let mut params = interface_type.params().to_vec();
+                    // The condition:
+                    params.push(ValType::I32);
+                    params
+                };
+
                 match ending {
                     Ending::End => {
                         // Emit the simpler version of the if without an else, using BrIfZero
@@ -120,7 +131,7 @@ fn parse_contents<'a>(
                         // The else block is one level deeper than the outer block, so we need to
                         // adjust all the external br references in it, including 0 (which becomes
                         // 1, the outer block).
-                        for element in &mut inner_elements {
+                        for element in &mut inner_elements[1..] {
                             increment_outer_br_references(element, 0);
                         }
 
@@ -133,10 +144,9 @@ fn parse_contents<'a>(
                             );
                         }
 
-                        // The inputs of the inner block are the same as the outer block, but it has
-                        // no proper output.
-                        let inner_type =
-                            Rc::new(FuncType::new(interface_type.params().iter().cloned(), []));
+                        // The inner block has the same inputs as the outer block,
+                        // but it has no proper output.
+                        let inner_type = Rc::new(FuncType::new(params.clone(), []));
 
                         // The first thing in the outer block is the inner block
                         let inner_block = Block {
@@ -155,7 +165,10 @@ fn parse_contents<'a>(
                 output_elements.push(
                     Block {
                         block_kind: BlockKind::Block,
-                        interface_type: get_type(ctx, blockty),
+                        interface_type: Rc::new(FuncType::new(
+                            params,
+                            interface_type.results().to_vec(),
+                        )),
                         elements,
                         input_locals: BTreeSet::new(),
                         output_locals: BTreeSet::new(),
