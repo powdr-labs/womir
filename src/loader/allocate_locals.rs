@@ -221,8 +221,8 @@ impl Stack {
     }
 }
 
-struct StackTracker<'a, S: SystemCall> {
-    module: &'a ModuleContext<'a, S>,
+struct StackTracker<'a> {
+    module: &'a ModuleContext<'a>,
     locals: Vec<AllocatedVar>,
     /// In the middle of the locals, right after the function arguments, in a place
     /// "call" will be able to write, we have the return address and the frame pointer
@@ -232,9 +232,9 @@ struct StackTracker<'a, S: SystemCall> {
     control_stack: Vec<Frame>,
 }
 
-impl<'a, S: SystemCall> StackTracker<'a, S> {
+impl<'a> StackTracker<'a> {
     fn new(
-        module: &'a ModuleContext<'_, S>,
+        module: &'a ModuleContext<'a>,
         func_idx: u32,
         locals_reader: LocalsReader<'a>,
     ) -> wasmparser::Result<(Self, u32)> {
@@ -349,12 +349,12 @@ impl<'a, S: SystemCall> StackTracker<'a, S> {
     }
 
     /// Generate the code of a return, ensuring the outputs are at the expected height.
-    fn return_code<'b>(&self) -> Vec<Directive<'b, S>> {
+    fn return_code<'b>(&self) -> Vec<Directive<'b>> {
         self.br_code(self.control_stack.len() as u32 - 1)
     }
 
     /// Generate the code of a break ("br"), ensuring the outputs are at the expected height.
-    fn br_code<'b>(&self, relative_depth: u32) -> Vec<Directive<'b, S>> {
+    fn br_code<'b>(&self, relative_depth: u32) -> Vec<Directive<'b>> {
         // When breaking, the stack might be bigger than the required height for the target label.
         // If so, we must copy the outputs to the expected height.
         let cs_len = self.control_stack.len();

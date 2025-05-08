@@ -1,4 +1,4 @@
-mod allocate_locals;
+//mod allocate_locals;
 mod block_tree;
 mod dag;
 mod locals_data_flow;
@@ -17,7 +17,13 @@ use wasmparser::{
     OperatorsReader, Parser, Payload, RefType, TableInit, TypeRef, ValType,
 };
 
-use allocate_locals::AllocatedVar;
+#[derive(Debug, Clone, Copy)]
+pub struct AllocatedVar {
+    pub val_type: ValType,
+    /// If it is a local or stack, this address is relative to the stack base.
+    /// If it is a global, this address is absolute.
+    pub address: u32,
+}
 
 /// WASM defined page size is 64 KiB.
 const PAGE_SIZE: u32 = 65536;
@@ -178,12 +184,12 @@ impl ModuleContext<'_> {
         &self.types[type_idx as usize]
     }
 
-    fn get_func_type(&self, func_idx: u32) -> &FuncType {
-        self.get_type(self.func_types[func_idx as usize])
+    fn get_type_rc(&self, type_idx: u32) -> Rc<FuncType> {
+        self.types[type_idx as usize].clone()
     }
 
-    fn get_func_type_rc(&self, func_idx: u32) -> Rc<FuncType> {
-        self.types[self.func_types[func_idx as usize] as usize].clone()
+    fn get_func_type(&self, func_idx: u32) -> &FuncType {
+        self.get_type(self.func_types[func_idx as usize])
     }
 
     fn blockty_inputs(&self, blockty: BlockType) -> &[ValType] {
@@ -689,6 +695,9 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
                 let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
                 let definition = Dag::new(&ctx, func_type, &locals_types, lifted_blocks)?;
+
+                println!("Function {func_idx}:\n{definition:#?}");
+
                 ctx.p.functions.push(definition);
             }
             Payload::DataSection(section) => {
@@ -827,6 +836,7 @@ fn read_locals<'a>(
     Ok(local_types)
 }
 
+#[derive(Debug)]
 enum Instruction<'a> {
     WASMOp(Operator<'a>),
     /// BrTable needs to be transformed, so we can't use the original
@@ -842,11 +852,13 @@ enum Instruction<'a> {
     },
 }
 
+#[derive(Debug)]
 enum BlockKind {
     Block,
     Loop,
 }
 
+#[derive(Debug)]
 struct Block<'a> {
     block_kind: BlockKind,
     interface_type: Rc<FuncType>,
@@ -861,6 +873,7 @@ struct Block<'a> {
     carried_locals: BTreeSet<u32>,
 }
 
+#[derive(Debug)]
 enum Element<'a> {
     Ins(Instruction<'a>),
     Block(Block<'a>),

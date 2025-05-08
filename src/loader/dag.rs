@@ -10,6 +10,7 @@ use super::{
     Block, BlockKind, Element, Instruction as Ins, ModuleContext, locals_data_flow::LiftedBlockTree,
 };
 
+#[derive(Debug)]
 pub enum Operation<'a> {
     Inputs,
     WASMOp(Op<'a>),
@@ -18,6 +19,7 @@ pub enum Operation<'a> {
     Block { kind: BlockKind, sub_dag: Dag<'a> },
 }
 
+#[derive(Debug)]
 pub struct BrTableTarget {
     pub relative_depth: u32,
     /// For each of the nodes inputs, this is the permutation of the inputs that
@@ -25,18 +27,20 @@ pub struct BrTableTarget {
     pub input_permutation: Vec<u32>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValueOrigin {
     pub node: usize,
     pub output_idx: u32,
 }
 
+#[derive(Debug)]
 pub struct Node<'a> {
     pub operation: Operation<'a>,
     pub inputs: Vec<ValueOrigin>,
     pub output_types: Vec<ValType>,
 }
 
+#[derive(Debug)]
 pub struct Dag<'a> {
     pub nodes: Vec<Node<'a>>,
 }
@@ -127,6 +131,8 @@ fn build_dag<'a>(
     };
 
     for elem in block_elements {
+        log::trace!("Stack: {:?}", t.stack);
+        log::trace!("Processing element: {elem:?}");
         match elem {
             // Most instructions creates a new node that consumes some inputs and produces
             // some outputs. We will have special handlers for cases that are no so simple.
@@ -199,7 +205,8 @@ fn build_dag<'a>(
                     );
 
                     // The stack part of the input
-                    let mut inputs = t.stack.split_off(t.stack.len() - target.stack.len());
+                    // BrIf[Not] does not consume the stack.
+                    let mut inputs = t.stack[t.stack.len() - target.stack.len()..].to_vec();
                     assert!(types_matches(&t.nodes, &target.stack, &inputs));
 
                     // The locals part of the input

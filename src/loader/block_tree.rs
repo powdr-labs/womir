@@ -342,7 +342,7 @@ fn increment_outer_br_references(element: &mut Element, minimum_depth: u32) {
 fn get_type(ctx: &ModuleContext, blockty: BlockType) -> Rc<FuncType> {
     match blockty {
         BlockType::Empty => Rc::new(FuncType::new([], [])),
-        BlockType::FuncType(idx) => ctx.get_func_type_rc(idx),
+        BlockType::FuncType(idx) => ctx.get_type_rc(idx),
         BlockType::Type(t) => Rc::new(FuncType::new([], [t])),
     }
 }
