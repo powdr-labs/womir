@@ -795,7 +795,7 @@ impl<'a, 'b> StackTracker<'a, 'b> {
             Op::DataDrop { .. } => (vec![], vec![]),
 
             // # Control instructions
-            Op::Nop => (vec![], vec![]),
+            Op::Nop | Op::Unreachable => (vec![], vec![]),
             Op::Call { function_index } => {
                 let ty = self.module.get_func_type(*function_index);
                 let inputs = ty.params().to_vec();
@@ -815,7 +815,6 @@ impl<'a, 'b> StackTracker<'a, 'b> {
             | Op::LocalSet { .. }
             | Op::LocalTee { .. }
             | Op::Drop
-            | Op::Unreachable
             | Op::Block { .. }
             | Op::Loop { .. }
             | Op::If { .. }
