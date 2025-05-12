@@ -1,4 +1,4 @@
-//mod allocate_locals;
+mod allocate_registers;
 mod block_tree;
 mod dag;
 mod locals_data_flow;
@@ -9,6 +9,7 @@ use std::{
     str::FromStr,
 };
 
+use allocate_registers::WriteOnceASM;
 use block_tree::BlockTree;
 use dag::Dag;
 use itertools::Itertools;
@@ -153,7 +154,7 @@ impl InitialMemory {
 
 pub struct Program<'a> {
     /// The functions defined in the module.
-    pub functions: Vec<Dag<'a>>,
+    pub functions: Vec<WriteOnceASM<'a>>,
     /// The start function, if any.
     pub start_function: Option<u32>,
     /// The main function, if any.
@@ -694,9 +695,9 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
                 let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
-                let definition = Dag::new(&ctx, func_type, &locals_types, lifted_blocks)?;
+                let dag = Dag::new(&ctx, func_type, &locals_types, lifted_blocks)?;
 
-                println!("Function {func_idx}:\n{definition:#?}");
+                let definition = allocate_registers::allocate_registers(dag);
 
                 ctx.p.functions.push(definition);
             }
