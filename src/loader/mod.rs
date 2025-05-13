@@ -6,7 +6,6 @@ mod locals_data_flow;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     rc::Rc,
-    str::FromStr,
 };
 
 use allocate_registers::WriteOnceASM;
@@ -51,11 +50,6 @@ pub enum MemoryEntry {
     Value(u32),
     /// Refers to a code label.
     Label(u32),
-}
-
-/// Valid system calls known by the system.
-pub trait SystemCall: Sized + FromStr + Copy {
-    fn function_type(&self) -> (Vec<ValType>, Vec<ValType>);
 }
 
 /// Helper struct to track unallocated memory.
@@ -153,7 +147,15 @@ impl InitialMemory {
 }
 
 pub struct Program<'a> {
+    /// The module and name of the imported functions.
+    ///
+    /// Function idices are shared with `functions`. Indices [0..imported_functions.len()] refers to imported functions,
+    /// and indices [imported_functions.len()..] refers to the functions defined in the module.
+    pub imported_functions: Vec<(&'a str, &'a str)>,
     /// The functions defined in the module.
+    ///
+    /// Function idices are shared with `imported_functions`. Indices [0..imported_functions.len()] refers to imported functions,
+    /// and indices [imported_functions.len()..] refers to the functions defined in the module.
     pub functions: Vec<WriteOnceASM<'a>>,
     /// The start function, if any.
     pub start_function: Option<u32>,
@@ -337,7 +339,7 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
     words
 }
 
-pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
+pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
     let parser = Parser::new(0);
 
     let mut ctx = ModuleContext {
@@ -345,6 +347,7 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
         func_types: Vec::new(),
         table_types: Vec::new(),
         p: Program {
+            imported_functions: Vec::new(),
             functions: Vec::new(),
             start_function: None,
             main_function: None,
@@ -357,9 +360,6 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
             data_segments: Vec::new(),
         },
     };
-
-    // TODO: figure out what to do with the imported functions.
-    let mut imported_functions = Vec::new();
 
     // This is the memory layout of the program after all the elements have been allocated:
     // - all tables, in sequence, where each table contains:
@@ -433,30 +433,14 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
                 // For now, the imports only deal with user provided functions.
                 for import in section {
                     let import = import?;
-                    if import.module != "env" {
-                        panic!("Only \"env\" module is available for imports");
-                    }
+                    // Save the imported thing if it is a function.
+                    // We actually just support function imports, so we ignore the rest.
                     if let TypeRef::Func(type_idx) = import.ty {
-                        // Lets see if the name is known
-                        if let Ok(syscall) = S::from_str(import.name) {
-                            // Lets see if the type matches the expectations.
-                            let ty = ctx.get_type(type_idx);
-                            let (expected_params, expected_results) = syscall.function_type();
-                            assert_eq!(expected_params, ty.params());
-                            assert_eq!(expected_results, ty.results());
+                        log::debug!("Imported syscall: {}.{}", import.module, import.name);
 
-                            log::debug!("Imported syscall: {}", import.name);
-
-                            ctx.func_types.push(type_idx);
-                            imported_functions.push(syscall);
-
-                            continue;
-                        }
+                        ctx.func_types.push(type_idx);
+                        ctx.p.imported_functions.push((import.module, import.name));
                     }
-                    panic!(
-                        "Tried to import unknown entity \"{}.{}\"",
-                        import.module, import.name
-                    );
                 }
             }
             Payload::FunctionSection(section) => {
@@ -678,14 +662,17 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
             }
             Payload::CodeSectionStart { count, .. } => {
                 log::debug!("Code Section Start found. Count: {count}");
-                assert_eq!(ctx.p.functions.len() + count as usize, ctx.func_types.len());
+                assert_eq!(
+                    ctx.p.imported_functions.len() + count as usize,
+                    ctx.func_types.len()
+                );
             }
             Payload::CodeSectionEntry(function) => {
                 log::debug!("Code Section Entry found");
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
-                let func_idx = ctx.p.functions.len() as u32;
+                let func_idx = (ctx.p.imported_functions.len() + ctx.p.functions.len()) as u32;
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
 
