@@ -433,7 +433,6 @@ pub fn load_wasm<S: SystemCall>(wasm_file: &[u8]) -> wasmparser::Result<Program>
                 // For now, the imports only deal with user provided functions.
                 for import in section {
                     let import = import?;
-                    println!("Import: {:?}", import);
                     if import.module != "env" {
                         panic!("Only \"env\" module is available for imports");
                     }
