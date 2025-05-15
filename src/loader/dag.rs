@@ -37,10 +37,16 @@ pub struct BrTableTarget {
     pub input_permutation: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValueOrigin {
     pub node: usize,
     pub output_idx: u32,
+}
+
+impl ValueOrigin {
+    pub fn new(node: usize, output_idx: u32) -> Self {
+        Self { node, output_idx }
+    }
 }
 
 #[derive(Debug)]

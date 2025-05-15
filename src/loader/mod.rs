@@ -1,5 +1,6 @@
 mod allocate_registers;
 mod block_tree;
+mod blockless_dag;
 mod dag;
 mod locals_data_flow;
 
@@ -684,7 +685,9 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                 let dag = Dag::new(&ctx, func_type, &locals_types, lifted_blocks)?;
 
-                let definition = allocate_registers::allocate_registers(dag);
+                let blockless_dag = blockless_dag::BlocklessDag::new(dag);
+
+                let definition = allocate_registers::allocate_registers(blockless_dag);
 
                 ctx.p.functions.push(definition);
             }
