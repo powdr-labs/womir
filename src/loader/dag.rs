@@ -14,19 +14,9 @@ use super::{
 pub enum Operation<'a> {
     Inputs,
     WASMOp(Op<'a>),
-    BrIfZero {
-        relative_depth: u32,
-    },
-    BrTable {
-        targets: Vec<BrTableTarget>,
-    },
-    Block {
-        kind: BlockKind,
-        sub_dag: Dag<'a>,
-        /// The possible break targets for this block, relative to the itself
-        /// (i.e. 0 is itself, 1 is the parent block, 2 is the block above it, etc).
-        break_targets: Vec<u32>,
-    },
+    BrIfZero { relative_depth: u32 },
+    BrTable { targets: Vec<BrTableTarget> },
+    Block { kind: BlockKind, sub_dag: Dag<'a> },
 }
 
 #[derive(Debug)]
@@ -54,15 +44,6 @@ pub struct Node<'a> {
     pub operation: Operation<'a>,
     pub inputs: Vec<ValueOrigin>,
     pub output_types: Vec<ValType>,
-}
-
-impl<'a> Node<'a> {
-    fn get_break_targets(&self) -> &[u32] {
-        match &self.operation {
-            Operation::Block { break_targets, .. } => &break_targets,
-            _ => panic!(),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -110,7 +91,7 @@ impl<'a> Dag<'a> {
             locals: BTreeSet::new(),
         }]);
 
-        let (nodes, _) = build_dag(
+        let nodes = build_dag(
             module,
             locals_types,
             func_type.params().to_vec(),
@@ -143,7 +124,7 @@ fn build_dag<'a>(
     mut locals: Vec<Value>,
     block_elements: Vec<Element<'a>>,
     local_getter: &dyn Fn(&mut Vec<Node>, &mut [Value], u32) -> ValueOrigin,
-) -> wasmparser::Result<(Vec<Node<'a>>, Vec<u32>)> {
+) -> wasmparser::Result<Vec<Node<'a>>> {
     let mut t = StackTracker {
         module,
         // The first node in a block are the inputs
@@ -154,8 +135,6 @@ fn build_dag<'a>(
         }],
         stack,
     };
-
-    let mut break_targets = BTreeSet::new();
 
     for elem in block_elements {
         log::trace!("Stack: {:?}", t.stack);
@@ -194,8 +173,6 @@ fn build_dag<'a>(
                 // take inputs both from the stack and from the locals, and to know
                 // which locals are inputs we need to look up at the block stack.
                 Ins::WASMOp(op @ Op::Br { relative_depth }) => {
-                    break_targets.insert(relative_depth);
-
                     let target = &block_stack[relative_depth as usize];
 
                     // The stack part of the input
@@ -215,8 +192,6 @@ fn build_dag<'a>(
                     });
                 }
                 Ins::WASMOp(Op::BrIf { relative_depth }) | Ins::BrIfZero { relative_depth } => {
-                    break_targets.insert(relative_depth);
-
                     let operation = match inst {
                         Ins::WASMOp(Op::BrIf { .. }) => {
                             Operation::WASMOp(Op::BrIf { relative_depth })
@@ -282,7 +257,6 @@ fn build_dag<'a>(
                     // for all the targets.
                     let mut locals_inputs = BTreeSet::new();
                     for target in targets.iter() {
-                        break_targets.insert(*target);
                         let target = &block_stack[*target as usize];
                         locals_inputs.extend(target.locals.iter().copied());
                     }
@@ -398,13 +372,6 @@ fn build_dag<'a>(
                 // Build the DAG for the block and push it
                 let node = build_dag_for_block(module, locals_types, inputs, block_stack, block)?;
 
-                break_targets.extend(
-                    node.get_break_targets()
-                        .iter()
-                        .copied()
-                        .filter_map(|relative_depth| relative_depth.checked_sub(1)),
-                );
-
                 t.nodes.push(node);
             }
         }
@@ -412,7 +379,7 @@ fn build_dag<'a>(
 
     let nodes = t.nodes;
 
-    Ok((nodes, break_targets.into_iter().collect_vec()))
+    Ok(nodes)
 }
 
 fn build_dag_for_block<'a>(
@@ -491,7 +458,7 @@ fn build_dag_for_block<'a>(
         },
     });
 
-    let (nodes, break_targets) = build_dag(
+    let nodes = build_dag(
         module,
         locals_types,
         input_types,
@@ -508,7 +475,6 @@ fn build_dag_for_block<'a>(
         operation: Operation::Block {
             kind: block_kind,
             sub_dag: Dag { nodes },
-            break_targets,
         },
         inputs,
         output_types,

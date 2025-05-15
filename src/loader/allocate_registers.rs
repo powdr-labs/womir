@@ -38,5 +38,6 @@ pub struct WriteOnceASM<'a> {
 }
 
 pub fn allocate_registers<'a>(dag: BlocklessDag<'a>) -> WriteOnceASM<'a> {
+    println!("dag:\n{:#?}", dag);
     todo!()
 }

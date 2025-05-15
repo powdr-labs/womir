@@ -6,8 +6,7 @@
 
 use itertools::Itertools;
 use std::{
-    collections::{HashMap, VecDeque},
-    marker::PhantomData,
+    collections::{HashMap, HashSet, VecDeque},
     ops::RangeFrom,
 };
 use wasmparser::{Operator as Op, ValType};
@@ -16,18 +15,18 @@ use crate::loader::BlockKind;
 
 use super::dag::{self, Dag, ValueOrigin};
 
-#[derive(Debug)]
-enum BreakTarget {
-    Label(LabelTarget),
-    ReturnOrInterate { depth: u32 },
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+struct BreakTarget {
+    depth: u32,
+    kind: TargetType,
 }
 
-#[derive(Debug)]
-struct LabelTarget {
-    /// The depth of the frame stack when this label belongs.
-    depth: u32,
-    /// The label id.
-    id: u32,
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum TargetType {
+    /// The target is the function or loop itself.
+    FunctionOrLoop,
+    /// The target is a label within the loop or function body.
+    Label(u32),
 }
 
 #[derive(Debug)]
@@ -43,9 +42,9 @@ pub enum Operation<'a> {
 
     Loop {
         sub_dag: BlocklessDag<'a>,
-        /// The possible break targets for this block, relative to the itself
-        /// (i.e. 0 is itself, 1 is the parent block, 2 is the block above it, etc).
-        break_targets: Vec<u32>,
+        /// The possible break targets for this loop, relative to the itself
+        /// (i.e. depth 0 is itself, 1 is the parent frame, 2 is the frame above it, etc).
+        break_targets: HashSet<BreakTarget>,
     },
 
     // All the Br variations below are only used for jumps out of the current
@@ -79,15 +78,25 @@ pub struct BlocklessDag<'a> {
 }
 
 impl<'a> BlocklessDag<'a> {
-    pub fn new(dag: Dag) -> Self {
-        //process_nodes(dag.nodes);
-        todo!()
-    }
-}
+    pub fn new(dag: Dag<'a>) -> Self {
+        let mut new_nodes = Vec::new();
 
-enum TargetType {
-    FunctionOrLoop,
-    Label(u32),
+        let mut ctrl_stack = VecDeque::from([BlockStack {
+            target_type: TargetType::FunctionOrLoop,
+            frame_level: 0,
+        }]);
+
+        process_nodes(
+            dag.nodes,
+            &mut (0..),
+            &mut new_nodes,
+            &mut ctrl_stack,
+            &mut HashSet::new(),
+            None,
+        );
+
+        BlocklessDag { nodes: new_nodes }
+    }
 }
 
 struct BlockStack {
@@ -102,12 +111,13 @@ fn process_nodes<'a>(
     label_generator: &mut RangeFrom<u32>,
     new_nodes: &mut Vec<Node<'a>>,
     ctrl_stack: &mut VecDeque<BlockStack>,
+    break_targets: &mut HashSet<BreakTarget>,
     input_mapping: Option<Vec<ValueOrigin>>,
 ) {
     let mut outputs_map = HashMap::new();
 
     for (node_idx, mut node) in orig_nodes.into_iter().enumerate() {
-        let new_op = match node.operation {
+        let operation = match node.operation {
             dag::Operation::Inputs => {
                 if let Some(input_mapping) = &input_mapping {
                     // This node is suppressed, and references to its outputs
@@ -119,23 +129,27 @@ fn process_nodes<'a>(
                         outputs_map.insert(ValueOrigin::new(node_idx, output_idx as u32), *origin);
                     }
 
-                    None
+                    continue;
                 } else {
                     // This node is preserved as the first node of the frame.
                     assert!(node.inputs.is_empty());
 
-                    Some(Operation::Inputs)
+                    Operation::Inputs
                 }
             }
-            dag::Operation::BrIfZero { relative_depth } => Some(Operation::BrIfZero(
-                calculate_break_target(ctrl_stack, relative_depth),
-            )),
+            dag::Operation::BrIfZero { relative_depth } => Operation::BrIfZero(
+                calculate_break_target(ctrl_stack, break_targets, relative_depth),
+            ),
             dag::Operation::BrTable { targets } => {
                 let targets = targets
                     .into_iter()
                     .map(|target| {
                         let input_permutation = target.input_permutation;
-                        let target = calculate_break_target(ctrl_stack, target.relative_depth);
+                        let target = calculate_break_target(
+                            ctrl_stack,
+                            break_targets,
+                            target.relative_depth,
+                        );
 
                         BrTableTarget {
                             target,
@@ -144,24 +158,22 @@ fn process_nodes<'a>(
                     })
                     .collect_vec();
 
-                Some(Operation::BrTable { targets })
+                Operation::BrTable { targets }
             }
             dag::Operation::WASMOp(operator) => match operator {
-                Op::Br { relative_depth } => Some(Operation::Br(calculate_break_target(
+                Op::Br { relative_depth } => Operation::Br(calculate_break_target(
                     ctrl_stack,
+                    break_targets,
                     relative_depth,
-                ))),
-                Op::BrIf { relative_depth } => Some(Operation::BrIf(calculate_break_target(
+                )),
+                Op::BrIf { relative_depth } => Operation::BrIf(calculate_break_target(
                     ctrl_stack,
+                    break_targets,
                     relative_depth,
-                ))),
-                _ => Some(Operation::WASMOp(operator)),
+                )),
+                _ => Operation::WASMOp(operator),
             },
-            dag::Operation::Block {
-                kind,
-                sub_dag,
-                break_targets,
-            } => match kind {
+            dag::Operation::Block { kind, sub_dag } => match kind {
                 BlockKind::Loop => {
                     // Loops are not merged, they create a new frame.
 
@@ -172,21 +184,35 @@ fn process_nodes<'a>(
                         frame_level: ctrl_stack[0].frame_level + 1,
                     });
 
+                    let mut loop_break_targets = HashSet::new();
+
                     // Loops don't have input mapping, because its internal variables lives in another frame's address space.
                     process_nodes(
                         sub_dag.nodes,
-                        &mut (0u32..),
+                        // The label space is shared across all the frames, to facilitate assembly generation.
+                        // TODO: maybe should be shared across all the functions...
+                        label_generator,
                         &mut loop_nodes,
                         ctrl_stack,
+                        &mut loop_break_targets,
                         None,
                     );
 
                     ctrl_stack.pop_front().unwrap();
 
-                    Some(Operation::Loop {
+                    // Merge the loop break targets with the current frame break targets.
+                    // We must subtract 1 from the depth to make it relative to the current frame.
+                    break_targets.extend(loop_break_targets.iter().filter_map(|target| {
+                        target.depth.checked_sub(1).map(|depth| BreakTarget {
+                            depth,
+                            kind: target.kind,
+                        })
+                    }));
+
+                    Operation::Loop {
                         sub_dag: BlocklessDag { nodes: loop_nodes },
-                        break_targets: todo!(),
-                    })
+                        break_targets: loop_break_targets,
+                    }
                 }
                 BlockKind::Block => {
                     // Blocks are merged into the current frame.
@@ -212,52 +238,54 @@ fn process_nodes<'a>(
                         label_generator,
                         new_nodes,
                         ctrl_stack,
+                        break_targets,
                         input_mapping,
                     );
 
                     ctrl_stack.pop_front().unwrap();
 
-                    Some(Operation::Label { id: label })
+                    Operation::Label { id: label }
                 }
             },
         };
 
-        if let Some(operation) = new_op {
-            let new_node_idx = new_nodes.len();
+        // Translate the old node into the new node.
+        let new_node_idx = new_nodes.len();
 
-            for output_idx in 0..node.output_types.len() {
-                outputs_map.insert(
-                    ValueOrigin::new(node_idx, output_idx as u32),
-                    ValueOrigin::new(new_node_idx, output_idx as u32),
-                );
-            }
-
-            let mut inputs = node.inputs;
-            for input in inputs.iter_mut() {
-                *input = outputs_map[input];
-            }
-
-            new_nodes.push(Node {
-                operation,
-                inputs,
-                output_types: node.output_types,
-            });
+        let mut inputs = node.inputs;
+        for input in inputs.iter_mut() {
+            *input = outputs_map[input];
         }
-    }
 
-    todo!()
+        for output_idx in 0..node.output_types.len() {
+            outputs_map.insert(
+                ValueOrigin::new(node_idx, output_idx as u32),
+                ValueOrigin::new(new_node_idx, output_idx as u32),
+            );
+        }
+
+        new_nodes.push(Node {
+            operation,
+            inputs,
+            output_types: node.output_types,
+        });
+    }
 }
 
 fn calculate_break_target(
-    ctrl_stack: &mut VecDeque<BlockStack>,
+    ctrl_stack: &VecDeque<BlockStack>,
+    break_targets: &mut HashSet<BreakTarget>,
     relative_depth: u32,
 ) -> BreakTarget {
     let target_frame = &ctrl_stack[relative_depth as usize];
 
     let depth = ctrl_stack[0].frame_level - target_frame.frame_level;
 
-    match ctrl_stack[relative_depth as usize].target_type {
-        TargetType::FunctionOrLoop => BreakTarget::ReturnOrInterate { depth },
-        TargetType::Label(id) => BreakTarget::Label(LabelTarget { depth, id }),
-    }
+    let target = BreakTarget {
+        depth,
+        kind: ctrl_stack[relative_depth as usize].target_type,
+    };
+
+    break_targets.insert(target);
+    target
 }
