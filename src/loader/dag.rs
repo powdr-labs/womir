@@ -27,7 +27,7 @@ pub struct BrTableTarget {
     pub input_permutation: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueOrigin {
     pub node: usize,
     pub output_idx: u32,

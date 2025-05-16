@@ -16,13 +16,13 @@ use crate::loader::BlockKind;
 use super::dag::{self, Dag, ValueOrigin};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-struct BreakTarget {
-    depth: u32,
-    kind: TargetType,
+pub struct BreakTarget {
+    pub depth: u32,
+    pub kind: TargetType,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-enum TargetType {
+pub enum TargetType {
     /// The target is the function or loop itself.
     FunctionOrLoop,
     /// The target is a label within the loop or function body.
