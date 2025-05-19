@@ -42,11 +42,22 @@ pub struct WriteOnceASM<'a> {
 
 pub fn allocate_registers<'a>(dag: BlocklessDag<'a>, bytes_per_word: u32) -> WriteOnceASM<'a> {
     let mut free_values = 0u32..;
-    let toplevel_allocations = optimistic_allocation(&dag, free_values, bytes_per_word);
+
+    flatten_frame_tree(&dag, &mut free_values, bytes_per_word);
 
     // TODO...
 
     WriteOnceASM { _a: PhantomData }
+}
+
+fn flatten_frame_tree(dag: &BlocklessDag, free_values: &mut RangeFrom<u32>, bytes_per_word: u32) {
+    // TODO: do the proper tree flattening...
+    optimistic_allocation(&dag, free_values, bytes_per_word);
+    for node in dag.nodes.iter() {
+        if let Operation::Loop { sub_dag, .. } = &node.operation {
+            flatten_frame_tree(sub_dag, free_values, bytes_per_word);
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -194,7 +205,7 @@ impl AssignmentSet {
 /// register will be 0, the second 4 bytes register will be 1, and so on.
 fn optimistic_allocation<'a>(
     dag: &BlocklessDag<'a>,
-    free_values: RangeFrom<u32>,
+    free_values: &mut RangeFrom<u32>,
     bytes_per_word: u32,
 ) -> HashMap<ValueOrigin, Range<u32>> {
     let mut number_of_saved_copies = 0;
@@ -206,7 +217,6 @@ fn optimistic_allocation<'a>(
     }
 
     struct LabelAllocation {
-        node_idx: usize,
         regs: Vec<u32>,
         path_below_it: PerPathData,
     }
@@ -296,7 +306,6 @@ fn optimistic_allocation<'a>(
                 labels.insert(
                     *id,
                     LabelAllocation {
-                        node_idx,
                         regs,
                         path_below_it: active_path.clone(),
                     },
@@ -405,6 +414,7 @@ fn optimistic_allocation<'a>(
         active_path.free_values.start + 1
     );
 
+    *free_values = active_path.free_values;
     active_path.assignments.writer_to_regs
 }
 
