@@ -1,8 +1,13 @@
 //! This module does the infinite, write-once register allocation.
 //!
-//! The algorithm requires multiple passes, and goes like this:
+//! The algorithm works in 2 passes, and goes like this:
 //!
-//! Pass #1: for each DAG/frame, we do a bottom-up traversal,
+//! Outer Pass: we do a top-down, depth-first traversal of the DAG
+//! tree, and call the Inner Pass each traversed DAG/frame. We
+//! flatten the tree structure by emmiting assembly-like directives,
+//! using the register allocation from the Inner Pass.
+//!
+//! Inner Pass: for each DAG/frame, we do a bottom-up traversal,
 //! assigning registers to the labels outputs, matching with their
 //! respective break inputs, and detect whether or not there is a
 //! conflict, where multiple instructions would write to the same
@@ -10,22 +15,10 @@
 //! partial register assignment for some nodes, where conflicts for
 //! break inputs are explicitly marked.
 //!
-//! Pass #2: we will do a top-down traversal of the DAG, completing
-//! the register assignment for the node outputs that were not
-//! assigned (included the ones that triggered a conflict in the
-//! previous pass). When we encounter a break, we copy the correct
-//! output to the conflicted register just before the break. Since
-//! the conflict was detected per execution path, we can be sure that
-//! no register will be written to more than once in the same path.
-//! If a break output was not conflicted, we can be sure that the
-//! correct value is already in the expected register.
-//!
-//! TODO: this is still not perfectly optimal, since there might be
-//! permutations of register assignments through different execution
-//! paths that would avoid the need for some copies.
-//!
-//! Pass #3: we flatten all the DAGs, loops included, into a single
-//! assembly-like representation.
+//! TODO: the register allocation is not perfectly optimal, it
+//! just uses a greedy approach to assign registers, and give up
+//! when it detects a conflict. It may be possible to model the
+//! problem to a SAT solver or something like that.
 
 use itertools::Itertools;
 use std::{
@@ -50,7 +43,10 @@ pub struct WriteOnceASM<'a> {
 pub fn allocate_registers<'a>(dag: BlocklessDag<'a>, bytes_per_word: u32) -> WriteOnceASM<'a> {
     let mut free_values = 0u32..;
     let toplevel_allocations = optimistic_allocation(&dag, free_values, bytes_per_word);
-    todo!()
+
+    // TODO...
+
+    WriteOnceASM { _a: PhantomData }
 }
 
 #[derive(Default, Clone)]
@@ -356,8 +352,12 @@ fn optimistic_allocation<'a>(
                 // A loop can not fall through, but the source of the break inputs
                 // comes from another frame, so we just need reset and merge the paths.
                 active_path = new_path();
-                for target in break_targets {
-                    merge_path_from_target(&mut active_path, target, &mut labels, node_idx);
+                for target in break_targets.iter().filter_map(|&t| {
+                    t.depth
+                        .checked_sub(1)
+                        .map(|depth| BreakTarget { depth, ..t })
+                }) {
+                    merge_path_from_target(&mut active_path, &target, &mut labels, node_idx);
                 }
             }
             _ => {
