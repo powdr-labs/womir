@@ -20,9 +20,9 @@
 //! when it detects a conflict. It may be possible to model the
 //! problem to a SAT solver or something like that.
 
-use itertools::{Itertools, all};
+use itertools::Itertools;
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque, btree_map, hash_map},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map, hash_map},
     marker::PhantomData,
     ops::Range,
 };
@@ -515,58 +515,98 @@ fn optimistic_allocation<'a>(dag: &BlocklessDag<'a>, bytes_per_word: u32) -> All
     }
 }
 
-/// Permutes a given allocation, so that the input registers are the given ones.
-/// Assumes the input node is 0.
+/// A permutation of a given allocation, so that the input registers are the given ones, and all the others
+/// begin at a given address.
 ///
-/// The inputs registers must not overlap with the output of the RegisterGenerator!
+/// Assumes the original allocation is tightly packed starting at 0.
+struct InputPermutation(Vec<(u32, i64)>);
+
+impl InputPermutation {
+    fn new(
+        required_inputs: Vec<Range<u32>>,
+        current_inputs: impl Iterator<Item = Range<u32>>,
+        first_non_reserved: u32,
+    ) -> Self {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+
+        let mut fixed_inputs = current_inputs
+            .zip_eq(required_inputs)
+            .map(|(cur, req)| {
+                assert_eq!(cur.len(), req.len());
+                (cur.start, req)
+            })
+            .collect_vec();
+
+        fixed_inputs.sort_unstable_by_key(|(old_addr, _)| *old_addr);
+        let mut fixed_inputs = fixed_inputs.into_iter().peekable();
+
+        let mut next_offset = first_non_reserved as i64;
+        let mut next_old = 0u32;
+        let mut perm = Vec::new();
+        while let Some((old_addr, new_addr)) = fixed_inputs.peek() {
+            match next_old.cmp(old_addr) {
+                Equal => {
+                    // new_addr = old_addr + offset
+                    let offset = new_addr.start as i64 - *old_addr as i64;
+                    perm.push((*old_addr, offset));
+
+                    next_old = *old_addr + new_addr.len() as u32;
+                    next_offset -= new_addr.len() as i64;
+                    fixed_inputs.next();
+                }
+                Less => {
+                    perm.push((next_old, next_offset));
+                    next_old = *old_addr;
+                }
+                Greater => panic!("inputs ranges overlap"),
+            }
+        }
+        perm.push((next_old, next_offset));
+
+        Self(perm)
+    }
+
+    fn permute(&self, reg: u32) -> u32 {
+        let part = self
+            .0
+            .partition_point(|(ref_old_addr, _)| *ref_old_addr <= reg)
+            - 1;
+        (reg as i64 + self.0[part].1) as u32
+    }
+
+    fn permute_range(&self, range: &mut Range<u32>) {
+        let len = range.len() as u32;
+        range.start = self.permute(range.start);
+        range.end = range.start + len;
+    }
+}
+
+/// Permutes the allocation so that the input registers are the given ones,
+/// and all the others begin at a given address.
 fn permute_allocation(
     allocation: &mut Allocation,
     inputs: Vec<Range<u32>>,
-    mut reg_gen: RegisterGenerator,
+    first_non_reserved_addr: u32,
 ) {
-    // Create a mapping from old register ranges to new register ranges
-    let mut reg_map = HashMap::new();
+    let map = InputPermutation::new(
+        inputs,
+        allocation
+            .nodes_outputs
+            .iter()
+            .take_while(|(val_origin, _)| val_origin.node == 0)
+            .map(|(_, reg)| reg.clone()),
+        first_non_reserved_addr,
+    );
 
-    // Map the input registers to the given ones
-    let mut old_allocs = std::mem::take(&mut allocation.nodes_outputs).into_iter();
-    for (new_reg, (val_origin, old_reg)) in inputs.into_iter().zip_eq(
-        old_allocs
-            .by_ref()
-            .take_while(|(val_origin, _)| val_origin.node == 0),
-    ) {
-        assert_eq!(new_reg.len(), old_reg.len());
-        reg_map.insert(old_reg, new_reg.clone());
-        allocation.nodes_outputs.insert(val_origin, new_reg);
-    }
-
-    for (val_origin, old_reg) in old_allocs {
-        let len = old_reg.len();
-        // A node might use the same register as another node, even if they
-        // are write-once. This is because the nodes might be in different,
-        // independent execution paths. The original allocation should
-        // have guaranteed that.
-        let new_reg = reg_map
-            .entry(old_reg)
-            .and_modify(|new_reg| assert_eq!(new_reg.len(), len))
-            .or_insert_with(|| reg_gen.allocate_words(len as u32));
-
-        allocation.nodes_outputs.insert(val_origin, new_reg.clone());
+    // Permute the nodes outputs
+    for reg in allocation.nodes_outputs.values_mut() {
+        map.permute_range(reg);
     }
 
     // Now we need to permute the labels
     for label_regs in allocation.labels.values_mut() {
-        for old_reg in label_regs.iter_mut() {
-            let len = old_reg.len();
-            let new_reg = reg_map
-                .entry(old_reg.clone())
-                .and_modify(|new_reg| assert_eq!(new_reg.len(), len))
-                .or_insert_with(|| {
-                    let new_reg = reg_gen.allocate_words(len as u32);
-                    new_reg
-                })
-                .clone();
-
-            *old_reg = new_reg;
+        for reg in label_regs.iter_mut() {
+            map.permute_range(reg);
         }
     }
 }
@@ -582,4 +622,120 @@ fn byte_size(ty: ValType) -> u32 {
 
 fn word_count(byte_size: u32, bytes_per_word: u32) -> u32 {
     (byte_size + bytes_per_word - 1) / bytes_per_word
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_remap() {
+        // Setup simple scenario
+        let required_inputs = vec![10..20, 30..40];
+        let current_inputs = vec![5..15, 25..35].into_iter();
+        let first_non_reserved = 50;
+
+        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+
+        // Check offsets are correctly computed
+        assert_eq!(map.permute(0), 50);
+        assert_eq!(map.permute(4), 54);
+        // Address 5 is fixed at 10
+        assert_eq!(map.permute(5), 10);
+        assert_eq!(map.permute(14), 19);
+        // After the first fixed range, should shift again
+        assert_eq!(map.permute(15), 55);
+        assert_eq!(map.permute(24), 64);
+        // Address 25 fixed at 30
+        assert_eq!(map.permute(25), 30);
+        assert_eq!(map.permute(34), 39);
+        // After second fixed range
+        assert_eq!(map.permute(35), 65);
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let required_inputs = vec![10..20];
+        let current_inputs = vec![0..10].into_iter();
+        let first_non_reserved = 20;
+
+        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+
+        assert_eq!(map.permute(0), 10);
+        assert_eq!(map.permute(9), 19);
+        assert_eq!(map.permute(10), 20);
+        assert_eq!(map.permute(15), 25);
+    }
+
+    #[test]
+    fn test_no_fixed_intervals() {
+        let required_inputs = vec![];
+        let current_inputs = vec![].into_iter();
+        let first_non_reserved = 100;
+
+        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+
+        assert_eq!(map.permute(0), 100);
+        assert_eq!(map.permute(10), 110);
+    }
+
+    #[test]
+    fn test_identity() {
+        let required_inputs = vec![];
+        let current_inputs = vec![].into_iter();
+        let first_non_reserved = 0;
+
+        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+
+        assert_eq!(map.permute(0), 0);
+        assert_eq!(map.permute(10), 10);
+    }
+
+    #[test]
+    fn test_multiple_fixed_intervals() {
+        let required_inputs = vec![20..30, 40..50, 60..70];
+        let current_inputs = vec![10..20, 30..40, 50..60].into_iter();
+        let first_non_reserved = 100;
+
+        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+
+        assert_eq!(map.permute(0), 100);
+        assert_eq!(map.permute(9), 109);
+        assert_eq!(map.permute(10), 20); // fixed
+        assert_eq!(map.permute(19), 29); // end fixed
+        assert_eq!(map.permute(20), 110);
+        assert_eq!(map.permute(29), 119);
+        assert_eq!(map.permute(30), 40); // fixed
+        assert_eq!(map.permute(39), 49); // end fixed
+        assert_eq!(map.permute(40), 120);
+    }
+
+    #[test]
+    fn test_inputs_reordered() {
+        // 5 maps to 30..40, 25 maps to 10..20
+        let required_inputs = vec![10..20, 30..40];
+        let current_inputs = vec![25..35, 5..15].into_iter();
+        let first_non_reserved = 50;
+
+        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+
+        // "Fixed" addresses
+        // 25 -> 10
+        assert_eq!(map.permute(25), 10);
+
+        // 5 -> 30
+        assert_eq!(map.permute(5), 30);
+
+        // Addresses below any fixed mapping, shifted by first_non_reserved
+        assert_eq!(map.permute(0), 50);
+        assert_eq!(map.permute(4), 54);
+
+        // Address just after mapped blocks, shifted accordingly
+        assert_eq!(map.permute(15), 55);
+        assert_eq!(map.permute(20), 60);
+
+        // Address after all mapped blocks
+        assert_eq!(map.permute(40), 70);
+        assert_eq!(map.permute(45), 75);
+    }
 }
