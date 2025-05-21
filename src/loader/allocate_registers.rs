@@ -116,7 +116,7 @@ pub fn allocate_registers<'a>(
     // Since this is the top-level frame, the allocation can
     // not be arbitrary. It must conform to the calling convention,
     // so we must permute the allocation we found to match it.
-    permute_allocation(&mut allocation, input_regs, reg_gen);
+    permute_allocation(&mut allocation, input_regs, reg_gen.next_available);
 
     let mut ctrl_stack = VecDeque::from([CtrlStackEntry::TopLevelFunction { output_regs }]);
 
