@@ -20,42 +20,141 @@
 //! when it detects a conflict. It may be possible to model the
 //! problem to a SAT solver or something like that.
 
-use itertools::Itertools;
+use itertools::{Itertools, all};
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{BTreeMap, HashMap, VecDeque, btree_map, hash_map},
     marker::PhantomData,
-    ops::{Range, RangeFrom},
+    ops::Range,
 };
-use wasmparser::{Operator as Op, ValType};
+use wasmparser::{FuncType, Operator as Op, ValType};
 
 use crate::loader::{
     blockless_dag::{BreakTarget, TargetType},
     dag::ValueOrigin,
 };
 
-use super::blockless_dag::{BlocklessDag, Operation};
+use super::{
+    ModuleContext,
+    blockless_dag::{BlocklessDag, Operation},
+};
 
 /// An assembly-like representation for a write-once memory machine.
 pub struct WriteOnceASM<'a> {
     _a: PhantomData<&'a ()>,
 }
 
-pub fn allocate_registers<'a>(dag: BlocklessDag<'a>, bytes_per_word: u32) -> WriteOnceASM<'a> {
-    let mut free_values = 0u32..;
+#[derive(Debug, Clone, Copy)]
+struct RegisterGenerator {
+    next_available: u32,
+}
 
-    flatten_frame_tree(&dag, &mut free_values, bytes_per_word);
+impl RegisterGenerator {
+    fn new() -> Self {
+        Self { next_available: 0 }
+    }
+
+    fn merge(&mut self, other: Self) {
+        if self.next_available < other.next_available {
+            self.next_available = other.next_available;
+        }
+    }
+
+    fn allocate_words(&mut self, word_count: u32) -> Range<u32> {
+        let start = self.next_available;
+        self.next_available = start + word_count;
+        start..self.next_available
+    }
+
+    fn allocate_bytes(&mut self, bytes_per_word: u32, byte_size: u32) -> Range<u32> {
+        self.allocate_words(word_count(byte_size, bytes_per_word))
+    }
+
+    fn allocate_type(&mut self, bytes_per_word: u32, ty: ValType) -> Range<u32> {
+        self.allocate_bytes(bytes_per_word, byte_size(ty))
+    }
+}
+
+struct ReturnInfo {
+    ret_pc: Range<u32>,
+    ret_fp: Range<u32>,
+}
+
+enum CtrlStackEntry {
+    TopLevelFunction { output_regs: Vec<Range<u32>> },
+}
+
+pub fn allocate_registers<'a>(
+    module: &ModuleContext,
+    func_type: &FuncType,
+    dag: BlocklessDag<'a>,
+    bytes_per_word: u32,
+) -> WriteOnceASM<'a> {
+    // Perform the register allocation for the function's top-level frame.
+    let mut allocation = optimistic_allocation(&dag, bytes_per_word);
+
+    // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
+    let mut reg_gen = RegisterGenerator::new();
+    let ret_info = ReturnInfo {
+        ret_pc: reg_gen.allocate_bytes(bytes_per_word, 4),
+        ret_fp: reg_gen.allocate_bytes(bytes_per_word, 4),
+    };
+
+    // As per zCray calling convention, after the return PC and FP, we reserve
+    // space for the function inputs and outputs. Not only the inputs, but also
+    // the outputs are filled by the caller, value preemptively provided by the prover.
+    let input_regs = func_type
+        .params()
+        .iter()
+        .map(|ty| reg_gen.allocate_type(bytes_per_word, *ty))
+        .collect_vec();
+    let output_regs = func_type
+        .results()
+        .iter()
+        .map(|ty| reg_gen.allocate_type(bytes_per_word, *ty))
+        .collect_vec();
+
+    // Since this is the top-level frame, the allocation can
+    // not be arbitrary. It must conform to the calling convention,
+    // so we must permute the allocation we found to match it.
+    permute_allocation(&mut allocation, input_regs, reg_gen);
+
+    let mut ctrl_stack = VecDeque::from([CtrlStackEntry::TopLevelFunction { output_regs }]);
+
+    flatten_frame_tree(
+        &dag,
+        bytes_per_word,
+        allocation,
+        &mut ctrl_stack,
+        Some(ret_info),
+    );
 
     // TODO...
 
     WriteOnceASM { _a: PhantomData }
 }
 
-fn flatten_frame_tree(dag: &BlocklessDag, free_values: &mut RangeFrom<u32>, bytes_per_word: u32) {
+fn flatten_frame_tree(
+    dag: &BlocklessDag,
+    bytes_per_word: u32,
+    allocation: Allocation,
+    ctrl_stack: &mut VecDeque<CtrlStackEntry>,
+    ret_info: Option<ReturnInfo>,
+) {
     // TODO: do the proper tree flattening...
-    optimistic_allocation(&dag, free_values, bytes_per_word);
     for node in dag.nodes.iter() {
         if let Operation::Loop { sub_dag, .. } = &node.operation {
-            flatten_frame_tree(sub_dag, free_values, bytes_per_word);
+            let loop_allocation = optimistic_allocation(sub_dag, bytes_per_word);
+
+            ctrl_stack.push_front(todo!());
+            let loop_ret_info = todo!();
+            flatten_frame_tree(
+                sub_dag,
+                bytes_per_word,
+                loop_allocation,
+                &mut ctrl_stack,
+                loop_ret_info,
+            );
+            ctrl_stack.pop_front();
         }
     }
 }
@@ -67,7 +166,7 @@ struct AssignmentSet {
     reg_to_writers: HashMap<u32, Vec<ValueOrigin>>,
     /// A single writer can write to multiple contiguous registers, depending on its
     /// output types.
-    writer_to_regs: HashMap<ValueOrigin, Range<u32>>,
+    writer_to_regs: BTreeMap<ValueOrigin, Range<u32>>,
 }
 
 impl AssignmentSet {
@@ -79,7 +178,7 @@ impl AssignmentSet {
     ) {
         // First we test if the writer is already assigned to a register range.
         let mut w2r = match self.writer_to_regs.entry(writer) {
-            Entry::Occupied(entry) => {
+            btree_map::Entry::Occupied(entry) => {
                 // Test the very rare special case where the writer
                 // is already assigned to the range we need.
                 if entry.get() == &reg_range {
@@ -89,13 +188,13 @@ impl AssignmentSet {
                     None
                 }
             }
-            Entry::Vacant(entry) => Some(entry),
+            btree_map::Entry::Vacant(entry) => Some(entry),
         };
 
         // Second we need to check if the registers are already reserved.
         let mut removed_writers = Vec::new();
         for reg in reg_range.clone() {
-            if let Entry::Occupied(entry) = self.reg_to_writers.entry(reg) {
+            if let hash_map::Entry::Occupied(entry) = self.reg_to_writers.entry(reg) {
                 // Already used or reserved. We have a conflict and can't optimistically
                 // set the writer. If the conflict is with a writer node above us, it
                 // means it was also optimistically assigned, and we must clear it.
@@ -106,7 +205,7 @@ impl AssignmentSet {
 
         if let Some(w2r) = w2r {
             // Both are writer and registers are free, so we can assign the register to the writer.
-            w2r.insert_entry(reg_range.clone());
+            w2r.insert(reg_range.clone());
             for r in reg_range {
                 self.reg_to_writers.entry(r).or_default().push(writer);
             }
@@ -187,6 +286,16 @@ impl AssignmentSet {
     }
 }
 
+/// One possible register allocation for a given DAG.
+struct Allocation {
+    /// The registers assigned to the nodes outputs.
+    nodes_outputs: BTreeMap<ValueOrigin, Range<u32>>,
+    /// The registers assigned to the labels. On a break, there is a chance that
+    /// the register were already written with the correct value. If not, it must
+    /// be written on demand, just before the break.
+    labels: HashMap<u32, Vec<Range<u32>>>,
+}
+
 /// Allocates registers for a given DAG. It is not optimal, but it tries to
 /// minimize the number of copies and used registers.
 ///
@@ -203,21 +312,18 @@ impl AssignmentSet {
 /// The smallest allocation possible is 1 word, and the addresses are given
 /// in words, not bytes. E.g. if `bytes_per_word` is 4, then the first 4 bytes
 /// register will be 0, the second 4 bytes register will be 1, and so on.
-fn optimistic_allocation<'a>(
-    dag: &BlocklessDag<'a>,
-    free_values: &mut RangeFrom<u32>,
-    bytes_per_word: u32,
-) -> HashMap<ValueOrigin, Range<u32>> {
+fn optimistic_allocation<'a>(dag: &BlocklessDag<'a>, bytes_per_word: u32) -> Allocation {
     let mut number_of_saved_copies = 0;
+    let reg_gen = RegisterGenerator::new();
 
     #[derive(Clone)]
     struct PerPathData {
-        free_values: RangeFrom<u32>,
+        reg_gen: RegisterGenerator,
         assignments: AssignmentSet,
     }
 
     struct LabelAllocation {
-        regs: Vec<u32>,
+        regs: Vec<Range<u32>>,
         path_below_it: PerPathData,
     }
 
@@ -225,17 +331,13 @@ fn optimistic_allocation<'a>(
 
     impl PerPathData {
         fn merge(&mut self, other: &Self, current_node_idx: usize) {
-            // Merge the free values
-            if other.free_values.start > self.free_values.start {
-                self.free_values = other.free_values.clone();
-            }
-
+            self.reg_gen.merge(other.reg_gen);
             self.assignments.merge(&other.assignments, current_node_idx);
         }
     }
 
     let new_path = || PerPathData {
-        free_values: free_values.clone(),
+        reg_gen,
         assignments: AssignmentSet::default(),
     };
 
@@ -278,17 +380,10 @@ fn optimistic_allocation<'a>(
         // conflicts.
         for (input_idx, reg) in target_label.regs.iter().enumerate() {
             let origin = inputs[input_idx];
-            let word_count =
-                (byte_size(dag.nodes[origin.node].output_types[origin.output_idx as usize])
-                    + bytes_per_word
-                    - 1)
-                    / bytes_per_word;
 
-            active_path.assignments.assign_or_reserve(
-                origin,
-                *reg..(reg + word_count),
-                current_node_idx,
-            );
+            active_path
+                .assignments
+                .assign_or_reserve(origin, reg.clone(), current_node_idx);
         }
     };
 
@@ -297,11 +392,11 @@ fn optimistic_allocation<'a>(
     for (node_idx, node) in dag.nodes.iter().enumerate().rev() {
         match &node.operation {
             Operation::Label { id } => {
-                let regs = active_path
-                    .free_values
-                    .by_ref()
-                    .take(node.output_types.len())
-                    .collect();
+                let regs = node
+                    .output_types
+                    .iter()
+                    .map(|ty| active_path.reg_gen.allocate_type(bytes_per_word, *ty))
+                    .collect_vec();
 
                 labels.insert(
                     *id,
@@ -378,17 +473,12 @@ fn optimistic_allocation<'a>(
                         output_idx: output_idx as u32,
                     };
 
-                    if let Entry::Vacant(entry) =
+                    if let btree_map::Entry::Vacant(entry) =
                         active_path.assignments.writer_to_regs.entry(origin)
                     {
-                        let word_count =
-                            (byte_size(*output_type) + bytes_per_word - 1) / bytes_per_word;
-                        let past_last_reg = active_path
-                            .free_values
-                            .nth(word_count as usize - 1)
-                            .unwrap()
-                            + 1;
-                        let reg_range = (past_last_reg - word_count)..past_last_reg;
+                        let reg_range = active_path
+                            .reg_gen
+                            .allocate_type(bytes_per_word, *output_type);
 
                         entry.insert(reg_range.clone());
 
@@ -411,11 +501,74 @@ fn optimistic_allocation<'a>(
 
     log::info!(
         "Optimistic allocation: {number_of_saved_copies} copies saved, {} registers used",
-        active_path.free_values.start + 1
+        active_path.reg_gen.next_available
     );
 
-    *free_values = active_path.free_values;
-    active_path.assignments.writer_to_regs
+    let labels = labels
+        .into_iter()
+        .map(|(label, label_alloc)| (label, label_alloc.regs))
+        .collect();
+
+    Allocation {
+        nodes_outputs: active_path.assignments.writer_to_regs,
+        labels,
+    }
+}
+
+/// Permutes a given allocation, so that the input registers are the given ones.
+/// Assumes the input node is 0.
+///
+/// The inputs registers must not overlap with the output of the RegisterGenerator!
+fn permute_allocation(
+    allocation: &mut Allocation,
+    inputs: Vec<Range<u32>>,
+    mut reg_gen: RegisterGenerator,
+) {
+    // Create a mapping from old register ranges to new register ranges
+    let mut reg_map = HashMap::new();
+
+    // Map the input registers to the given ones
+    let mut old_allocs = std::mem::take(&mut allocation.nodes_outputs).into_iter();
+    for (new_reg, (val_origin, old_reg)) in inputs.into_iter().zip_eq(
+        old_allocs
+            .by_ref()
+            .take_while(|(val_origin, _)| val_origin.node == 0),
+    ) {
+        assert_eq!(new_reg.len(), old_reg.len());
+        reg_map.insert(old_reg, new_reg.clone());
+        allocation.nodes_outputs.insert(val_origin, new_reg);
+    }
+
+    for (val_origin, old_reg) in old_allocs {
+        let len = old_reg.len();
+        // A node might use the same register as another node, even if they
+        // are write-once. This is because the nodes might be in different,
+        // independent execution paths. The original allocation should
+        // have guaranteed that.
+        let new_reg = reg_map
+            .entry(old_reg)
+            .and_modify(|new_reg| assert_eq!(new_reg.len(), len))
+            .or_insert_with(|| reg_gen.allocate_words(len as u32));
+
+        allocation.nodes_outputs.insert(val_origin, new_reg.clone());
+    }
+
+    // Now we need to permute the labels
+    for label_regs in allocation.labels.values_mut() {
+        for old_reg in label_regs.iter_mut() {
+            let len = old_reg.len();
+            let new_reg = reg_map
+                .entry(old_reg.clone())
+                .and_modify(|new_reg| assert_eq!(new_reg.len(), len))
+                .or_insert_with(|| {
+                    let new_reg = reg_gen.allocate_words(len as u32);
+                    new_reg
+                })
+                .clone();
+
+            *old_reg = new_reg;
+        }
+    }
 }
 
 fn byte_size(ty: ValType) -> u32 {
@@ -425,4 +578,8 @@ fn byte_size(ty: ValType) -> u32 {
         ValType::V128 => 16,
         ValType::Ref(..) => 4,
     }
+}
+
+fn word_count(byte_size: u32, bytes_per_word: u32) -> u32 {
+    (byte_size + bytes_per_word - 1) / bytes_per_word
 }

@@ -687,7 +687,8 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag);
 
-                let definition = allocate_registers::allocate_registers(blockless_dag, 4);
+                let definition =
+                    allocate_registers::allocate_registers(&ctx, func_type, blockless_dag, 4);
 
                 ctx.p.functions.push(definition);
             }
