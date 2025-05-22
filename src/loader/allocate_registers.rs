@@ -22,7 +22,7 @@
 
 use itertools::Itertools;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map, hash_map},
+    collections::{BTreeMap, HashMap, VecDeque, btree_map, hash_map},
     marker::PhantomData,
     ops::Range,
 };
@@ -527,8 +527,6 @@ impl InputPermutation {
         current_inputs: impl Iterator<Item = Range<u32>>,
         first_non_reserved: u32,
     ) -> Self {
-        use std::cmp::Ordering::{Equal, Greater, Less};
-
         let mut fixed_inputs = current_inputs
             .zip_eq(required_inputs)
             .map(|(cur, req)| {
@@ -538,28 +536,23 @@ impl InputPermutation {
             .collect_vec();
 
         fixed_inputs.sort_unstable_by_key(|(old_addr, _)| *old_addr);
-        let mut fixed_inputs = fixed_inputs.into_iter().peekable();
 
         let mut next_offset = first_non_reserved as i64;
         let mut next_old = 0u32;
         let mut perm = Vec::new();
-        while let Some((old_addr, new_addr)) = fixed_inputs.peek() {
-            match next_old.cmp(old_addr) {
-                Equal => {
-                    // new_addr = old_addr + offset
-                    let offset = new_addr.start as i64 - *old_addr as i64;
-                    perm.push((*old_addr, offset));
-
-                    next_old = *old_addr + new_addr.len() as u32;
-                    next_offset -= new_addr.len() as i64;
-                    fixed_inputs.next();
-                }
-                Less => {
-                    perm.push((next_old, next_offset));
-                    next_old = *old_addr;
-                }
-                Greater => panic!("inputs ranges overlap"),
+        for (old_addr, new_addr) in fixed_inputs {
+            if next_old < old_addr {
+                perm.push((next_old, next_offset));
+            } else {
+                assert_eq!(next_old, old_addr);
             }
+
+            // new_addr = old_addr + offset
+            let offset = new_addr.start as i64 - old_addr as i64;
+            perm.push((old_addr, offset));
+
+            next_old = old_addr + new_addr.len() as u32;
+            next_offset -= new_addr.len() as i64;
         }
         perm.push((next_old, next_offset));
 
