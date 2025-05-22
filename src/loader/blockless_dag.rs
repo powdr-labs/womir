@@ -8,6 +8,7 @@ use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ops::RangeFrom,
+    vec,
 };
 use wasmparser::{Operator as Op, ValType};
 
@@ -15,13 +16,13 @@ use crate::loader::BlockKind;
 
 use super::dag::{self, Dag, ValueOrigin};
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BreakTarget {
     pub depth: u32,
     pub kind: TargetType,
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TargetType {
     /// The target is the function or loop itself.
     FunctionOrLoop,
@@ -42,9 +43,11 @@ pub enum Operation<'a> {
 
     Loop {
         sub_dag: BlocklessDag<'a>,
-        /// The possible break targets for this loop, relative to the itself
-        /// (i.e. depth 0 is itself, 1 is the parent frame, 2 is the frame above it, etc).
-        break_targets: HashSet<BreakTarget>,
+        /// The possible break targets for this loop, relative to the parent frame.
+        /// (i.e. depth 0 is the frame before entering the loop, 1 is the frame above it, etc).
+        ///
+        /// The two vector levels are sorted for easy searching.
+        break_targets: Vec<(u32, Vec<TargetType>)>,
     },
 
     // All the Br variations below are only used for jumps out of the current
@@ -200,14 +203,32 @@ fn process_nodes<'a>(
 
                     ctrl_stack.pop_front().unwrap();
 
+                    // Make the loop break targets relative to the current frame.
+                    let mut loop_break_targets = loop_break_targets
+                        .iter()
+                        .filter_map(|target| {
+                            target.depth.checked_sub(1).map(|depth| BreakTarget {
+                                depth,
+                                kind: target.kind,
+                            })
+                        })
+                        .collect_vec();
+
                     // Merge the loop break targets with the current frame break targets.
                     // We must subtract 1 from the depth to make it relative to the current frame.
-                    break_targets.extend(loop_break_targets.iter().filter_map(|target| {
-                        target.depth.checked_sub(1).map(|depth| BreakTarget {
-                            depth,
-                            kind: target.kind,
+                    break_targets.extend(loop_break_targets.iter());
+
+                    // Reorganize the break targets as a vector of vectors.
+                    loop_break_targets.sort_unstable();
+                    let loop_break_targets = loop_break_targets
+                        .into_iter()
+                        .chunk_by(|BreakTarget { depth, .. }| *depth)
+                        .into_iter()
+                        .map(|(depth, group)| {
+                            let kinds = group.map(|BreakTarget { kind, .. }| kind).collect();
+                            (depth, kinds)
                         })
-                    }));
+                        .collect_vec();
 
                     Operation::Loop {
                         sub_dag: BlocklessDag { nodes: loop_nodes },

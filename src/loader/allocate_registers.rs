@@ -89,9 +89,6 @@ pub fn allocate_registers<'a>(
     dag: BlocklessDag<'a>,
     bytes_per_word: u32,
 ) -> WriteOnceASM<'a> {
-    // Perform the register allocation for the function's top-level frame.
-    let mut allocation = optimistic_allocation(&dag, bytes_per_word);
-
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::new();
     let ret_info = ReturnInfo {
@@ -112,6 +109,9 @@ pub fn allocate_registers<'a>(
         .iter()
         .map(|ty| reg_gen.allocate_type(bytes_per_word, *ty))
         .collect_vec();
+
+    // Perform the register allocation for the function's top-level frame.
+    let mut allocation = optimistic_allocation(&dag, bytes_per_word, RegisterGenerator::new());
 
     // Since this is the top-level frame, the allocation can
     // not be arbitrary. It must conform to the calling convention,
@@ -142,8 +142,14 @@ fn flatten_frame_tree(
 ) {
     // TODO: do the proper tree flattening...
     for node in dag.nodes.iter() {
-        if let Operation::Loop { sub_dag, .. } = &node.operation {
-            let loop_allocation = optimistic_allocation(sub_dag, bytes_per_word);
+        if let Operation::Loop {
+            sub_dag,
+            break_targets,
+        } = &node.operation
+        {
+            let mut reg_gen = RegisterGenerator::new();
+            todo!();
+            let loop_allocation = optimistic_allocation(sub_dag, bytes_per_word, reg_gen);
 
             ctrl_stack.push_front(todo!());
             let loop_ret_info = todo!();
@@ -312,9 +318,12 @@ struct Allocation {
 /// The smallest allocation possible is 1 word, and the addresses are given
 /// in words, not bytes. E.g. if `bytes_per_word` is 4, then the first 4 bytes
 /// register will be 0, the second 4 bytes register will be 1, and so on.
-fn optimistic_allocation<'a>(dag: &BlocklessDag<'a>, bytes_per_word: u32) -> Allocation {
+fn optimistic_allocation<'a>(
+    dag: &BlocklessDag<'a>,
+    bytes_per_word: u32,
+    reg_gen: RegisterGenerator,
+) -> Allocation {
     let mut number_of_saved_copies = 0;
-    let reg_gen = RegisterGenerator::new();
 
     #[derive(Clone)]
     struct PerPathData {
@@ -456,12 +465,18 @@ fn optimistic_allocation<'a>(dag: &BlocklessDag<'a>, bytes_per_word: u32) -> All
                 // A loop can not fall through, but the source of the break inputs
                 // comes from another frame, so we just need reset and merge the paths.
                 active_path = new_path();
-                for target in break_targets.iter().filter_map(|&t| {
-                    t.depth
-                        .checked_sub(1)
-                        .map(|depth| BreakTarget { depth, ..t })
-                }) {
-                    merge_path_from_target(&mut active_path, &target, &mut labels, node_idx);
+                for (depth, targets) in break_targets.iter() {
+                    for kind in targets {
+                        merge_path_from_target(
+                            &mut active_path,
+                            &BreakTarget {
+                                depth: *depth,
+                                kind: *kind,
+                            },
+                            &mut labels,
+                            node_idx,
+                        );
+                    }
                 }
             }
             _ => {
