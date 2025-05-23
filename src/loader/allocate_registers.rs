@@ -17,7 +17,7 @@
 
 use itertools::Itertools;
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque, btree_map, hash_map},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map, hash_map},
     marker::PhantomData,
     ops::{Range, RangeFrom},
 };
@@ -188,72 +188,89 @@ fn flatten_frame_tree(
 
                 let mut copy_instructions = Vec::new();
 
+                // If None, this loop does not return from the function or iterate to any outer loop.
+                let shallowest_iter_or_ret = break_targets
+                    .iter()
+                    .find(|(_, targets)| targets.first() == Some(&TargetType::FunctionOrLoop))
+                    .map(|(depth, _)| *depth);
+
                 // Test if the loop can return from the function. If so, we need to
                 // forward the return info.
                 let mut loop_ret_info = None;
-                if let Some(ret_info) = &ret_info {
-                    let func_frame_depth = ctrl_stack.len() as u32 - 1;
-                    if let Some(&(depth, ref targets)) = break_targets.last() {
-                        if depth == func_frame_depth
-                            && targets.get(0) == Some(&TargetType::FunctionOrLoop)
-                        {
-                            let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
-                            let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
-                            let output_regs = ret_info
-                                .output_regs
-                                .iter()
-                                .map(|reg| loop_reg_gen.allocate_words(reg.len() as u32))
-                                .collect_vec();
+                if let (Some(ret_info), Some(_)) = (&ret_info, &shallowest_iter_or_ret) {
+                    let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+                    let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+                    let output_regs = ret_info
+                        .output_regs
+                        .iter()
+                        .map(|reg| loop_reg_gen.allocate_words(reg.len() as u32))
+                        .collect_vec();
 
-                            // Issue the copy instructions into the loop frame.
-                            copy_instructions.extend(copy_into_frame(
-                                ret_info.ret_pc.clone(),
-                                loop_fp.start,
-                                ret_pc.clone(),
-                            ));
-                            copy_instructions.extend(copy_into_frame(
-                                ret_info.ret_fp.clone(),
-                                loop_fp.start,
-                                ret_fp.clone(),
-                            ));
-                            copy_instructions.extend(
-                                output_regs
-                                    .iter()
-                                    .zip_eq(ret_info.output_regs.iter())
-                                    .flat_map(|(dst, src)| {
-                                        copy_into_frame(src.clone(), loop_fp.start, dst.clone())
-                                    }),
-                            );
+                    // Issue the copy instructions into the loop frame.
+                    copy_instructions.extend(copy_into_frame(
+                        ret_info.ret_pc.clone(),
+                        loop_fp.start,
+                        ret_pc.clone(),
+                    ));
+                    copy_instructions.extend(copy_into_frame(
+                        ret_info.ret_fp.clone(),
+                        loop_fp.start,
+                        ret_fp.clone(),
+                    ));
+                    copy_instructions.extend(
+                        output_regs
+                            .iter()
+                            .zip_eq(ret_info.output_regs.iter())
+                            .flat_map(|(dst, src)| {
+                                copy_into_frame(src.clone(), loop_fp.start, dst.clone())
+                            }),
+                    );
 
-                            loop_ret_info = Some(ReturnInfo {
-                                ret_pc,
-                                ret_fp,
-                                output_regs,
-                            });
-                        }
-                    }
+                    loop_ret_info = Some(ReturnInfo {
+                        ret_pc,
+                        ret_fp,
+                        output_regs,
+                    });
                 };
 
-                let mut loop_outer_fps = HashMap::new();
-                // For each of the frames this loop can return to, we need to save the frame pointer.
+                let mut saved_fps = BTreeMap::new();
+
+                // Select the outer frame pointers needed to iterate to the outer loops.
+                let num_loops = ctrl_stack.len() as u32 - 1;
+                for depth in shallowest_iter_or_ret.unwrap_or(num_loops)..num_loops {
+                    if let Some(src_reg) = outer_fps.get(&depth) {
+                        saved_fps.insert(depth, src_reg.clone());
+                    }
+                }
+
+                // Select the outer frame pointers needed to break into outer frames.
                 for (depth, targets) in break_targets.iter() {
                     for target in targets {
                         if let TargetType::Label(_) = target {
-                            // This is a jump to a label in another frame, we must save the frame pointer.
-                            let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
-
-                            copy_instructions.extend(copy_into_frame(
-                                outer_fp.clone(),
-                                loop_fp.start,
-                                outer_fps[depth].clone(),
-                            ));
-
-                            loop_outer_fps.insert(*depth + 1, outer_fp);
+                            let src_reg = outer_fps[depth].clone();
+                            let old = saved_fps.insert(*depth, src_reg.clone());
+                            old.inspect(|old| {
+                                assert_eq!(*old, src_reg);
+                            });
 
                             break;
                         }
                     }
                 }
+
+                // Actually issue the copy instructions for all the FPs that must be copied.
+                let loop_outer_fps = saved_fps
+                    .into_iter()
+                    .map(|(depth, src_reg)| {
+                        let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+                        copy_instructions.extend(copy_into_frame(
+                            src_reg,
+                            loop_fp.start,
+                            outer_fp.clone(),
+                        ));
+                        (depth + 1, outer_fp)
+                    })
+                    .collect();
 
                 let loop_allocation =
                     optimistic_allocation(&sub_dag, bytes_per_word, &mut loop_reg_gen);
