@@ -24,7 +24,7 @@ use itertools::Itertools;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque, btree_map, hash_map},
     marker::PhantomData,
-    ops::Range,
+    ops::{Range, RangeFrom},
 };
 use wasmparser::{FuncType, Operator as Op, ValType};
 
@@ -41,6 +41,31 @@ use super::{
 /// An assembly-like representation for a write-once memory machine.
 pub struct WriteOnceASM<'a> {
     _a: PhantomData<&'a ()>,
+}
+
+/// Just to make it explicit that the directive argument is not an immediate, but a pointer to a word inside the frame.
+type FramePtr = u32;
+
+pub enum Directive {
+    Label {
+        id: String,
+    },
+    /// Allocates a new frame.
+    AllocateFrame {
+        word_count: u32,
+        result_ptr: FramePtr, // i32
+    },
+    /// Copies a word from the active frame to a given place in the given frame.
+    CopyIntoFrame {
+        src_word: FramePtr,   // word
+        dest_frame: FramePtr, // i32
+        dest_word: FramePtr,  // word
+    },
+    /// Jump and activate a frame.
+    JumpAndActivateFrame {
+        target: String,
+        frame_ptr: FramePtr, // i32
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -77,10 +102,12 @@ impl RegisterGenerator {
 struct ReturnInfo {
     ret_pc: Range<u32>,
     ret_fp: Range<u32>,
+    output_regs: Vec<Range<u32>>,
 }
 
 enum CtrlStackEntry {
-    TopLevelFunction { output_regs: Vec<Range<u32>> },
+    TopLevelFunction,
+    Loop { label: String },
 }
 
 pub fn allocate_registers<'a>(
@@ -91,10 +118,9 @@ pub fn allocate_registers<'a>(
 ) -> WriteOnceASM<'a> {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::new();
-    let ret_info = ReturnInfo {
-        ret_pc: reg_gen.allocate_bytes(bytes_per_word, 4),
-        ret_fp: reg_gen.allocate_bytes(bytes_per_word, 4),
-    };
+
+    let ret_pc = reg_gen.allocate_bytes(bytes_per_word, 4);
+    let ret_fp = reg_gen.allocate_bytes(bytes_per_word, 4);
 
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
@@ -110,21 +136,31 @@ pub fn allocate_registers<'a>(
         .map(|ty| reg_gen.allocate_type(bytes_per_word, *ty))
         .collect_vec();
 
+    let ret_info = ReturnInfo {
+        ret_pc,
+        ret_fp,
+        output_regs,
+    };
+
     // Perform the register allocation for the function's top-level frame.
-    let mut allocation = optimistic_allocation(&dag, bytes_per_word, RegisterGenerator::new());
+    let mut allocation = optimistic_allocation(&dag, bytes_per_word, &mut RegisterGenerator::new());
 
     // Since this is the top-level frame, the allocation can
     // not be arbitrary. It must conform to the calling convention,
     // so we must permute the allocation we found to match it.
-    permute_allocation(&mut allocation, input_regs, reg_gen.next_available);
+    let reg_gen = permute_allocation(&mut allocation, input_regs, reg_gen.next_available);
 
-    let mut ctrl_stack = VecDeque::from([CtrlStackEntry::TopLevelFunction { output_regs }]);
+    let mut ctrl_stack = VecDeque::from([CtrlStackEntry::TopLevelFunction]);
 
     flatten_frame_tree(
-        &dag,
+        dag,
         bytes_per_word,
         allocation,
+        reg_gen,
+        // TODO: share the label generator among all the functions.
+        &mut (0..),
         &mut ctrl_stack,
+        HashMap::new(),
         Some(ret_info),
     );
 
@@ -134,35 +170,179 @@ pub fn allocate_registers<'a>(
 }
 
 fn flatten_frame_tree(
-    dag: &BlocklessDag,
+    dag: BlocklessDag,
     bytes_per_word: u32,
     allocation: Allocation,
+    mut reg_gen: RegisterGenerator,
+    loop_label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
+    outer_fps: HashMap<u32, Range<u32>>,
     ret_info: Option<ReturnInfo>,
-) {
-    // TODO: do the proper tree flattening...
-    for node in dag.nodes.iter() {
-        if let Operation::Loop {
-            sub_dag,
-            break_targets,
-        } = &node.operation
-        {
-            let mut reg_gen = RegisterGenerator::new();
-            todo!();
-            let loop_allocation = optimistic_allocation(sub_dag, bytes_per_word, reg_gen);
-
-            ctrl_stack.push_front(todo!());
-            let loop_ret_info = todo!();
-            flatten_frame_tree(
+) -> (u32, Vec<Directive>) {
+    let mut directives = Vec::new();
+    for node in dag.nodes {
+        match node.operation {
+            Operation::Loop {
                 sub_dag,
-                bytes_per_word,
-                loop_allocation,
-                &mut ctrl_stack,
-                loop_ret_info,
-            );
-            ctrl_stack.pop_front();
+                break_targets,
+            } => {
+                let loop_fp = reg_gen.allocate_bytes(bytes_per_word, 4);
+
+                let mut loop_reg_gen = RegisterGenerator::new();
+
+                let mut copy_instructions = Vec::new();
+
+                // Test if the loop can return from the function. If so, we need to
+                // forward the return info.
+                let mut loop_ret_info = None;
+                if let Some(ret_info) = &ret_info {
+                    let func_frame_depth = ctrl_stack.len() as u32 - 1;
+                    if let Some(&(depth, ref targets)) = break_targets.last() {
+                        if depth == func_frame_depth
+                            && targets.get(0) == Some(&TargetType::FunctionOrLoop)
+                        {
+                            let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+                            let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+                            let output_regs = ret_info
+                                .output_regs
+                                .iter()
+                                .map(|reg| loop_reg_gen.allocate_words(reg.len() as u32))
+                                .collect_vec();
+
+                            // Issue the copy instructions into the loop frame.
+                            copy_instructions.extend(copy_into_frame(
+                                ret_info.ret_pc.clone(),
+                                loop_fp.start,
+                                ret_pc.clone(),
+                            ));
+                            copy_instructions.extend(copy_into_frame(
+                                ret_info.ret_fp.clone(),
+                                loop_fp.start,
+                                ret_fp.clone(),
+                            ));
+                            copy_instructions.extend(
+                                output_regs
+                                    .iter()
+                                    .zip_eq(ret_info.output_regs.iter())
+                                    .flat_map(|(dst, src)| {
+                                        copy_into_frame(src.clone(), loop_fp.start, dst.clone())
+                                    }),
+                            );
+
+                            loop_ret_info = Some(ReturnInfo {
+                                ret_pc,
+                                ret_fp,
+                                output_regs,
+                            });
+                        }
+                    }
+                };
+
+                let mut loop_outer_fps = HashMap::new();
+                // For each of the frames this loop can return to, we need to save the frame pointer.
+                for (depth, targets) in break_targets.iter() {
+                    for target in targets {
+                        if let TargetType::Label(_) = target {
+                            // This is a jump to a label in another frame, we must save the frame pointer.
+                            let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+
+                            copy_instructions.extend(copy_into_frame(
+                                outer_fp.clone(),
+                                loop_fp.start,
+                                outer_fps[depth].clone(),
+                            ));
+
+                            loop_outer_fps.insert(*depth + 1, outer_fp);
+
+                            break;
+                        }
+                    }
+                }
+
+                let loop_allocation =
+                    optimistic_allocation(&sub_dag, bytes_per_word, &mut loop_reg_gen);
+
+                // Finaly, we copy the inputs from the outer frame to the inner frame.
+                let src_inputs = node
+                    .inputs
+                    .iter()
+                    .map(|input| allocation.nodes_outputs[input].clone());
+
+                let dest_inputs = loop_allocation
+                    .nodes_outputs
+                    .iter()
+                    .take_while(|(val_origin, _)| val_origin.node == 0)
+                    .map(|(_, reg)| reg.clone());
+
+                for (src, dest) in src_inputs.zip_eq(dest_inputs) {
+                    copy_instructions.extend(copy_into_frame(src, loop_fp.start, dest));
+                }
+
+                // Sanity check: loops have no outputs:
+                assert!(node.output_types.is_empty());
+
+                ctrl_stack.push_front(CtrlStackEntry::Loop {
+                    label: format!("L{}", loop_label_gen.next().unwrap()),
+                });
+
+                let (loop_frame_size, loop_directives) = flatten_frame_tree(
+                    sub_dag,
+                    bytes_per_word,
+                    loop_allocation,
+                    loop_reg_gen,
+                    loop_label_gen,
+                    ctrl_stack,
+                    loop_outer_fps,
+                    loop_ret_info,
+                );
+
+                let CtrlStackEntry::Loop { label } = ctrl_stack.pop_front().unwrap() else {
+                    unreachable!();
+                };
+
+                // Now we can actually emit the listing for the loop.
+                // We start by allocating the frame.
+                directives.push(Directive::AllocateFrame {
+                    word_count: loop_frame_size,
+                    result_ptr: loop_fp.start,
+                });
+
+                // Then we emit the copy instructions.
+                directives.extend(copy_instructions);
+
+                // Then we activate the frame.
+                //
+                // Jumping doesn't really do anything here, because the loop directives are
+                // right ahead, but it is not worth to create a new instruction just for that.
+                directives.push(Directive::JumpAndActivateFrame {
+                    target: label.clone(),
+                    frame_ptr: loop_fp.start,
+                });
+
+                // Then the loop label.
+                directives.push(Directive::Label { id: label });
+
+                // Finally, we emit the directives for the inner frame.
+                directives.extend(loop_directives);
+            }
+            _ => todo!(),
         }
     }
+
+    (reg_gen.next_available, directives)
+}
+
+fn copy_into_frame(
+    src: Range<u32>,
+    dest_frame: u32,
+    dest: Range<u32>,
+) -> impl Iterator<Item = Directive> {
+    src.zip_eq(dest)
+        .map(move |(src_word, dest_word)| Directive::CopyIntoFrame {
+            src_word,
+            dest_frame,
+            dest_word,
+        })
 }
 
 #[derive(Default, Clone)]
@@ -321,7 +501,7 @@ struct Allocation {
 fn optimistic_allocation<'a>(
     dag: &BlocklessDag<'a>,
     bytes_per_word: u32,
-    reg_gen: RegisterGenerator,
+    reg_gen: &mut RegisterGenerator,
 ) -> Allocation {
     let mut number_of_saved_copies = 0;
 
@@ -346,7 +526,7 @@ fn optimistic_allocation<'a>(
     }
 
     let new_path = || PerPathData {
-        reg_gen,
+        reg_gen: reg_gen.clone(),
         assignments: AssignmentSet::default(),
     };
 
@@ -524,6 +704,8 @@ fn optimistic_allocation<'a>(
         .map(|(label, label_alloc)| (label, label_alloc.regs))
         .collect();
 
+    *reg_gen = active_path.reg_gen;
+
     Allocation {
         nodes_outputs: active_path.assignments.writer_to_regs,
         labels,
@@ -595,7 +777,9 @@ fn permute_allocation(
     allocation: &mut Allocation,
     inputs: Vec<Range<u32>>,
     first_non_reserved_addr: u32,
-) {
+) -> RegisterGenerator {
+    let mut last_used_addr = 0;
+
     let map = InputPermutation::new(
         inputs,
         allocation
@@ -609,13 +793,22 @@ fn permute_allocation(
     // Permute the nodes outputs
     for reg in allocation.nodes_outputs.values_mut() {
         map.permute_range(reg);
+        if reg.end > last_used_addr {
+            last_used_addr = reg.end;
+        }
     }
 
     // Now we need to permute the labels
     for label_regs in allocation.labels.values_mut() {
         for reg in label_regs.iter_mut() {
             map.permute_range(reg);
+            // There is no need to update last_used_addr, because
+            // all the labels are also represented as nodes.
         }
+    }
+
+    RegisterGenerator {
+        next_available: last_used_addr,
     }
 }
 
