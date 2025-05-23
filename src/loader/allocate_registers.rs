@@ -43,8 +43,9 @@ pub struct WriteOnceASM<'a> {
     _a: PhantomData<&'a ()>,
 }
 
-/// Just to make it explicit that the directive argument is not an immediate, but a pointer to a word inside the frame.
-type FramePtr = u32;
+/// Just to make it explicit that the directive argument is not an immediate, but a register location inside the frame.
+/// If the value is multi-word, the first word is at the given address, and the rest are at the next addresses.
+type Register = u32;
 
 pub enum Directive {
     Label {
@@ -53,18 +54,18 @@ pub enum Directive {
     /// Allocates a new frame.
     AllocateFrame {
         word_count: u32,
-        result_ptr: FramePtr, // i32
+        result_ptr: Register, // i32
     },
     /// Copies a word from the active frame to a given place in the given frame.
     CopyIntoFrame {
-        src_word: FramePtr,   // word
-        dest_frame: FramePtr, // i32
-        dest_word: FramePtr,  // word
+        src_word: Register,   // word
+        dest_frame: Register, // i32
+        dest_word: Register,  // word
     },
     /// Jump and activate a frame.
     JumpAndActivateFrame {
         target: String,
-        frame_ptr: FramePtr, // i32
+        frame_ptr: Register, // i32
     },
 }
 
@@ -325,6 +326,28 @@ fn flatten_frame_tree(
                 // Finally, we emit the directives for the inner frame.
                 directives.extend(loop_directives);
             }
+            Operation::Br(target) => {
+                // There are 4 different kinds of jumps, depending on the target:
+                //
+                // 1. Jump to a label in the current frame. We need to check if the break arguments have
+                //    already been filled with the expected values (from the optimistic allocation). If
+                //    not, we need to copy from the break inputs.
+                //
+                // 2. Jump to a label in a previous frame of the same function. I.e. a jump out of a loop.
+                //    In this case, we need to copy all the break inputs into the target frame, then
+                //    make a frame-switching jump to the label.
+                //
+                // 3. Jump into a loop iteration. This is very similar to emiting a loop, we need to
+                //    see if the loop can return from the function, allocate the frame, and copy over
+                //    the loop inputs, all possible target frames and po and return values before making the frame-switching jump.
+                //
+                // 4. Function return. This is similar to the previous case, we copy the return values to
+                //    the function output registers, and perform a frame-switching jump. The difference is
+                //    that the jump is to a dynamic label, stored in the return PC register.
+                //
+                // We need to identify the case and emit the correct directives.
+                directives.extend(emit_jump(&target));
+            }
             _ => todo!(),
         }
     }
@@ -343,6 +366,14 @@ fn copy_into_frame(
             dest_frame,
             dest_word,
         })
+}
+
+fn emit_jump(target: &BreakTarget) -> impl Iterator<Item = Directive> {
+    [].into_iter() // TODO: implement this
+}
+
+fn jump_into_loop() {
+    todo!()
 }
 
 #[derive(Default, Clone)]
