@@ -8,7 +8,6 @@ use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ops::RangeFrom,
-    vec,
 };
 use wasmparser::{Operator as Op, ValType};
 

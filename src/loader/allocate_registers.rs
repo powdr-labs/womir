@@ -14,11 +14,6 @@
 //! register in the same execution path. In the end, we will have a
 //! partial register assignment for some nodes, where conflicts for
 //! break inputs are explicitly marked.
-//!
-//! TODO: the register allocation is not perfectly optimal, it
-//! just uses a greedy approach to assign registers, and give up
-//! when it detects a conflict. It may be possible to model the
-//! problem to a SAT solver or something like that.
 
 use itertools::Itertools;
 use std::{

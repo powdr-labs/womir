@@ -44,11 +44,6 @@ use super::{Block, BlockKind, Element, Instruction, ModuleContext};
 ///  - a consequence of the previous, loops are only exited through breaks. An outer block is added to the loop if
 ///    needed to break out of it;
 ///  - dead code is removed after non-fallthrough loops and `br`, `br_table` and `unreachable` instructions;
-///
-/// TODO: track whether a block is ever broken to (explicitly or implictly), so that we know if anything after it is
-/// dead code to be removed. Dead code removal translates to less data dependency in the DAG, which translates to
-/// possibly less data copies in the final code. But there shouldn't be any already, if the WASM is from an optimizing
-/// compiler.
 pub struct BlockTree<'a> {
     pub elements: Vec<Element<'a>>,
 }

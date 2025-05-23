@@ -6,19 +6,6 @@
 //!
 //! This module makes explicit what locals are used either as inputs
 //! or outputs to blocks.
-//!
-//! TODO (OPTIMIZATION): track locals permutation. Yf some locals are
-//! read into a block, but in the end they are just output unmodified
-//! (either on stack or on some local), this can be resolved statically
-//! when building the DAG, eliding copies.
-//!
-//! TODO (OPTIMIZATION): sometimes a loop needs to take locals as inputs
-//! just to output them in certain breaks, unmodified. Such locals would
-//! have to be copied over through all the iterations, but never actually
-//! used inside the loop. In such cases, it is worth to make these breaks
-//! indirect, by creating blocks surrounding the loop just to forward the
-//! breaks. The passthrough locals will be handled by the outside blocks
-//! and breaks, avoiding them to be copied into the loop.
 
 use std::collections::{BTreeSet, VecDeque};
 
