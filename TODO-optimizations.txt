@@ -20,6 +20,10 @@ This files describes all the optimizations ideas we left out for now.
   breaks. The passthrough locals will be handled by the outside blocks
   and breaks, avoiding them to be copied into the loop.
 
+- [register_allocation]: also perform optimistic allocation on the nodes
+  that generates outputs to returns in the top-level frame, because they
+  are local frame writes like any local break.
+
 - [register_allocation]: the register allocation is not perfectly optimal,
   it just uses a greedy approach to assign registers, and give up when it
   detects a conflict. It may be possible to model the problem to a SAT
