@@ -17,8 +17,7 @@
 
 use itertools::Itertools;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, btree_map, hash_map},
-    iter::once,
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map, hash_map},
     marker::PhantomData,
     ops::{Range, RangeFrom},
 };
@@ -33,6 +32,9 @@ use super::{
     ModuleContext,
     blockless_dag::{BlocklessDag, Operation},
 };
+
+/// Size, in bytes, used both to frame pointers and return addresses.
+const PTR_BYTE_SIZE: u32 = 4;
 
 /// An assembly-like representation for a write-once memory machine.
 pub struct WriteOnceASM<'a> {
@@ -53,21 +55,29 @@ pub enum Directive {
     AllocateFrame {
         /// The same identifier as the label, which has the frame size.
         target_frame: String,
-        result_ptr: Register, // i32
+        result_ptr: Register, // size: PTR_BYTE_SIZE
     },
     /// Copies a word from the active frame to a given place in the given frame.
     CopyIntoFrame {
-        src_word: Register,   // word
-        dest_frame: Register, // i32
-        dest_word: Register,  // word
+        src_word: Register,   // size: 1 word
+        dest_frame: Register, // size: PTR_BYTE_SIZE
+        dest_word: Register,  // size: 1 word
     },
     /// Jump and activate a frame.
     JumpAndActivateFrame {
         target: String,
-        new_frame_ptr: Register, // i32
-        /// Where, in the new frame, to save the frame pointer of the frame we just left.
+        new_frame_ptr: Register, // size: PTR_BYTE_SIZE
+        /// Where, in the new frame, to save the frame pointer of the frame Wwe just left.
         /// May be None if the frame pointer is not needed.
-        saved_caller_fp: Option<Register>, // i32
+        saved_caller_fp: Option<Register>, // size: PTR_BYTE_SIZE
+    },
+    /// Returns from the function.
+    ///
+    /// Similar to `JumpAndActivateFrame`, but the target is a dynamic address taken
+    /// from a register, and it can't save the caller frame pointer.
+    Return {
+        ret_pc: Register, // size: PTR_BYTE_SIZE
+        ret_fp: Register, // size: PTR_BYTE_SIZE
     },
 }
 
@@ -108,7 +118,12 @@ struct ReturnInfo {
     ret_fp: Range<u32>,
 }
 
-enum CtrlStackEntry {
+struct CtrlStackEntry {
+    entry_type: CtrlStackType,
+    allocation: Allocation,
+}
+
+enum CtrlStackType {
     TopLevelFunction { output_regs: Vec<Range<u32>> },
     Loop(LoopStackEntry),
 }
@@ -135,8 +150,8 @@ pub fn allocate_registers<'a>(
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::new();
 
-    let ret_pc = reg_gen.allocate_bytes(bytes_per_word, 4);
-    let ret_fp = reg_gen.allocate_bytes(bytes_per_word, 4);
+    let ret_pc = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+    let ret_fp = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
 
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
@@ -162,12 +177,14 @@ pub fn allocate_registers<'a>(
     // so we must permute the allocation we found to match it.
     let reg_gen = permute_allocation(&mut allocation, input_regs, reg_gen.next_available);
 
-    let mut ctrl_stack = VecDeque::from([CtrlStackEntry::TopLevelFunction { output_regs }]);
+    let mut ctrl_stack = VecDeque::from([CtrlStackEntry {
+        entry_type: CtrlStackType::TopLevelFunction { output_regs },
+        allocation,
+    }]);
 
     flatten_frame_tree(
         dag,
         bytes_per_word,
-        allocation,
         reg_gen,
         // TODO: share the label generator among all the functions.
         &mut (0..),
@@ -183,7 +200,6 @@ pub fn allocate_registers<'a>(
 fn flatten_frame_tree(
     dag: BlocklessDag,
     bytes_per_word: u32,
-    allocation: Allocation,
     mut reg_gen: RegisterGenerator,
     loop_label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
@@ -210,14 +226,16 @@ fn flatten_frame_tree(
                 // Test if the loop can return from the function. If so, we need to
                 // forward the return info.
                 let loop_ret_info = if ret_info.is_some() && shallowest_iter_or_ret.is_some() {
-                    let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
-                    let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+                    let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                    let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
 
                     // If the function has outputs, we need to save the toplevel frame pointer, too.
-                    if let CtrlStackEntry::TopLevelFunction { output_regs } =
-                        ctrl_stack.back().unwrap()
+                    if let CtrlStackType::TopLevelFunction { output_regs } =
+                        &ctrl_stack.back().unwrap().entry_type
                     {
-                        saved_fps.insert(toplevel_frame_idx);
+                        if !output_regs.is_empty() {
+                            saved_fps.insert(toplevel_frame_idx);
+                        }
                     }
 
                     Some(ReturnInfo { ret_pc, ret_fp })
@@ -231,9 +249,10 @@ fn flatten_frame_tree(
                 // There seems to be a recursive proof that all the copied frames are necessary,
                 // and the set is complete, but I only remember proving it in my head, not the
                 // proof itself.
-                if let (CtrlStackEntry::Loop(this_frame), Some(shallowest)) =
-                    (ctrl_stack.front().unwrap(), shallowest_iter_or_ret)
-                {
+                if let (CtrlStackType::Loop(this_frame), Some(shallowest)) = (
+                    &ctrl_stack.front().unwrap().entry_type,
+                    shallowest_iter_or_ret,
+                ) {
                     let s = &this_frame.saved_fps;
                     let start_i = s.partition_point(|(depth, _)| *depth < shallowest);
                     saved_fps.extend(s[start_i..].iter().map(|(depth, _)| *depth));
@@ -256,7 +275,7 @@ fn flatten_frame_tree(
                 let loop_outer_fps = saved_fps
                     .into_iter()
                     .map(|depth| {
-                        let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
+                        let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
                         (depth + 1, outer_fp)
                     })
                     .collect();
@@ -270,7 +289,7 @@ fn flatten_frame_tree(
 
                 // This struct contains everything we need to fill in order to jump into the loop.
                 let loop_entry = LoopStackEntry {
-                    label: format!("L{}", loop_label_gen.next().unwrap()),
+                    label: format_label(loop_label_gen.next().unwrap(), LabelType::Loop),
                     ret_info: loop_ret_info.clone(),
                     saved_fps: loop_outer_fps,
                     input_regs: loop_allocation
@@ -281,17 +300,20 @@ fn flatten_frame_tree(
                         .collect(),
                 };
 
-                ctrl_stack.push_front(CtrlStackEntry::Loop(loop_entry));
+                ctrl_stack.push_front(CtrlStackEntry {
+                    entry_type: CtrlStackType::Loop(loop_entry),
+                    allocation: loop_allocation,
+                });
                 let (loop_frame_size, loop_directives) = flatten_frame_tree(
                     sub_dag,
                     bytes_per_word,
-                    loop_allocation,
                     loop_reg_gen,
                     loop_label_gen,
                     ctrl_stack,
                     loop_ret_info,
                 );
-                let CtrlStackEntry::Loop(loop_entry) = ctrl_stack.pop_front().unwrap() else {
+                let CtrlStackType::Loop(loop_entry) = ctrl_stack.pop_front().unwrap().entry_type
+                else {
                     unreachable!()
                 };
 
@@ -303,7 +325,6 @@ fn flatten_frame_tree(
                     -1,
                     ret_info.as_ref(),
                     ctrl_stack.front().unwrap(),
-                    &allocation,
                     &node.inputs,
                     &mut directives,
                 );
@@ -318,7 +339,14 @@ fn flatten_frame_tree(
                 directives.extend(loop_directives);
             }
             Operation::Br(target) => {
-                directives.extend(emit_jump(&target));
+                directives.extend(emit_jump(
+                    bytes_per_word,
+                    &mut reg_gen,
+                    ret_info.as_ref(),
+                    &node.inputs,
+                    &target,
+                    ctrl_stack,
+                ));
             }
             _ => todo!(),
         }
@@ -344,7 +372,6 @@ fn emit_jump(
     bytes_per_word: u32,
     reg_gen: &mut RegisterGenerator,
     ret_info: Option<&ReturnInfo>,
-    allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     target: &BreakTarget,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
@@ -384,19 +411,36 @@ fn emit_jump(
             depth,
             kind: TargetType::Label(label),
         } => {
-            // This is a jump to a label in a previous frame of the same function.
-            todo!()
+            // This is a jump out of loop, into a previous frame of the same function.
+            directives.extend(jump_out_of_loop(*depth, *label, ctrl_stack, node_inputs));
         }
         BreakTarget {
             depth,
             kind: TargetType::FunctionOrLoop,
         } => {
-            match &ctrl_stack[*depth as usize] {
-                CtrlStackEntry::TopLevelFunction { output_regs } => {
+            let target_stack_entry = &ctrl_stack[*depth as usize];
+            match &target_stack_entry.entry_type {
+                CtrlStackType::TopLevelFunction { output_regs } => {
                     // This is a function return.
-                    todo!()
+                    let curr_entry = ctrl_stack.front().unwrap();
+                    match &curr_entry.entry_type {
+                        CtrlStackType::TopLevelFunction { .. } => {
+                            // This is a return from the toplevel frame.
+                            todo!()
+                        }
+                        CtrlStackType::Loop(loop_entry) => {
+                            // This is a return from a loop.
+                            directives.extend(return_from_loop(
+                                ctrl_stack.len(),
+                                output_regs,
+                                node_inputs,
+                                &curr_entry.allocation,
+                                loop_entry,
+                            ));
+                        }
+                    }
                 }
-                CtrlStackEntry::Loop(loop_entry) => {
+                CtrlStackType::Loop(loop_entry) => {
                     // This is a loop iteration.
                     jump_into_loop(
                         bytes_per_word,
@@ -405,7 +449,6 @@ fn emit_jump(
                         *depth as i64,
                         ret_info,
                         ctrl_stack.front().unwrap(),
-                        allocation,
                         node_inputs,
                         &mut directives,
                     );
@@ -415,6 +458,83 @@ fn emit_jump(
     }
 
     directives
+}
+
+fn return_from_loop(
+    ctrl_stack_len: usize,
+    output_regs: &[Range<u32>],
+    node_inputs: &[ValueOrigin],
+    allocation: &Allocation,
+    curr_entry: &LoopStackEntry,
+) -> Vec<Directive> {
+    let mut directives = Vec::new();
+
+    if !output_regs.is_empty() {
+        let outer_fps = &curr_entry.saved_fps[..];
+        let toplevel_depth = ctrl_stack_len - 1;
+        let toplevel_idx = outer_fps.len() - 1;
+        let toplevel_fp = get_fp_from_sorted(outer_fps, toplevel_depth as u32, toplevel_idx);
+
+        // Issue the copy directives.
+        for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
+            let src_reg = allocation.nodes_outputs[origin].clone();
+            directives.extend(copy_into_frame(src_reg, toplevel_fp, dest_reg.clone()));
+        }
+    }
+
+    // Issue the return directive.
+    let ret_info = curr_entry.ret_info.as_ref().unwrap();
+    assert_eq!(ret_info.ret_pc.len(), PTR_BYTE_SIZE as usize);
+    assert_eq!(ret_info.ret_fp.len(), PTR_BYTE_SIZE as usize);
+
+    directives.push(Directive::Return {
+        ret_pc: ret_info.ret_pc.start,
+        ret_fp: ret_info.ret_fp.start,
+    });
+
+    directives
+}
+
+fn jump_out_of_loop(
+    depth: u32,
+    label_id: u32,
+    ctrl_stack: &VecDeque<CtrlStackEntry>,
+    node_inputs: &[ValueOrigin],
+) -> Vec<Directive> {
+    let caller_entry = ctrl_stack.front().unwrap();
+    let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
+        &curr_entry.saved_fps[..]
+    } else {
+        // You can not jump out of a loop from the toplevel frame.
+        panic!()
+    };
+    let dest_fp_idx = outer_fps.partition_point(|(d, _)| *d < depth);
+    let dest_fp = get_fp_from_sorted(outer_fps, depth, dest_fp_idx);
+
+    let target_entry = &ctrl_stack[depth as usize];
+    let target_inputs = &target_entry.allocation.labels[&label_id];
+
+    let mut directives = Vec::new();
+    for (origin, dest_reg) in node_inputs.iter().zip_eq(target_inputs.iter()) {
+        let src_reg = caller_entry.allocation.nodes_outputs[origin].clone();
+        directives.extend(copy_into_frame(src_reg, dest_fp, dest_reg.clone()));
+    }
+
+    directives.push(Directive::JumpAndActivateFrame {
+        target: format_label(label_id, LabelType::Block),
+        new_frame_ptr: dest_fp,
+        // This iteration's frame will not be needed again.
+        saved_caller_fp: None,
+    });
+
+    directives
+}
+
+fn get_fp_from_sorted(sorted_fps: &[(u32, Range<u32>)], expected_depth: u32, idx: usize) -> u32 {
+    let dest_fp = &sorted_fps[idx];
+    assert_eq!(dest_fp.0, expected_depth);
+    assert_eq!(dest_fp.1.len(), PTR_BYTE_SIZE as usize);
+    dest_fp.1.start
 }
 
 /// This function is used to generate the directives for frame creation, copy of
@@ -429,12 +549,11 @@ fn jump_into_loop(
     depth_offset: i64,
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
-    caller_allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     directives: &mut Vec<Directive>,
 ) {
     // We start by allocating the frame.
-    let loop_fp = reg_gen.allocate_bytes(bytes_per_word, 4);
+    let loop_fp = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
     directives.push(Directive::AllocateFrame {
         target_frame: loop_entry.label.clone(),
         result_ptr: loop_fp.start,
@@ -472,13 +591,13 @@ fn jump_into_loop(
     // Handle the special case where outer_fps[0] is required.
     let saved_caller_fp = if let Some((0, _)) = depth_adjusted_loop_fps.peek() {
         let fp = depth_adjusted_loop_fps.next().unwrap().1;
-        assert_eq!(fp.len(), 4);
+        assert_eq!(fp.len(), PTR_BYTE_SIZE as usize);
         Some(fp.start)
     } else {
         None
     };
 
-    let outer_fps = if let CtrlStackEntry::Loop(curr_entry) = caller_stack_entry {
+    let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_stack_entry.entry_type {
         // I resisted the devil's temptation to search the first needed element
         // with partition_point, which would probably do more harm than good.
         &curr_entry.saved_fps[..]
@@ -508,7 +627,7 @@ fn jump_into_loop(
 
     // Copy the loop inputs into the loop frame.
     for (origin, input_reg) in node_inputs.iter().zip_eq(loop_entry.input_regs.iter()) {
-        let src_reg = caller_allocation.nodes_outputs[origin].clone();
+        let src_reg = caller_stack_entry.allocation.nodes_outputs[origin].clone();
         directives.extend(copy_into_frame(src_reg, loop_fp.start, input_reg.clone()));
     }
 
@@ -521,6 +640,18 @@ fn jump_into_loop(
         new_frame_ptr: loop_fp.start,
         saved_caller_fp,
     });
+}
+
+enum LabelType {
+    Loop,
+    Block,
+}
+
+fn format_label(label_id: u32, label_type: LabelType) -> String {
+    match label_type {
+        LabelType::Loop => format!("L{label_id}"),
+        LabelType::Block => format!("B{label_id}"),
+    }
 }
 
 #[derive(Default, Clone)]
