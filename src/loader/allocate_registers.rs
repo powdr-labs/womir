@@ -18,6 +18,7 @@
 use itertools::Itertools;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, btree_map, hash_map},
+    iter::once,
     marker::PhantomData,
     ops::{Range, RangeFrom},
 };
@@ -66,7 +67,7 @@ pub enum Directive {
         new_frame_ptr: Register, // i32
         /// Where, in the new frame, to save the frame pointer of the frame we just left.
         /// May be None if the frame pointer is not needed.
-        saved_frame_ptr: Option<Register>, // i32
+        saved_caller_fp: Option<Register>, // i32
     },
 }
 
@@ -195,8 +196,6 @@ fn flatten_frame_tree(
                 sub_dag,
                 break_targets,
             } => {
-                let loop_fp = reg_gen.allocate_bytes(bytes_per_word, 4);
-
                 let mut loop_reg_gen = RegisterGenerator::new();
 
                 // If None, this loop does not return from the function nor iterate to any outer loop.
@@ -214,7 +213,7 @@ fn flatten_frame_tree(
                     let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
                     let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, 4);
 
-                    // If the function has outputs, we need to save the toplevel frame pointer
+                    // If the function has outputs, we need to save the toplevel frame pointer, too.
                     if let CtrlStackEntry::TopLevelFunction { output_regs } =
                         ctrl_stack.back().unwrap()
                     {
@@ -229,20 +228,16 @@ fn flatten_frame_tree(
                 // Select the outer frame pointers that are saved in the current frame, and
                 // the loop will need in order to start iterations of some outer loop.
                 //
-                // There seems to be a closure on the set of frame pointers needed by this
-                // and previous loops, but I only remember proving it in my head, not the
+                // There seems to be a recursive proof that all the copied frames are necessary,
+                // and the set is complete, but I only remember proving it in my head, not the
                 // proof itself.
                 if let (CtrlStackEntry::Loop(this_frame), Some(shallowest)) =
                     (ctrl_stack.front().unwrap(), shallowest_iter_or_ret)
                 {
                     let s = &this_frame.saved_fps;
-                    saved_fps.extend(
-                        s[s.partition_point(|(depth, _)| *depth < shallowest)..]
-                            .iter()
-                            .map(|(depth, _)| *depth)
-                            .take_while(|depth| *depth < toplevel_frame_idx),
-                    );
-                }
+                    let start_i = s.partition_point(|(depth, _)| *depth < shallowest);
+                    saved_fps.extend(s[start_i..].iter().map(|(depth, _)| *depth));
+                };
 
                 // Select the frame pointers needed to break into outer frames.
                 for (depth, targets) in break_targets
@@ -301,7 +296,16 @@ fn flatten_frame_tree(
                 };
 
                 // We are ready to emit all the instructions to enter the loop.
-                directives.extend(jump_into_loop(&loop_entry));
+                directives.extend(jump_into_loop(
+                    &loop_entry,
+                    bytes_per_word,
+                    &mut reg_gen,
+                    -1,
+                    ret_info.as_ref(),
+                    ctrl_stack.front().unwrap(),
+                    &allocation,
+                    &node.inputs,
+                ));
 
                 // Finally, we can actually emit the listing for the loop.
                 // First, the label:
@@ -359,29 +363,112 @@ fn emit_jump(target: &BreakTarget) -> impl Iterator<Item = Directive> {
 }
 
 /// This function is used to generate the directives for frame creation, copy of
-/// the loop inputs, and the jump into the loop. Both when iterating over the loop
+/// the loop inputs, and the jump into the loop. Both when iterating the loop
 /// and when jumping into the loop for the first time.
-fn jump_into_loop(loop_entry: &LoopStackEntry) -> impl Iterator<Item = Directive> {
-    /*
-        // We start by allocating the frame.
-        directives.push(Directive::AllocateFrame {
-            word_count: loop_frame_size,
-            result_ptr: loop_fp.start,
-        });
+///
+/// depth_offset is the difference between the caller frame depth and the loop frame depth.
+fn jump_into_loop(
+    loop_entry: &LoopStackEntry,
+    bytes_per_word: u32,
+    reg_gen: &mut RegisterGenerator,
+    depth_offset: i64,
+    ret_info: Option<&ReturnInfo>,
+    caller_stack_entry: &CtrlStackEntry,
+    caller_allocation: &Allocation,
+    node_inputs: &[ValueOrigin],
+) -> Vec<Directive> {
+    let mut directives = Vec::new();
 
-        // Then we emit the copy instructions.
-        directives.extend(copy_instructions);
+    // We start by allocating the frame.
+    let loop_fp = reg_gen.allocate_bytes(bytes_per_word, 4);
+    directives.push(Directive::AllocateFrame {
+        target_frame: loop_entry.label.clone(),
+        result_ptr: loop_fp.start,
+    });
 
-        // Then we activate the frame.
-        //
-        // Jumping doesn't really do anything here, because the loop directives are
-        // right ahead, but it is not worth to create a new instruction just for that.
-        directives.push(Directive::JumpAndActivateFrame {
-            target: label.clone(),
-            frame_ptr: loop_fp.start,
-        });
-    */
-    [].into_iter() // TODO: implement this
+    // Copy the return info, if needed.
+    if let Some(loop_ret_info) = &loop_entry.ret_info {
+        // If the loop needs a return info, then the caller must have it, too.
+        let ret_info = ret_info.unwrap();
+        directives.extend(copy_into_frame(
+            ret_info.ret_pc.clone(),
+            loop_fp.start,
+            loop_ret_info.ret_pc.clone(),
+        ));
+        directives.extend(copy_into_frame(
+            ret_info.ret_fp.clone(),
+            loop_fp.start,
+            loop_ret_info.ret_fp.clone(),
+        ));
+    }
+
+    // Copy the outer frame pointers.
+    // outer_fps must be a superset of loop_entry.saved_fps, except for
+    // outer_fps[0], which means the caller's own frame pointer, which might
+    // be required if we are entering the loop for the first time.
+    let mut depth_adjusted_loop_fps = loop_entry
+        .saved_fps
+        .iter()
+        .map(|(depth, fp)| {
+            // Adjust the depth to the caller's frame depth.
+            ((*depth as i64 + depth_offset) as u32, fp.clone())
+        })
+        .peekable();
+
+    // Handle the special case where outer_fps[0] is required.
+    let saved_caller_fp = if let Some((0, _)) = depth_adjusted_loop_fps.peek() {
+        let fp = depth_adjusted_loop_fps.next().unwrap().1;
+        assert_eq!(fp.len(), 4);
+        Some(fp.start)
+    } else {
+        None
+    };
+
+    let outer_fps = if let CtrlStackEntry::Loop(curr_entry) = caller_stack_entry {
+        // I resisted the devil's temptation to search the first needed element
+        // with partition_point, which would probably do more harm than good.
+        &curr_entry.saved_fps[..]
+    } else {
+        // The toplevel frame has no outer frames.
+        &[]
+    };
+
+    for outer_fp in depth_adjusted_loop_fps.merge_join_by(
+        outer_fps.iter().cloned(),
+        |(required_depth, _), (available_depth, _)| required_depth.cmp(available_depth),
+    ) {
+        use itertools::EitherOrBoth::{Both, Left, Right};
+        match outer_fp {
+            Both((_, dest_fp), (_, src_fp)) => {
+                directives.extend(copy_into_frame(src_fp, loop_fp.start, dest_fp));
+            }
+            Right(_) => {
+                // An outer frame pointer is available, but not required. This is fine.
+            }
+            Left(_) => {
+                // An outer frame pointer is required, but not available. Should not be possible.
+                panic!();
+            }
+        }
+    }
+
+    // Copy the loop inputs into the loop frame.
+    for (origin, input_reg) in node_inputs.iter().zip_eq(loop_entry.input_regs.iter()) {
+        let src_reg = caller_allocation.nodes_outputs[origin].clone();
+        directives.extend(copy_into_frame(src_reg, loop_fp.start, input_reg.clone()));
+    }
+
+    // Then we activate the frame.
+    //
+    // Jumping doesn't really do anything here, because the loop directives are
+    // right ahead, but it is not worth to create a new instruction just for that.
+    directives.push(Directive::JumpAndActivateFrame {
+        target: loop_entry.label.clone(),
+        new_frame_ptr: loop_fp.start,
+        saved_caller_fp,
+    });
+
+    directives
 }
 
 #[derive(Default, Clone)]
