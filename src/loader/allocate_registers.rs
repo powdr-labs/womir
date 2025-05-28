@@ -296,16 +296,17 @@ fn flatten_frame_tree(
                 };
 
                 // We are ready to emit all the instructions to enter the loop.
-                directives.extend(jump_into_loop(
-                    &loop_entry,
+                jump_into_loop(
                     bytes_per_word,
+                    &loop_entry,
                     &mut reg_gen,
                     -1,
                     ret_info.as_ref(),
                     ctrl_stack.front().unwrap(),
                     &allocation,
                     &node.inputs,
-                ));
+                    &mut directives,
+                );
 
                 // Finally, we can actually emit the listing for the loop.
                 // First, the label:
@@ -317,25 +318,6 @@ fn flatten_frame_tree(
                 directives.extend(loop_directives);
             }
             Operation::Br(target) => {
-                // There are 4 different kinds of jumps, depending on the target:
-                //
-                // 1. Jump to a label in the current frame. We need to check if the break arguments have
-                //    already been filled with the expected values (from the optimistic allocation). If
-                //    not, we need to copy from the break inputs.
-                //
-                // 2. Jump to a label in a previous frame of the same function. I.e. a jump out of a loop.
-                //    In this case, we need to copy all the break inputs into the target frame, then
-                //    make a frame-switching jump to the label.
-                //
-                // 3. Jump into a loop iteration. This is very similar to emiting a loop, we need to
-                //    see if the loop can return from the function, allocate the frame, and copy over
-                //    the loop inputs, all possible target frames and po and return values before making the frame-switching jump.
-                //
-                // 4. Function return. This is similar to the previous case, we copy the return values to
-                //    the function output registers, and perform a frame-switching jump. The difference is
-                //    that the jump is to a dynamic label, stored in the return PC register.
-                //
-                // We need to identify the case and emit the correct directives.
                 directives.extend(emit_jump(&target));
             }
             _ => todo!(),
@@ -358,8 +340,81 @@ fn copy_into_frame(
         })
 }
 
-fn emit_jump(target: &BreakTarget) -> impl Iterator<Item = Directive> {
-    [].into_iter() // TODO: implement this
+fn emit_jump(
+    bytes_per_word: u32,
+    reg_gen: &mut RegisterGenerator,
+    ret_info: Option<&ReturnInfo>,
+    allocation: &Allocation,
+    node_inputs: &[ValueOrigin],
+    target: &BreakTarget,
+    ctrl_stack: &mut VecDeque<CtrlStackEntry>,
+) -> Vec<Directive> {
+    // There are 5 different kinds of jumps, depending on the target:
+    //
+    // 1. Jump to a label in the current frame. We need to check if the break arguments have
+    //    already been filled with the expected values (from the optimistic allocation). If
+    //    not, we need to copy from the break inputs.
+    //
+    // 2. Jump to a label in a previous frame of the same function. I.e. a jump out of a loop.
+    //    In this case, we need to copy all the break inputs into the target frame, then
+    //    make a frame-switching jump to the label.
+    //
+    // 3. Jump into a loop iteration.
+    //
+    // 4. Function return from a loop. We copy the return values to the function output
+    //    registers, which are in the toplevel frame, and perform a frame-switching jump. The
+    //    jump is to a dynamic label, stored in the return PC register.
+    //
+    // 5. Function return from the toplevel frame. The difference is that the output registers
+    //    we need to fill are in the active frame, so the copy is local, not across frames.
+    //
+    // We need to identify the case and emit the correct directives.
+
+    let mut directives = Vec::new();
+
+    match target {
+        BreakTarget {
+            depth: 0,
+            kind: TargetType::Label(label),
+        } => {
+            // This is a jump to a label in the current frame.
+            todo!()
+        }
+        BreakTarget {
+            depth,
+            kind: TargetType::Label(label),
+        } => {
+            // This is a jump to a label in a previous frame of the same function.
+            todo!()
+        }
+        BreakTarget {
+            depth,
+            kind: TargetType::FunctionOrLoop,
+        } => {
+            match &ctrl_stack[*depth as usize] {
+                CtrlStackEntry::TopLevelFunction { output_regs } => {
+                    // This is a function return.
+                    todo!()
+                }
+                CtrlStackEntry::Loop(loop_entry) => {
+                    // This is a loop iteration.
+                    jump_into_loop(
+                        bytes_per_word,
+                        loop_entry,
+                        reg_gen,
+                        *depth as i64,
+                        ret_info,
+                        ctrl_stack.front().unwrap(),
+                        allocation,
+                        node_inputs,
+                        &mut directives,
+                    );
+                }
+            }
+        }
+    }
+
+    directives
 }
 
 /// This function is used to generate the directives for frame creation, copy of
@@ -368,17 +423,16 @@ fn emit_jump(target: &BreakTarget) -> impl Iterator<Item = Directive> {
 ///
 /// depth_offset is the difference between the caller frame depth and the loop frame depth.
 fn jump_into_loop(
-    loop_entry: &LoopStackEntry,
     bytes_per_word: u32,
+    loop_entry: &LoopStackEntry,
     reg_gen: &mut RegisterGenerator,
     depth_offset: i64,
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
     caller_allocation: &Allocation,
     node_inputs: &[ValueOrigin],
-) -> Vec<Directive> {
-    let mut directives = Vec::new();
-
+    directives: &mut Vec<Directive>,
+) {
     // We start by allocating the frame.
     let loop_fp = reg_gen.allocate_bytes(bytes_per_word, 4);
     directives.push(Directive::AllocateFrame {
@@ -467,8 +521,6 @@ fn jump_into_loop(
         new_frame_ptr: loop_fp.start,
         saved_caller_fp,
     });
-
-    directives
 }
 
 #[derive(Default, Clone)]
