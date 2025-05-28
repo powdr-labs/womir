@@ -384,6 +384,8 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
     let mut initial_memory = InitialMemory::new();
 
+    let mut label_gen = 0..;
+
     // TODO: validate while parsing
 
     // The payloads are processed in the order they appear in the file, so each variable written
@@ -685,10 +687,15 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                 let dag = Dag::new(&ctx, func_type, &locals_types, lifted_blocks)?;
 
-                let blockless_dag = blockless_dag::BlocklessDag::new(dag);
+                let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
-                let definition =
-                    allocate_registers::allocate_registers(&ctx, func_type, blockless_dag, 4);
+                let definition = allocate_registers::allocate_registers(
+                    &ctx,
+                    4,
+                    &mut label_gen,
+                    blockless_dag,
+                    func_type,
+                );
 
                 ctx.p.functions.push(definition);
             }

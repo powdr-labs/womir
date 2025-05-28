@@ -70,8 +70,13 @@ pub enum Directive {
         dest_frame: Register, // size: PTR_BYTE_SIZE
         dest_word: Register,  // size: 1 word
     },
-    /// Local jump to a label in the current frame.
+    /// Local jump to a label local to the current frame.
     Jump { target: String },
+    /// Jump to a local label if the condition is zero.
+    JumpIfZero {
+        target: String,
+        condition: Register, // size: i32
+    },
     /// Jump and activate a frame.
     JumpAndActivateFrame {
         target: String,
@@ -152,9 +157,10 @@ struct LoopStackEntry {
 
 pub fn allocate_registers<'a>(
     module: &ModuleContext,
-    func_type: &FuncType,
-    dag: BlocklessDag<'a>,
     bytes_per_word: u32,
+    label_gen: &mut RangeFrom<u32>,
+    dag: BlocklessDag<'a>,
+    func_type: &FuncType,
 ) -> WriteOnceASM<'a> {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::new();
@@ -195,8 +201,7 @@ pub fn allocate_registers<'a>(
         dag,
         bytes_per_word,
         reg_gen,
-        // TODO: share the label generator among all the functions.
-        &mut (0..),
+        label_gen,
         &mut ctrl_stack,
         Some(ret_info),
     );
@@ -210,13 +215,23 @@ fn flatten_frame_tree(
     dag: BlocklessDag,
     bytes_per_word: u32,
     mut reg_gen: RegisterGenerator,
-    loop_label_gen: &mut RangeFrom<u32>,
+    label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: Option<ReturnInfo>,
 ) -> (u32, Vec<Directive>) {
     let mut directives = Vec::new();
     for node in dag.nodes {
         match node.operation {
+            Operation::Inputs => {
+                // Inputs does not translate to any assembly directive. It is used on the node tree for its outputs.
+            }
+            Operation::Label { id } => {
+                // This is a local label.
+                directives.push(Directive::Label {
+                    id: format_label(id, LabelType::Local),
+                    frame_size: None,
+                });
+            }
             Operation::Loop {
                 sub_dag,
                 break_targets,
@@ -298,7 +313,7 @@ fn flatten_frame_tree(
 
                 // This struct contains everything we need to fill in order to jump into the loop.
                 let loop_entry = LoopStackEntry {
-                    label: format_label(loop_label_gen.next().unwrap(), LabelType::Loop),
+                    label: format_label(label_gen.next().unwrap(), LabelType::Loop),
                     ret_info: loop_ret_info.clone(),
                     saved_fps: loop_outer_fps,
                     input_regs: loop_allocation
@@ -317,7 +332,7 @@ fn flatten_frame_tree(
                     sub_dag,
                     bytes_per_word,
                     loop_reg_gen,
-                    loop_label_gen,
+                    label_gen,
                     ctrl_stack,
                     loop_ret_info,
                 );
@@ -357,11 +372,122 @@ fn flatten_frame_tree(
                     ctrl_stack,
                 ));
             }
+            Operation::BrIf(target) => {
+                let curr_entry = ctrl_stack.front().unwrap();
+
+                // Get the conditional variable from the inputs.
+                let mut inputs = node.inputs;
+                let cond_origin = inputs.pop().unwrap();
+                let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
+                assert_reg(&cond_reg, bytes_per_word, ValType::I32);
+
+                let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+
+                // Emit the jump if the condition is zero.
+                directives.push(Directive::JumpIfZero {
+                    target: cont_label.clone(),
+                    condition: cond_reg.start,
+                });
+
+                // Emit the jump to the target label.
+                directives.extend(emit_jump(
+                    bytes_per_word,
+                    &mut reg_gen,
+                    ret_info.as_ref(),
+                    &inputs,
+                    &target,
+                    ctrl_stack,
+                ));
+
+                // Emit the continuation label.
+                directives.push(Directive::Label {
+                    id: cont_label,
+                    frame_size: None,
+                });
+            }
+            Operation::BrIfZero(target) => {
+                let curr_entry = ctrl_stack.front().unwrap();
+
+                // Get the conditional variable from the inputs.
+                let mut inputs = node.inputs;
+                let cond_origin = inputs.pop().unwrap();
+                let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
+                assert_reg(&cond_reg, bytes_per_word, ValType::I32);
+
+                // Generate the jump instructions
+                let jump_directives = emit_jump(
+                    bytes_per_word,
+                    &mut reg_gen,
+                    ret_info.as_ref(),
+                    &inputs,
+                    &target,
+                    ctrl_stack,
+                );
+
+                // If the jump_directives is one plain jump to a local label, we can
+                // optimize this jump by emitting a single JumpIfZero.
+                if let (1, Some(Directive::Jump { target })) =
+                    (jump_directives.len(), jump_directives.first())
+                {
+                    directives.push(Directive::JumpIfZero {
+                        target: target.clone(),
+                        condition: cond_reg.start,
+                    });
+                } else {
+                    // The general case requires two helper labels to implement.
+                    let zero_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+                    let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+
+                    // Either jump to the zero label if the condition is zero,
+                    // or the next instruction is a jump to the continuation label.
+                    directives.push(Directive::JumpIfZero {
+                        target: zero_label.clone(),
+                        condition: cond_reg.start,
+                    });
+                    directives.push(Directive::Jump {
+                        target: cont_label.clone(),
+                    });
+
+                    // The zero label contains the jump directives.
+                    directives.push(Directive::Label {
+                        id: zero_label,
+                        frame_size: None,
+                    });
+                    directives.extend(jump_directives);
+
+                    // The continuation label is the next one.
+                    directives.push(Directive::Label {
+                        id: cont_label,
+                        frame_size: None,
+                    });
+                }
+            }
+            Operation::BrTable { targets } => {
+                todo!();
+            }
+            Operation::WASMOp(Op::Call { function_index }) => {
+                todo!();
+            }
+            Operation::WASMOp(Op::CallIndirect {
+                table_index,
+                type_index,
+            }) => {
+                // We will need to access the ROM memory to get the function address, type, and frame size.
+                todo!();
+            }
             _ => todo!(),
         }
     }
 
     (reg_gen.next_available, directives)
+}
+
+fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
+    let expected_size = byte_size(ty);
+    assert_eq!(
+        reg.len(),
+        word_count(expected_size, bytes_per_word) as usize
+    );
 }
 
 fn copy_into_frame(
@@ -508,7 +634,7 @@ fn local_jump(
 
     // Emit the jump directive.
     directives.push(Directive::Jump {
-        target: format_label(label_id, LabelType::Block),
+        target: format_label(label_id, LabelType::Local),
     });
 
     directives
@@ -597,7 +723,7 @@ fn jump_out_of_loop(
     }
 
     directives.push(Directive::JumpAndActivateFrame {
-        target: format_label(label_id, LabelType::Block),
+        target: format_label(label_id, LabelType::Local),
         new_frame_ptr: dest_fp,
         // This iteration's frame will not be needed again.
         saved_caller_fp: None,
@@ -720,13 +846,13 @@ fn jump_into_loop(
 
 enum LabelType {
     Loop,
-    Block,
+    Local,
 }
 
 fn format_label(label_id: u32, label_type: LabelType) -> String {
     match label_type {
-        LabelType::Loop => format!("L{label_id}"),
-        LabelType::Block => format!("B{label_id}"),
+        LabelType::Loop => format!("loop_{label_id}"),
+        LabelType::Local => format!("local_{label_id}"),
     }
 }
 

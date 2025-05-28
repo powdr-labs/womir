@@ -35,7 +35,7 @@ pub enum Operation<'a> {
     WASMOp(Op<'a>),
 
     Label {
-        /// This label is unique to this block/frame. A complete jump target
+        /// This label is unique. A complete jump target
         /// will also include the depth of the frame stack.
         id: u32,
     },
@@ -80,7 +80,7 @@ pub struct BlocklessDag<'a> {
 }
 
 impl<'a> BlocklessDag<'a> {
-    pub fn new(dag: Dag<'a>) -> Self {
+    pub fn new(dag: Dag<'a>, label_generator: &mut RangeFrom<u32>) -> Self {
         let mut new_nodes = Vec::new();
 
         let mut ctrl_stack = VecDeque::from([BlockStack {
@@ -90,7 +90,7 @@ impl<'a> BlocklessDag<'a> {
 
         process_nodes(
             dag.nodes,
-            &mut (0..),
+            label_generator,
             &mut new_nodes,
             &mut ctrl_stack,
             &mut HashSet::new(),
