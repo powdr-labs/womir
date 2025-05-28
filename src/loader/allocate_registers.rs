@@ -57,12 +57,21 @@ pub enum Directive {
         target_frame: String,
         result_ptr: Register, // size: PTR_BYTE_SIZE
     },
+    /// Copies a word inside the active frame.
+    Copy {
+        /// The source word, in the active frame.
+        src_word: Register, // size: 1 word
+        /// The destination word, in the active frame.
+        dest_word: Register, // size: 1 word
+    },
     /// Copies a word from the active frame to a given place in the given frame.
     CopyIntoFrame {
         src_word: Register,   // size: 1 word
         dest_frame: Register, // size: PTR_BYTE_SIZE
         dest_word: Register,  // size: 1 word
     },
+    /// Local jump to a label in the current frame.
+    Jump { target: String },
     /// Jump and activate a frame.
     JumpAndActivateFrame {
         target: String,
@@ -112,7 +121,7 @@ impl RegisterGenerator {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReturnInfo {
     ret_pc: Range<u32>,
     ret_fp: Range<u32>,
@@ -399,13 +408,14 @@ fn emit_jump(
 
     let mut directives = Vec::new();
 
+    // This is a function return.
+    let curr_entry = ctrl_stack.front().unwrap();
     match target {
         BreakTarget {
             depth: 0,
             kind: TargetType::Label(label),
         } => {
-            // This is a jump to a label in the current frame.
-            todo!()
+            directives.extend(local_jump(*label, &curr_entry.allocation, node_inputs));
         }
         BreakTarget {
             depth,
@@ -422,14 +432,19 @@ fn emit_jump(
             match &target_stack_entry.entry_type {
                 CtrlStackType::TopLevelFunction { output_regs } => {
                     // This is a function return.
-                    let curr_entry = ctrl_stack.front().unwrap();
                     match &curr_entry.entry_type {
-                        CtrlStackType::TopLevelFunction { .. } => {
+                        CtrlStackType::TopLevelFunction { output_regs } => {
                             // This is a return from the toplevel frame.
-                            todo!()
+                            directives.extend(top_level_return(
+                                ret_info.as_ref().unwrap(),
+                                &curr_entry.allocation,
+                                node_inputs,
+                                output_regs,
+                            ));
                         }
                         CtrlStackType::Loop(loop_entry) => {
                             // This is a return from a loop.
+                            assert_eq!(loop_entry.ret_info.as_ref(), ret_info);
                             directives.extend(return_from_loop(
                                 ctrl_stack.len(),
                                 output_regs,
@@ -448,7 +463,7 @@ fn emit_jump(
                         reg_gen,
                         *depth as i64,
                         ret_info,
-                        ctrl_stack.front().unwrap(),
+                        curr_entry,
                         node_inputs,
                         &mut directives,
                     );
@@ -456,6 +471,67 @@ fn emit_jump(
             }
         }
     }
+
+    directives
+}
+
+fn copy_local_jump_args(
+    allocation: &Allocation,
+    node_inputs: &[ValueOrigin],
+    output_regs: &[Range<u32>],
+    directives: &mut Vec<Directive>,
+) {
+    // Copy the node inputs into the output registers, if they are not already assigned.
+    for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
+        let src_reg = &allocation.nodes_outputs[origin];
+        if src_reg != dest_reg {
+            directives.extend(src_reg.clone().zip_eq(dest_reg.clone()).map(
+                move |(src_word, dest_word)| Directive::Copy {
+                    src_word,
+                    dest_word,
+                },
+            ));
+        }
+    }
+}
+
+fn local_jump(
+    label_id: u32,
+    allocation: &Allocation,
+    node_inputs: &[ValueOrigin],
+) -> Vec<Directive> {
+    let mut directives = Vec::new();
+
+    // Copy the node inputs into the output registers, if they are not already assigned.
+    let output_regs = &allocation.labels[&label_id];
+    copy_local_jump_args(allocation, node_inputs, output_regs, &mut directives);
+
+    // Emit the jump directive.
+    directives.push(Directive::Jump {
+        target: format_label(label_id, LabelType::Block),
+    });
+
+    directives
+}
+
+fn top_level_return(
+    ret_info: &ReturnInfo,
+    allocation: &Allocation,
+    node_inputs: &[ValueOrigin],
+    output_regs: &[Range<u32>],
+) -> Vec<Directive> {
+    let mut directives = Vec::new();
+
+    // Copy the node inputs into the output registers, if they are not already assigned.
+    copy_local_jump_args(allocation, node_inputs, output_regs, &mut directives);
+
+    // Emit the return directive.
+    assert_eq!(ret_info.ret_pc.len(), PTR_BYTE_SIZE as usize);
+    assert_eq!(ret_info.ret_fp.len(), PTR_BYTE_SIZE as usize);
+    directives.push(Directive::Return {
+        ret_pc: ret_info.ret_pc.start,
+        ret_fp: ret_info.ret_fp.start,
+    });
 
     directives
 }
