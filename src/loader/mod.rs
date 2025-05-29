@@ -183,7 +183,7 @@ struct ModuleContext<'a> {
     p: Program<'a>,
 }
 
-impl ModuleContext<'_> {
+impl<'a> ModuleContext<'a> {
     fn get_type(&self, type_idx: u32) -> &FuncType {
         &self.types[type_idx as usize]
     }
@@ -196,7 +196,7 @@ impl ModuleContext<'_> {
         self.get_type(self.func_types[func_idx as usize])
     }
 
-    fn get_imported_func(&self, func_idx: u32) -> Option<(&str, &str)> {
+    fn get_imported_func(&self, func_idx: u32) -> Option<(&'a str, &'a str)> {
         if func_idx < self.p.imported_functions.len() as u32 {
             Some(self.p.imported_functions[func_idx as usize])
         } else {
@@ -702,8 +702,12 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                     4,
                     &mut label_gen,
                     blockless_dag,
-                    func_type,
+                    func_idx,
                 );
+
+                for d in definition.directives.iter() {
+                    println!("{d:?}");
+                }
 
                 ctx.p.functions.push(definition);
             }

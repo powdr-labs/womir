@@ -18,10 +18,9 @@
 use itertools::Itertools;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map, hash_map},
-    marker::PhantomData,
     ops::{Range, RangeFrom},
 };
-use wasmparser::{FuncType, Operator as Op, ValType};
+use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
     blockless_dag::{BreakTarget, TargetType},
@@ -38,13 +37,14 @@ const PTR_BYTE_SIZE: u32 = 4;
 
 /// An assembly-like representation for a write-once memory machine.
 pub struct WriteOnceASM<'a> {
-    _a: PhantomData<&'a ()>,
+    pub directives: Vec<Directive<'a>>,
 }
 
 /// Just to make it explicit that the directive argument is not an immediate, but a register location inside the frame.
 /// If the value is multi-word, the first word is at the given address, and the rest are at the next addresses.
 type Register = u32;
 
+#[derive(Debug)]
 pub enum Directive<'a> {
     Label {
         id: String,
@@ -179,11 +179,11 @@ struct LoopStackEntry {
 }
 
 pub fn allocate_registers<'a>(
-    module: &ModuleContext,
+    module: &ModuleContext<'a>,
     bytes_per_word: u32,
     label_gen: &mut RangeFrom<u32>,
     dag: BlocklessDag<'a>,
-    func_type: &FuncType,
+    func_idx: u32,
 ) -> WriteOnceASM<'a> {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::new();
@@ -194,6 +194,7 @@ pub fn allocate_registers<'a>(
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
     // the outputs are filled by the caller, value preemptively provided by the prover.
+    let func_type = module.get_func_type(func_idx);
     let input_regs = func_type
         .params()
         .iter()
@@ -220,7 +221,13 @@ pub fn allocate_registers<'a>(
         allocation,
     }]);
 
-    flatten_frame_tree(
+    // This first element is just a placeholder for the function label we will fill later.
+    let mut directives = vec![Directive::Label {
+        id: String::new(),
+        frame_size: None,
+    }];
+
+    let frame_size = flatten_frame_tree(
         module,
         dag,
         bytes_per_word,
@@ -228,23 +235,28 @@ pub fn allocate_registers<'a>(
         label_gen,
         &mut ctrl_stack,
         Some(ret_info),
+        &mut directives,
     );
 
-    // TODO...
+    // Now we can fill the function label with the actual frame size.
+    directives[0] = Directive::Label {
+        id: format_label(func_idx, LabelType::Function),
+        frame_size: Some(frame_size),
+    };
 
-    WriteOnceASM { _a: PhantomData }
+    WriteOnceASM { directives }
 }
 
 fn flatten_frame_tree<'a>(
-    ctx: &'a ModuleContext<'a>,
+    ctx: &ModuleContext<'a>,
     dag: BlocklessDag<'a>,
     bytes_per_word: u32,
     mut reg_gen: RegisterGenerator,
     label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: Option<ReturnInfo>,
-) -> (u32, Vec<Directive<'a>>) {
-    let mut directives = Vec::new();
+    directives: &mut Vec<Directive<'a>>,
+) -> u32 {
     for (node_idx, node) in dag.nodes.into_iter().enumerate() {
         match node.operation {
             Operation::Inputs => {
@@ -349,25 +361,7 @@ fn flatten_frame_tree<'a>(
                         .collect(),
                 };
 
-                ctrl_stack.push_front(CtrlStackEntry {
-                    entry_type: CtrlStackType::Loop(loop_entry),
-                    allocation: loop_allocation,
-                });
-                let (loop_frame_size, loop_directives) = flatten_frame_tree(
-                    ctx,
-                    sub_dag,
-                    bytes_per_word,
-                    loop_reg_gen,
-                    label_gen,
-                    ctrl_stack,
-                    loop_ret_info,
-                );
-                let CtrlStackType::Loop(loop_entry) = ctrl_stack.pop_front().unwrap().entry_type
-                else {
-                    unreachable!()
-                };
-
-                // We are ready to emit all the instructions to enter the loop.
+                // We can now emit all the instructions to enter the loop.
                 jump_into_loop(
                     bytes_per_word,
                     &loop_entry,
@@ -376,17 +370,42 @@ fn flatten_frame_tree<'a>(
                     ret_info.as_ref(),
                     ctrl_stack.front().unwrap(),
                     &node.inputs,
-                    &mut directives,
+                    directives,
                 );
 
-                // Finally, we can actually emit the listing for the loop.
-                // First, the label:
+                // Finally, we actually emit the listing for the loop itself.
+                // Start with a placeholder for the label, which we will fill
+                // after we have its frame size.
+                let loop_label_idx = directives.len();
                 directives.push(Directive::Label {
+                    id: String::new(),
+                    frame_size: None,
+                });
+
+                ctrl_stack.push_front(CtrlStackEntry {
+                    entry_type: CtrlStackType::Loop(loop_entry),
+                    allocation: loop_allocation,
+                });
+                let loop_frame_size = flatten_frame_tree(
+                    ctx,
+                    sub_dag,
+                    bytes_per_word,
+                    loop_reg_gen,
+                    label_gen,
+                    ctrl_stack,
+                    loop_ret_info,
+                    directives,
+                );
+                let CtrlStackType::Loop(loop_entry) = ctrl_stack.pop_front().unwrap().entry_type
+                else {
+                    unreachable!()
+                };
+
+                // Fix the label directive with the actual label and frame size.
+                directives[loop_label_idx] = Directive::Label {
                     id: loop_entry.label,
                     frame_size: Some(loop_frame_size),
-                });
-                // Then, the directives:
-                directives.extend(loop_directives);
+                };
             }
             Operation::Br(target) => {
                 directives.extend(emit_jump(
@@ -586,7 +605,7 @@ fn flatten_frame_tree<'a>(
         }
     }
 
-    (reg_gen.next_available, directives)
+    reg_gen.next_available
 }
 
 fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
