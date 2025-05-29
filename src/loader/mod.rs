@@ -1,7 +1,7 @@
-mod allocate_registers;
 mod block_tree;
 mod blockless_dag;
 mod dag;
+mod flattening;
 mod locals_data_flow;
 
 use std::{
@@ -9,9 +9,9 @@ use std::{
     rc::Rc,
 };
 
-use allocate_registers::WriteOnceASM;
 use block_tree::BlockTree;
 use dag::Dag;
+use flattening::WriteOnceASM;
 use itertools::Itertools;
 use wasmparser::{
     BlockType, CompositeInnerType, ElementItems, FuncType, LocalsReader, MemoryType, Operator,
@@ -697,13 +697,8 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
-                let definition = allocate_registers::allocate_registers(
-                    &ctx,
-                    4,
-                    &mut label_gen,
-                    blockless_dag,
-                    func_idx,
-                );
+                let definition =
+                    flattening::flatten_dag(&ctx, 4, &mut label_gen, blockless_dag, func_idx);
 
                 for d in definition.directives.iter() {
                     println!("{d:?}");

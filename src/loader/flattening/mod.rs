@@ -1,4 +1,5 @@
-//! This module does the infinite, write-once register allocation.
+//! This module generates an assembly-like representation, flattening
+//! the DAG structure and allocating registers for the operations.
 //!
 //! The algorithm works in 2 passes, and goes like this:
 //!
@@ -178,7 +179,7 @@ struct LoopStackEntry {
     input_regs: Vec<Range<u32>>,
 }
 
-pub fn allocate_registers<'a>(
+pub fn flatten_dag<'a>(
     module: &ModuleContext<'a>,
     bytes_per_word: u32,
     label_gen: &mut RangeFrom<u32>,
