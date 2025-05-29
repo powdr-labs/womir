@@ -814,12 +814,12 @@ fn return_from_loop<'a>(
     directives
 }
 
-fn jump_out_of_loop(
+fn jump_out_of_loop<'a>(
     depth: u32,
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
     node_inputs: &[ValueOrigin],
-) -> Vec<Directive<'static>> {
+) -> Vec<Directive<'a>> {
     let caller_entry = ctrl_stack.front().unwrap();
     let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
         &curr_entry.saved_fps[..]
