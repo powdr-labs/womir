@@ -689,7 +689,13 @@ fn emit_jump<'a>(
             kind: TargetType::Label(label),
         } => {
             // This is a jump out of loop, into a previous frame of the same function.
-            directives.extend(jump_out_of_loop(*depth, *label, ctrl_stack, node_inputs));
+            directives.extend(jump_out_of_loop(
+                bytes_per_word,
+                *depth,
+                *label,
+                ctrl_stack,
+                node_inputs,
+            ));
         }
         BreakTarget {
             depth,
@@ -703,6 +709,7 @@ fn emit_jump<'a>(
                         CtrlStackType::TopLevelFunction { output_regs } => {
                             // This is a return from the toplevel frame.
                             directives.extend(top_level_return(
+                                bytes_per_word,
                                 ret_info.as_ref().unwrap(),
                                 &curr_entry.allocation,
                                 node_inputs,
@@ -713,6 +720,7 @@ fn emit_jump<'a>(
                             // This is a return from a loop.
                             assert_eq!(loop_entry.ret_info.as_ref(), ret_info);
                             directives.extend(return_from_loop(
+                                bytes_per_word,
                                 ctrl_stack.len(),
                                 output_regs,
                                 node_inputs,
@@ -782,6 +790,7 @@ fn local_jump<'a>(
 }
 
 fn top_level_return<'a>(
+    bytes_per_word: u32,
     ret_info: &ReturnInfo,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
@@ -793,8 +802,8 @@ fn top_level_return<'a>(
     copy_local_jump_args(allocation, node_inputs, output_regs, &mut directives);
 
     // Emit the return directive.
-    assert_eq!(ret_info.ret_pc.len(), PTR_BYTE_SIZE as usize);
-    assert_eq!(ret_info.ret_fp.len(), PTR_BYTE_SIZE as usize);
+    assert_ptr_size(bytes_per_word, &ret_info.ret_pc);
+    assert_ptr_size(bytes_per_word, &ret_info.ret_fp);
     directives.push(Directive::Return {
         ret_pc: ret_info.ret_pc.start,
         ret_fp: ret_info.ret_fp.start,
@@ -804,6 +813,7 @@ fn top_level_return<'a>(
 }
 
 fn return_from_loop<'a>(
+    bytes_per_word: u32,
     ctrl_stack_len: usize,
     output_regs: &[Range<u32>],
     node_inputs: &[ValueOrigin],
@@ -816,7 +826,12 @@ fn return_from_loop<'a>(
         let outer_fps = &curr_entry.saved_fps[..];
         let toplevel_depth = ctrl_stack_len - 1;
         let toplevel_idx = outer_fps.len() - 1;
-        let toplevel_fp = get_fp_from_sorted(outer_fps, toplevel_depth as u32, toplevel_idx);
+        let toplevel_fp = get_fp_from_sorted(
+            bytes_per_word,
+            outer_fps,
+            toplevel_depth as u32,
+            toplevel_idx,
+        );
 
         // Issue the copy directives.
         for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
@@ -827,8 +842,8 @@ fn return_from_loop<'a>(
 
     // Issue the return directive.
     let ret_info = curr_entry.ret_info.as_ref().unwrap();
-    assert_eq!(ret_info.ret_pc.len(), PTR_BYTE_SIZE as usize);
-    assert_eq!(ret_info.ret_fp.len(), PTR_BYTE_SIZE as usize);
+    assert_ptr_size(bytes_per_word, &ret_info.ret_pc);
+    assert_ptr_size(bytes_per_word, &ret_info.ret_fp);
 
     directives.push(Directive::Return {
         ret_pc: ret_info.ret_pc.start,
@@ -839,6 +854,7 @@ fn return_from_loop<'a>(
 }
 
 fn jump_out_of_loop<'a>(
+    bytes_per_word: u32,
     depth: u32,
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
@@ -852,7 +868,7 @@ fn jump_out_of_loop<'a>(
         panic!()
     };
     let dest_fp_idx = outer_fps.partition_point(|(d, _)| *d < depth);
-    let dest_fp = get_fp_from_sorted(outer_fps, depth, dest_fp_idx);
+    let dest_fp = get_fp_from_sorted(bytes_per_word, outer_fps, depth, dest_fp_idx);
 
     let target_entry = &ctrl_stack[depth as usize];
     let target_inputs = &target_entry.allocation.labels[&label_id];
@@ -873,10 +889,15 @@ fn jump_out_of_loop<'a>(
     directives
 }
 
-fn get_fp_from_sorted(sorted_fps: &[(u32, Range<u32>)], expected_depth: u32, idx: usize) -> u32 {
+fn get_fp_from_sorted(
+    bytes_per_word: u32,
+    sorted_fps: &[(u32, Range<u32>)],
+    expected_depth: u32,
+    idx: usize,
+) -> u32 {
     let dest_fp = &sorted_fps[idx];
     assert_eq!(dest_fp.0, expected_depth);
-    assert_eq!(dest_fp.1.len(), PTR_BYTE_SIZE as usize);
+    assert_ptr_size(bytes_per_word, &dest_fp.1);
     dest_fp.1.start
 }
 
@@ -934,7 +955,7 @@ fn jump_into_loop<'a>(
     // Handle the special case where outer_fps[0] is required.
     let saved_caller_fp = if let Some((0, _)) = depth_adjusted_loop_fps.peek() {
         let fp = depth_adjusted_loop_fps.next().unwrap().1;
-        assert_eq!(fp.len(), PTR_BYTE_SIZE as usize);
+        assert_ptr_size(bytes_per_word, &fp);
         Some(fp.start)
     } else {
         None
@@ -1010,4 +1031,11 @@ fn byte_size(ty: ValType) -> u32 {
 
 fn word_count(byte_size: u32, bytes_per_word: u32) -> u32 {
     (byte_size + bytes_per_word - 1) / bytes_per_word
+}
+
+fn assert_ptr_size(bytes_per_word: u32, ptr: &Range<u32>) {
+    assert_eq!(
+        ptr.len(),
+        word_count(PTR_BYTE_SIZE, bytes_per_word) as usize
+    );
 }

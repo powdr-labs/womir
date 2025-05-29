@@ -13,7 +13,7 @@ use crate::loader::{
 
 use super::RegisterGenerator;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 struct AssignmentSet {
     /// Empty writers Vec means that the register is reserved to be written on demand,
     /// so it can not be used for any more writers.
@@ -52,7 +52,7 @@ impl AssignmentSet {
                 // Already used or reserved. We have a conflict and can't optimistically
                 // set the writer. If the conflict is with a writer node above us, it
                 // means it was also optimistically assigned, and we must clear it.
-                removed_writers.extend(entry.get().iter().filter(|w| w.node > curr_node_idx));
+                removed_writers.extend(entry.get().iter().filter(|w| w.node < curr_node_idx));
                 w2r = None;
             }
         }
@@ -103,7 +103,7 @@ impl AssignmentSet {
         {
             let mut final_writers = writers
                 .iter()
-                .filter(|w| w.node <= curr_node_idx)
+                .filter(|w| w.node >= curr_node_idx)
                 .peekable();
 
             if final_writers.peek().is_some() {
@@ -126,7 +126,7 @@ impl AssignmentSet {
             .iter()
             .chain(other.writer_to_regs.iter())
         {
-            if writer.node <= curr_node_idx {
+            if writer.node >= curr_node_idx {
                 self.writer_to_regs.insert(*writer, reg_range.clone());
             } else {
                 optimistic_assignments.push((*writer, reg_range.clone()));
