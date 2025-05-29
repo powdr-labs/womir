@@ -45,7 +45,7 @@ pub struct WriteOnceASM<'a> {
 /// If the value is multi-word, the first word is at the given address, and the rest are at the next addresses.
 type Register = u32;
 
-pub enum Directive {
+pub enum Directive<'a> {
     Label {
         id: String,
         /// If this label is the start of a frame, this is the size of the frame in words.
@@ -92,6 +92,29 @@ pub enum Directive {
     Return {
         ret_pc: Register, // size: PTR_BYTE_SIZE
         ret_fp: Register, // size: PTR_BYTE_SIZE
+    },
+    /// Calls a normal function.
+    /// Use `JumpAndActivateFrame` for a tail call.
+    Call {
+        target: String,
+        new_frame_ptr: Register, // size: PTR_BYTE_SIZE
+        /// Where, in the new frame, to save the return PC at the call site.
+        saved_ret_pc: Register, // size: PTR_BYTE_SIZE
+        /// Where, in the new frame, to save the frame pointer of the frame we just left.
+        saved_caller_fp: Register, // size: PTR_BYTE_SIZE
+    },
+    /// Calls an imported function.
+    ImportedCall {
+        module: &'a str,
+        function: &'a str,
+        inputs: Vec<Range<u32>>,
+        outputs: Vec<Range<u32>>,
+    },
+    /// A forwarded operation from WebAssembly, only with the inputs and output registers specified.
+    WASMOp {
+        op: Op<'a>,
+        inputs: Vec<Range<u32>>,
+        output: Option<Range<u32>>,
     },
 }
 
@@ -198,6 +221,7 @@ pub fn allocate_registers<'a>(
     }]);
 
     flatten_frame_tree(
+        module,
         dag,
         bytes_per_word,
         reg_gen,
@@ -211,16 +235,17 @@ pub fn allocate_registers<'a>(
     WriteOnceASM { _a: PhantomData }
 }
 
-fn flatten_frame_tree(
-    dag: BlocklessDag,
+fn flatten_frame_tree<'a>(
+    ctx: &'a ModuleContext<'a>,
+    dag: BlocklessDag<'a>,
     bytes_per_word: u32,
     mut reg_gen: RegisterGenerator,
     label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: Option<ReturnInfo>,
-) -> (u32, Vec<Directive>) {
+) -> (u32, Vec<Directive<'a>>) {
     let mut directives = Vec::new();
-    for node in dag.nodes {
+    for (node_idx, node) in dag.nodes.into_iter().enumerate() {
         match node.operation {
             Operation::Inputs => {
                 // Inputs does not translate to any assembly directive. It is used on the node tree for its outputs.
@@ -329,6 +354,7 @@ fn flatten_frame_tree(
                     allocation: loop_allocation,
                 });
                 let (loop_frame_size, loop_directives) = flatten_frame_tree(
+                    ctx,
                     sub_dag,
                     bytes_per_word,
                     loop_reg_gen,
@@ -466,7 +492,68 @@ fn flatten_frame_tree(
                 todo!();
             }
             Operation::WASMOp(Op::Call { function_index }) => {
-                todo!();
+                let curr_entry = ctrl_stack.front().unwrap();
+
+                if let Some((module, function)) = ctx.get_imported_func(function_index) {
+                    // Imported functions are kinda like system calls, and we assume
+                    // the implementation can access the input and output registers directly,
+                    // so we just have to emit the call directive.
+                    let inputs = map_input_into_regs(node.inputs, curr_entry);
+                    let outputs = (0..node.output_types.len())
+                        .map(|output_idx| {
+                            curr_entry.allocation.nodes_outputs[&ValueOrigin {
+                                node: node_idx,
+                                output_idx: output_idx as u32,
+                            }]
+                                .clone()
+                        })
+                        .collect();
+
+                    directives.push(Directive::ImportedCall {
+                        module,
+                        function,
+                        inputs,
+                        outputs,
+                    });
+                } else {
+                    // Normal function calls requires a frame allocation and copying of the
+                    // inputs and outputs into the frame (the outputs are provided by the
+                    // prover "from the future").
+                    let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+
+                    directives.push(Directive::AllocateFrame {
+                        target_frame: format_label(function_index, LabelType::Function),
+                        result_ptr: func_frame_ptr.start,
+                    });
+
+                    // Generate the registers in the order expected by the calling convention.
+                    let mut fn_reg_gen = RegisterGenerator::new();
+                    let ret_pc = fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                    let ret_fp = fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+
+                    for origin in node.inputs {
+                        let src_reg = curr_entry.allocation.nodes_outputs[&origin].clone();
+                        let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
+                        directives.extend(copy_into_frame(src_reg, func_frame_ptr.start, dest_reg));
+                    }
+                    for output_idx in 0..node.output_types.len() {
+                        let src_reg = curr_entry.allocation.nodes_outputs[&ValueOrigin {
+                            node: node_idx,
+                            output_idx: output_idx as u32,
+                        }]
+                            .clone();
+                        let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
+                        directives.extend(copy_into_frame(src_reg, func_frame_ptr.start, dest_reg));
+                    }
+
+                    // Emit the call directive.
+                    directives.push(Directive::Call {
+                        target: format_label(function_index, LabelType::Function),
+                        new_frame_ptr: func_frame_ptr.start,
+                        saved_caller_fp: ret_fp.start,
+                        saved_ret_pc: ret_pc.start,
+                    });
+                }
             }
             Operation::WASMOp(Op::CallIndirect {
                 table_index,
@@ -475,7 +562,27 @@ fn flatten_frame_tree(
                 // We will need to access the ROM memory to get the function address, type, and frame size.
                 todo!();
             }
-            _ => todo!(),
+            Operation::WASMOp(op) => {
+                // Everything else is a normal operation, which will be forwarded almost as is.
+                // Only that the registers inputs and output are explicit.
+                let curr_entry = ctrl_stack.front().unwrap();
+                let inputs = map_input_into_regs(node.inputs, curr_entry);
+                let output = match node.output_types.len() {
+                    0 => None,
+                    1 => Some(
+                        curr_entry.allocation.nodes_outputs[&ValueOrigin {
+                            node: node_idx,
+                            output_idx: 0,
+                        }]
+                            .clone(),
+                    ),
+                    _ => {
+                        // WASM instructions have at most one output, so this is a bug.
+                        panic!()
+                    }
+                };
+                directives.push(Directive::WASMOp { op, inputs, output });
+            }
         }
     }
 
@@ -490,11 +597,21 @@ fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
     );
 }
 
-fn copy_into_frame(
+fn map_input_into_regs(
+    node_inputs: Vec<ValueOrigin>,
+    curr_entry: &CtrlStackEntry,
+) -> Vec<Range<u32>> {
+    node_inputs
+        .into_iter()
+        .map(|origin| curr_entry.allocation.nodes_outputs[&origin].clone())
+        .collect()
+}
+
+fn copy_into_frame<'a>(
     src: Range<u32>,
     dest_frame: u32,
     dest: Range<u32>,
-) -> impl Iterator<Item = Directive> {
+) -> impl Iterator<Item = Directive<'a>> {
     src.zip_eq(dest)
         .map(move |(src_word, dest_word)| Directive::CopyIntoFrame {
             src_word,
@@ -503,14 +620,14 @@ fn copy_into_frame(
         })
 }
 
-fn emit_jump(
+fn emit_jump<'a>(
     bytes_per_word: u32,
     reg_gen: &mut RegisterGenerator,
     ret_info: Option<&ReturnInfo>,
     node_inputs: &[ValueOrigin],
     target: &BreakTarget,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
-) -> Vec<Directive> {
+) -> Vec<Directive<'a>> {
     // There are 5 different kinds of jumps, depending on the target:
     //
     // 1. Jump to a label in the current frame. We need to check if the break arguments have
@@ -621,11 +738,11 @@ fn copy_local_jump_args(
     }
 }
 
-fn local_jump(
+fn local_jump<'a>(
     label_id: u32,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
-) -> Vec<Directive> {
+) -> Vec<Directive<'a>> {
     let mut directives = Vec::new();
 
     // Copy the node inputs into the output registers, if they are not already assigned.
@@ -640,12 +757,12 @@ fn local_jump(
     directives
 }
 
-fn top_level_return(
+fn top_level_return<'a>(
     ret_info: &ReturnInfo,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     output_regs: &[Range<u32>],
-) -> Vec<Directive> {
+) -> Vec<Directive<'a>> {
     let mut directives = Vec::new();
 
     // Copy the node inputs into the output registers, if they are not already assigned.
@@ -662,13 +779,13 @@ fn top_level_return(
     directives
 }
 
-fn return_from_loop(
+fn return_from_loop<'a>(
     ctrl_stack_len: usize,
     output_regs: &[Range<u32>],
     node_inputs: &[ValueOrigin],
     allocation: &Allocation,
     curr_entry: &LoopStackEntry,
-) -> Vec<Directive> {
+) -> Vec<Directive<'a>> {
     let mut directives = Vec::new();
 
     if !output_regs.is_empty() {
@@ -702,7 +819,7 @@ fn jump_out_of_loop(
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
     node_inputs: &[ValueOrigin],
-) -> Vec<Directive> {
+) -> Vec<Directive<'static>> {
     let caller_entry = ctrl_stack.front().unwrap();
     let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
         &curr_entry.saved_fps[..]
@@ -744,7 +861,7 @@ fn get_fp_from_sorted(sorted_fps: &[(u32, Range<u32>)], expected_depth: u32, idx
 /// and when jumping into the loop for the first time.
 ///
 /// depth_offset is the difference between the caller frame depth and the loop frame depth.
-fn jump_into_loop(
+fn jump_into_loop<'a>(
     bytes_per_word: u32,
     loop_entry: &LoopStackEntry,
     reg_gen: &mut RegisterGenerator,
@@ -752,7 +869,7 @@ fn jump_into_loop(
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
     node_inputs: &[ValueOrigin],
-    directives: &mut Vec<Directive>,
+    directives: &mut Vec<Directive<'a>>,
 ) {
     // We start by allocating the frame.
     let loop_fp = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
@@ -845,14 +962,16 @@ fn jump_into_loop(
 }
 
 enum LabelType {
-    Loop,
+    Function,
     Local,
+    Loop,
 }
 
 fn format_label(label_id: u32, label_type: LabelType) -> String {
     match label_type {
-        LabelType::Loop => format!("loop_{label_id}"),
+        LabelType::Function => format!("func_{label_id}"),
         LabelType::Local => format!("local_{label_id}"),
+        LabelType::Loop => format!("loop_{label_id}"),
     }
 }
 

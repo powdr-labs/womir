@@ -196,6 +196,14 @@ impl ModuleContext<'_> {
         self.get_type(self.func_types[func_idx as usize])
     }
 
+    fn get_imported_func(&self, func_idx: u32) -> Option<(&str, &str)> {
+        if func_idx < self.p.imported_functions.len() as u32 {
+            Some(self.p.imported_functions[func_idx as usize])
+        } else {
+            None
+        }
+    }
+
     fn blockty_inputs(&self, blockty: BlockType) -> &[ValType] {
         match blockty {
             BlockType::Empty | BlockType::Type(_) => &[],
