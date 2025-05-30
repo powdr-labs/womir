@@ -1,4 +1,5 @@
 mod loader;
+mod transpiler;
 
 fn main() -> wasmparser::Result<()> {
     env_logger::init();

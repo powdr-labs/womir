@@ -44,6 +44,7 @@ use super::{Block, BlockKind, Element, Instruction, ModuleContext};
 ///  - a consequence of the previous, loops are only exited through breaks. An outer block is added to the loop if
 ///    needed to break out of it;
 ///  - dead code is removed after non-fallthrough loops and `br`, `br_table` and `unreachable` instructions;
+#[derive(Debug)]
 pub struct BlockTree<'a> {
     pub elements: Vec<Element<'a>>,
 }

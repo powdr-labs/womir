@@ -1,6 +1,6 @@
 mod block_tree;
 mod blockless_dag;
-mod dag;
+pub mod dag;
 mod flattening;
 mod locals_data_flow;
 
@@ -697,6 +697,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 // Loads the function to memory in the BlockTree format.
                 let block_tree = BlockTree::load_function(&ctx, function.get_operators_reader()?)?;
 
+                println!("Block tree: {block_tree:#?}");
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
                 let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 

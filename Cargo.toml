@@ -8,3 +8,5 @@ env_logger = "0.10.0"
 itertools = "0.13"
 log = "0.4.17"
 wasmparser = "0.227"
+# petravm-asm = { git = "https://github.com/PetraProver/PetraVM.git", branch = "main" }
+petravm-asm = { path = "../PetraVM/assembly/" }
