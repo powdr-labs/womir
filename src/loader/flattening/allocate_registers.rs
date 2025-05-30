@@ -180,6 +180,7 @@ pub fn optimistic_allocation<'a>(
     }
 
     struct LabelAllocation {
+        node_idx: usize,
         regs: Vec<Range<u32>>,
         path_below_it: PerPathData,
     }
@@ -258,6 +259,7 @@ pub fn optimistic_allocation<'a>(
                 labels.insert(
                     *id,
                     LabelAllocation {
+                        node_idx,
                         regs,
                         path_below_it: active_path.clone(),
                     },
@@ -367,15 +369,31 @@ pub fn optimistic_allocation<'a>(
         active_path.reg_gen.next_available
     );
 
+    let mut nodes_outputs = active_path.assignments.writer_to_regs;
+
     let labels = labels
         .into_iter()
-        .map(|(label, label_alloc)| (label, label_alloc.regs))
+        .map(|(label, label_alloc)| {
+            // Now that the allocation is done, we can also put in the map the registers
+            // for the labels, for access convenience.
+            for (output_idx, reg) in label_alloc.regs.iter().enumerate() {
+                let origin = ValueOrigin {
+                    node: label_alloc.node_idx,
+                    output_idx: output_idx as u32,
+                };
+
+                nodes_outputs.insert(origin, reg.clone());
+            }
+
+            // Simplify the index by label:
+            (label, label_alloc.regs)
+        })
         .collect();
 
     *reg_gen = active_path.reg_gen;
 
     Allocation {
-        nodes_outputs: active_path.assignments.writer_to_regs,
+        nodes_outputs,
         labels,
     }
 }
