@@ -22,6 +22,7 @@ use allocate_registers::{Allocation, optimistic_allocation};
 use itertools::Itertools;
 use std::{
     collections::{BTreeSet, VecDeque},
+    fmt::Display,
     ops::{Range, RangeFrom},
 };
 use wasmparser::{Operator as Op, ValType};
@@ -120,6 +121,121 @@ pub enum Directive<'a> {
         inputs: Vec<Range<u32>>,
         output: Option<Range<u32>>,
     },
+}
+
+impl Display for Directive<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Directive::Label { id, frame_size } => {
+                write!(f, "{id}")?;
+                if let Some(size) = frame_size {
+                    write!(f, " [{size}]")?;
+                };
+            }
+            Directive::AllocateFrame {
+                target_frame,
+                result_ptr,
+            } => {
+                write!(f, "    AllocateFrame {target_frame} -> {result_ptr}")?;
+            }
+            Directive::Copy {
+                src_word,
+                dest_word,
+            } => {
+                write!(f, "    Copy {src_word} -> {dest_word}")?;
+            }
+            Directive::CopyIntoFrame {
+                src_word,
+                dest_frame,
+                dest_word,
+            } => {
+                write!(
+                    f,
+                    "    CopyIntoFrame {src_word} {dest_frame} =F=> {dest_word}"
+                )?;
+            }
+            Directive::Jump { target } => {
+                write!(f, "    Jump {target}")?;
+            }
+            Directive::JumpIfZero { target, condition } => {
+                write!(f, "    JumpIfZero {target} {condition}")?;
+            }
+            Directive::JumpAndActivateFrame {
+                target,
+                new_frame_ptr,
+                saved_caller_fp,
+            } => {
+                write!(f, "    JumpAndActivateFrame {target} {new_frame_ptr}")?;
+                if let Some(fp) = saved_caller_fp {
+                    write!(f, " =F=> {fp}")?;
+                }
+            }
+            Directive::Return { ret_pc, ret_fp } => {
+                write!(f, "    Return {ret_pc} {ret_fp}")?;
+            }
+            Directive::Call {
+                target,
+                new_frame_ptr,
+                saved_ret_pc,
+                saved_caller_fp,
+            } => {
+                write!(
+                    f,
+                    "    Call {target} {new_frame_ptr} =F=> {saved_ret_pc} {saved_caller_fp}"
+                )?;
+            }
+            Directive::ImportedCall {
+                module,
+                function,
+                inputs,
+                outputs,
+            } => {
+                let escaped_module = module.replace('"', "\\\"");
+                let escaped_function = function.replace('"', "\\\"");
+                write!(
+                    f,
+                    "    ImportedCall \"{}\" \"{}\"",
+                    escaped_module, escaped_function
+                )?;
+                for input in inputs.iter() {
+                    if input.len() == 1 {
+                        write!(f, " {}", input.start)?;
+                    } else {
+                        write!(f, " {}..={}", input.start, input.end - 1)?;
+                    }
+                }
+                if !outputs.is_empty() {
+                    write!(f, " ->")?;
+                    for output in outputs.iter() {
+                        if output.len() == 1 {
+                            write!(f, " {}", output.start)?;
+                        } else {
+                            write!(f, " {}..={}", output.start, output.end - 1)?;
+                        }
+                    }
+                }
+            }
+            Directive::WASMOp { op, inputs, output } => {
+                write!(f, "    {op:?}")?;
+                for input in inputs.iter() {
+                    if input.len() == 1 {
+                        write!(f, " {}", input.start)?;
+                    } else {
+                        write!(f, " {}..={}", input.start, input.end - 1)?;
+                    }
+                }
+                if let Some(output) = output {
+                    if output.len() == 1 {
+                        write!(f, " -> {}", output.start)?;
+                    } else {
+                        write!(f, " -> {}..={}", output.start, output.end - 1)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
