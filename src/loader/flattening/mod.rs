@@ -136,13 +136,13 @@ impl Display for Directive<'_> {
                 target_frame,
                 result_ptr,
             } => {
-                write!(f, "    AllocateFrame {target_frame} -> {result_ptr}")?;
+                write!(f, "    AllocateFrame {target_frame} -> ${result_ptr}")?;
             }
             Directive::Copy {
                 src_word,
                 dest_word,
             } => {
-                write!(f, "    Copy {src_word} -> {dest_word}")?;
+                write!(f, "    Copy ${src_word} -> ${dest_word}")?;
             }
             Directive::CopyIntoFrame {
                 src_word,
@@ -151,27 +151,27 @@ impl Display for Directive<'_> {
             } => {
                 write!(
                     f,
-                    "    CopyIntoFrame {src_word} {dest_frame} =F=> {dest_word}"
+                    "    CopyIntoFrame ${src_word} ${dest_frame} -> ${dest_frame}[{dest_word}]"
                 )?;
             }
             Directive::Jump { target } => {
                 write!(f, "    Jump {target}")?;
             }
             Directive::JumpIfZero { target, condition } => {
-                write!(f, "    JumpIfZero {target} {condition}")?;
+                write!(f, "    JumpIfZero {target} ${condition}")?;
             }
             Directive::JumpAndActivateFrame {
                 target,
                 new_frame_ptr,
                 saved_caller_fp,
             } => {
-                write!(f, "    JumpAndActivateFrame {target} {new_frame_ptr}")?;
+                write!(f, "    JumpAndActivateFrame {target} ${new_frame_ptr}")?;
                 if let Some(fp) = saved_caller_fp {
-                    write!(f, " =F=> {fp}")?;
+                    write!(f, " -> ${new_frame_ptr}[{fp}]")?;
                 }
             }
             Directive::Return { ret_pc, ret_fp } => {
-                write!(f, "    Return {ret_pc} {ret_fp}")?;
+                write!(f, "    Return ${ret_pc} ${ret_fp}")?;
             }
             Directive::Call {
                 target,
@@ -181,7 +181,7 @@ impl Display for Directive<'_> {
             } => {
                 write!(
                     f,
-                    "    Call {target} {new_frame_ptr} =F=> {saved_ret_pc} {saved_caller_fp}"
+                    "    Call {target} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
                 )?;
             }
             Directive::ImportedCall {
@@ -199,42 +199,120 @@ impl Display for Directive<'_> {
                 )?;
                 for input in inputs.iter() {
                     if input.len() == 1 {
-                        write!(f, " {}", input.start)?;
+                        write!(f, " ${}", input.start)?;
                     } else {
-                        write!(f, " {}..={}", input.start, input.end - 1)?;
+                        write!(f, " ${}..=${}", input.start, input.end - 1)?;
                     }
                 }
                 if !outputs.is_empty() {
                     write!(f, " ->")?;
                     for output in outputs.iter() {
                         if output.len() == 1 {
-                            write!(f, " {}", output.start)?;
+                            write!(f, " ${}", output.start)?;
                         } else {
-                            write!(f, " {}..={}", output.start, output.end - 1)?;
+                            write!(f, " ${}..=${}", output.start, output.end - 1)?;
                         }
                     }
                 }
             }
             Directive::WASMOp { op, inputs, output } => {
-                write!(f, "    {op:?}")?;
+                write!(f, "    ")?;
+                format_op(op, f)?;
                 for input in inputs.iter() {
                     if input.len() == 1 {
-                        write!(f, " {}", input.start)?;
+                        write!(f, " ${}", input.start)?;
                     } else {
-                        write!(f, " {}..={}", input.start, input.end - 1)?;
+                        write!(f, " ${}..=${}", input.start, input.end - 1)?;
                     }
                 }
                 if let Some(output) = output {
                     if output.len() == 1 {
-                        write!(f, " -> {}", output.start)?;
+                        write!(f, " -> ${}", output.start)?;
                     } else {
-                        write!(f, " -> {}..={}", output.start, output.end - 1)?;
+                        write!(f, " -> ${}..=${}", output.start, output.end - 1)?;
                     }
                 }
             }
         }
 
         Ok(())
+    }
+}
+
+fn format_op(op: &Op<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    // A little hack to get the string representation of the operation.
+    // Debug format and get the string up to the first space.
+    let op_name = format!("{op:?}");
+    write!(f, "{}", op_name.split_whitespace().next().unwrap())?;
+
+    match op {
+        // ======== Constants (all have `{ value }`) ========
+        Op::I32Const { value } => write!(f, " {value}"),
+        Op::I64Const { value } => write!(f, " {value}"),
+        Op::F32Const { value } => write!(f, " {}", value.bits()),
+        Op::F64Const { value } => write!(f, " {}", value.bits()),
+
+        // ======== Loads & Stores (all have `{ memarg }`) ========
+        Op::I32Load { memarg }
+        | Op::I64Load { memarg }
+        | Op::F32Load { memarg }
+        | Op::F64Load { memarg }
+        | Op::I32Load8S { memarg }
+        | Op::I32Load8U { memarg }
+        | Op::I32Load16S { memarg }
+        | Op::I32Load16U { memarg }
+        | Op::I64Load8S { memarg }
+        | Op::I64Load8U { memarg }
+        | Op::I64Load16S { memarg }
+        | Op::I64Load16U { memarg }
+        | Op::I64Load32S { memarg }
+        | Op::I64Load32U { memarg }
+        | Op::V128Load { memarg }
+        | Op::I32Store { memarg }
+        | Op::I64Store { memarg }
+        | Op::F32Store { memarg }
+        | Op::F64Store { memarg }
+        | Op::I32Store8 { memarg }
+        | Op::I32Store16 { memarg }
+        | Op::I64Store8 { memarg }
+        | Op::I64Store16 { memarg }
+        | Op::I64Store32 { memarg }
+        | Op::V128Store { memarg } => {
+            write!(f, " {}", memarg.offset)
+        }
+
+        // ======== MemoryInit & DataDrop ========
+        Op::MemoryInit { data_index, .. } | Op::DataDrop { data_index } => {
+            write!(f, " {data_index}")
+        }
+
+        // ======== Table Ops (all have `{ table }`) ========
+        Op::TableGet { table }
+        | Op::TableSet { table }
+        | Op::TableSize { table }
+        | Op::TableGrow { table }
+        | Op::TableFill { table } => {
+            write!(f, " {table}")
+        }
+
+        // ======== TableCopy (has `{ dst_table, src_table }`) ========
+        Op::TableCopy {
+            dst_table,
+            src_table,
+        } => {
+            write!(f, " {dst_table} {src_table}")
+        }
+
+        // ======== TableInit & ElemDrop ========
+        Op::TableInit { elem_index, table } => {
+            write!(f, " {elem_index} {table}")
+        }
+        Op::ElemDrop { elem_index } => {
+            write!(f, " {elem_index}")
+        }
+
+        // ======== Anything else ========
+        _ => Ok(()),
     }
 }
 
@@ -1139,9 +1217,9 @@ enum LabelType {
 
 fn format_label(label_id: u32, label_type: LabelType) -> String {
     match label_type {
-        LabelType::Function => format!("func_{label_id}"),
-        LabelType::Local => format!("local_{label_id}"),
-        LabelType::Loop => format!("loop_{label_id}"),
+        LabelType::Function => format!("__priv_func_{label_id}"),
+        LabelType::Local => format!("__local_{label_id}"),
+        LabelType::Loop => format!("__loop_{label_id}"),
     }
 }
 
