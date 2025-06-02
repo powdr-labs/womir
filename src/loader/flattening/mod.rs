@@ -131,6 +131,7 @@ impl Display for Directive<'_> {
                 if let Some(size) = frame_size {
                     write!(f, " [{size}]")?;
                 };
+                write!(f, ":")?;
             }
             Directive::AllocateFrame {
                 target_frame,
@@ -438,8 +439,14 @@ pub fn flatten_dag<'a>(
     );
 
     // Now we can fill the function label with the actual frame size.
+    let label = if let Some(name) = module.get_exported_func(func_idx) {
+        name.to_string()
+    } else {
+        format_label(func_idx, LabelType::PrivateFunction)
+    };
+
     directives[0] = Directive::Label {
-        id: format_label(func_idx, LabelType::Function),
+        id: label,
         frame_size: Some(frame_size),
     };
 
@@ -749,7 +756,7 @@ fn flatten_frame_tree<'a>(
                     let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
 
                     directives.push(Directive::AllocateFrame {
-                        target_frame: format_label(function_index, LabelType::Function),
+                        target_frame: format_label(function_index, LabelType::PrivateFunction),
                         result_ptr: func_frame_ptr.start,
                     });
 
@@ -775,7 +782,7 @@ fn flatten_frame_tree<'a>(
 
                     // Emit the call directive.
                     directives.push(Directive::Call {
-                        target: format_label(function_index, LabelType::Function),
+                        target: format_label(function_index, LabelType::PrivateFunction),
                         new_frame_ptr: func_frame_ptr.start,
                         saved_caller_fp: ret_fp.start,
                         saved_ret_pc: ret_pc.start,
@@ -1210,14 +1217,14 @@ fn jump_into_loop<'a>(
 }
 
 enum LabelType {
-    Function,
+    PrivateFunction,
     Local,
     Loop,
 }
 
 fn format_label(label_id: u32, label_type: LabelType) -> String {
     match label_type {
-        LabelType::Function => format!("__priv_func_{label_id}"),
+        LabelType::PrivateFunction => format!("__priv_func_{label_id}"),
         LabelType::Local => format!("__local_{label_id}"),
         LabelType::Loop => format!("__loop_{label_id}"),
     }

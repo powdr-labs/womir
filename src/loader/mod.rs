@@ -160,8 +160,8 @@ pub struct Program<'a> {
     pub functions: Vec<WriteOnceASM<'a>>,
     /// The start function, if any.
     pub start_function: Option<u32>,
-    /// The main function, if any.
-    pub main_function: Option<u32>,
+    /// The exported functions.
+    pub exported_functions: BTreeMap<u32, &'a str>,
     /// The initial memory, with the values to be set at startup.
     pub initial_memory: BTreeMap<u32, MemoryEntry>,
     /// The globals, in order of definition.
@@ -202,6 +202,10 @@ impl<'a> ModuleContext<'a> {
         } else {
             None
         }
+    }
+
+    fn get_exported_func(&self, func_idx: u32) -> Option<&'a str> {
+        self.p.exported_functions.get(&func_idx).copied()
     }
 
     fn blockty_inputs(&self, blockty: BlockType) -> &[ValType] {
@@ -359,7 +363,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
             imported_functions: Vec::new(),
             functions: Vec::new(),
             start_function: None,
-            main_function: None,
+            exported_functions: BTreeMap::new(),
             // This is left empty for most of this function, and will be filled just before returning.
             initial_memory: BTreeMap::new(),
             globals: Vec::new(),
@@ -566,10 +570,13 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                         export.index
                     );
 
-                    // Following the convention of the Rust target wasm32-unknown-unknown,
-                    // we expect one "main" function, that is the entry point of the program.
-                    if export.name == "main" {
-                        ctx.p.main_function = Some(export.index);
+                    match export.kind {
+                        wasmparser::ExternalKind::Func => {
+                            ctx.p.exported_functions.insert(export.index, export.name);
+                        }
+                        _ => {
+                            // We don't have anything to do with other kinds of exports.
+                        }
                     }
                 }
             }
