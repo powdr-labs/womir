@@ -34,3 +34,26 @@ This files describes all the optimizations ideas we left out for now.
   again, it is better to have the inner loop break directly to the final
   destination instead of going through multiple frame barriers, because
   each frame barrier potentially adds multiple copies.
+
+- after flattening the DAG, there might remain Jump instructions that
+  targets a label that follows immediately. These Jumps can be eliminated.
+  This is important even when compiling an optimized WASM, because
+  the Br nodes are added explicitly during the DAG processing, even
+  on blocks that falls through. This is needed to properly handle
+  the data flow from breaks to labels. And these Br nodes may generate
+  these superfluous Jumps.
+
+- [const optimizations]: if the final ISA supports instructions that
+  operate on constants, like `addi $result, $input, 42`, then the DAG
+  could be optimized to take advantage of this by folding constant
+  values into the instructions that can use them.
+
+- [const optimizations]: as a consequence of the previous point, if
+  constants values are folded into the instructions, then there might
+  remain orphaned Const nodes in the DAG. These nodes should be
+  eliminated.
+
+- [tail call]: a call immediately followed by a return can be optimized
+  to a tail call. We can even do this for calls where its outputs
+  are not related to the return values, because we can determine the
+  return registers before the tail call.
