@@ -33,7 +33,7 @@ use crate::loader::{
 };
 
 use super::{
-    ModuleContext,
+    Program,
     blockless_dag::{BlocklessDag, Operation},
 };
 
@@ -43,6 +43,7 @@ const PTR_BYTE_SIZE: u32 = 4;
 /// An assembly-like representation for a write-once memory machine.
 pub struct WriteOnceASM<'a> {
     pub func_idx: u32,
+    pub frame_size: u32,
     pub directives: Vec<Directive<'a>>,
 }
 
@@ -380,7 +381,7 @@ struct LoopStackEntry {
 }
 
 pub fn flatten_dag<'a>(
-    module: &ModuleContext<'a>,
+    module: &Program<'a>,
     bytes_per_word: u32,
     label_gen: &mut RangeFrom<u32>,
     dag: BlocklessDag<'a>,
@@ -431,7 +432,7 @@ pub fn flatten_dag<'a>(
 
     // If this function is exported, we also add a placeholder for its name as a label.
     let exported_name = module.get_exported_func(func_idx);
-    if let Some(name) = exported_name {
+    if exported_name.is_some() {
         directives.push(Directive::Label {
             id: String::new(),
             frame_size: None,
@@ -465,12 +466,13 @@ pub fn flatten_dag<'a>(
 
     WriteOnceASM {
         func_idx,
+        frame_size,
         directives,
     }
 }
 
 fn flatten_frame_tree<'a>(
-    ctx: &ModuleContext<'a>,
+    ctx: &Program<'a>,
     dag: BlocklessDag<'a>,
     bytes_per_word: u32,
     mut reg_gen: RegisterGenerator,

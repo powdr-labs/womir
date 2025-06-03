@@ -7,7 +7,7 @@ use itertools::Itertools;
 use wasmparser::{FuncType, Operator as Op, RefType, ValType};
 
 use super::{
-    Block, BlockKind, Element, Instruction as Ins, ModuleContext, locals_data_flow::LiftedBlockTree,
+    Block, BlockKind, Element, Instruction as Ins, Program, locals_data_flow::LiftedBlockTree,
 };
 
 #[derive(Debug)]
@@ -53,7 +53,7 @@ pub struct Dag<'a> {
 
 impl<'a> Dag<'a> {
     pub fn new(
-        module: &ModuleContext<'a>,
+        module: &Program<'a>,
         func_type: &FuncType,
         locals_types: &[ValType],
         block_tree: LiftedBlockTree<'a>,
@@ -116,7 +116,7 @@ struct BreakArgs {
 /// For that we need to keep track of the stack and of which of our hypergraph edges is
 /// currently each local variable. When a local is assigned, it becames a new edge.
 fn build_dag<'a>(
-    module: &ModuleContext<'a>,
+    module: &Program<'a>,
     locals_types: &[ValType],
     input_types: Vec<ValType>,
     block_stack: &mut VecDeque<BreakArgs>,
@@ -383,7 +383,7 @@ fn build_dag<'a>(
 }
 
 fn build_dag_for_block<'a>(
-    module: &ModuleContext<'a>,
+    module: &Program<'a>,
     locals_types: &[ValType],
     inputs: Vec<ValueOrigin>,
     block_stack: &mut VecDeque<BreakArgs>,
@@ -560,7 +560,7 @@ fn default_const_for_type(value_type: ValType) -> Operation<'static> {
 }
 
 struct StackTracker<'a, 'b> {
-    module: &'b ModuleContext<'a>,
+    module: &'b Program<'a>,
     nodes: Vec<Node<'a>>,
     stack: Vec<ValueOrigin>,
 }
@@ -733,11 +733,11 @@ impl<'a, 'b> StackTracker<'a, 'b> {
 
             // # Variable instructions
             Op::GlobalGet { global_index } => {
-                let global = &self.module.p.globals[*global_index as usize];
+                let global = &self.module.globals[*global_index as usize];
                 (vec![], vec![global.val_type])
             }
             Op::GlobalSet { global_index } => {
-                let global = &self.module.p.globals[*global_index as usize];
+                let global = &self.module.globals[*global_index as usize];
                 (vec![global.val_type], vec![])
             }
 

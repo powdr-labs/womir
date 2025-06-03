@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
 
 use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader, ValType};
 
-use super::{Block, BlockKind, Element, Instruction, ModuleContext};
+use super::{Block, BlockKind, Element, Instruction, Program};
 
 /// BlockTree is a simplified representation of a WASM function.
 ///
@@ -49,7 +49,7 @@ pub struct BlockTree<'a> {
 
 impl<'a> BlockTree<'a> {
     pub fn load_function(
-        ctx: &ModuleContext,
+        ctx: &Program,
         op_reader: OperatorsReader<'a>,
     ) -> wasmparser::Result<Self> {
         let mut op_reader = op_reader.into_iter().peekable();
@@ -74,7 +74,7 @@ enum Ending {
 }
 
 fn parse_contents<'a>(
-    ctx: &ModuleContext,
+    ctx: &Program,
     op_reader: &mut Peekable<OperatorsIterator<'a>>,
     stack_level: u32,
     output_elements: &mut Vec<Element<'a>>,
@@ -346,7 +346,7 @@ fn increment_outer_br_references(element: &mut Element, minimum_depth: u32) {
     }
 }
 
-fn get_type(ctx: &ModuleContext, blockty: BlockType) -> Rc<FuncType> {
+fn get_type(ctx: &Program, blockty: BlockType) -> Rc<FuncType> {
     match blockty {
         BlockType::Empty => Rc::new(FuncType::new([], [])),
         BlockType::FuncType(idx) => ctx.get_type_rc(idx),

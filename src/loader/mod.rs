@@ -7,6 +7,7 @@ mod locals_data_flow;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     rc::Rc,
+    vec,
 };
 
 use block_tree::BlockTree;
@@ -49,8 +50,10 @@ pub struct Segment {
 pub enum MemoryEntry {
     /// Actual value stored in memory word.
     Value(u32),
-    /// Refers to a code label.
-    Label(u32),
+    /// Refers to the function address of a given function index.
+    FuncAddr(u32),
+    /// Refers to the function frame size of a given function index.
+    FuncFrameSize(u32),
 }
 
 /// Helper struct to track unallocated memory.
@@ -147,7 +150,32 @@ impl InitialMemory {
     }
 }
 
+/// The table entry high level layout.
+struct FunctionRef {
+    /// The type index of the function type.
+    type_index: u32,
+    /// The function index.
+    func_index: u32,
+}
+
+impl FunctionRef {
+    fn num_words() -> u32 {
+        3
+    }
+
+    fn to_memory_entries(&self) -> Vec<MemoryEntry> {
+        vec![
+            MemoryEntry::Value(self.type_index),
+            MemoryEntry::FuncFrameSize(self.func_index),
+            MemoryEntry::FuncAddr(self.func_index),
+        ]
+    }
+}
+
 pub struct Program<'a> {
+    types: Vec<Rc<FuncType>>,
+    func_types: Vec<u32>,
+    table_types: Vec<RefType>,
     /// The module and name of the imported functions.
     ///
     /// Function idices are shared with `functions`. Indices [0..imported_functions.len()] refers to imported functions,
@@ -176,14 +204,7 @@ pub struct Program<'a> {
     pub data_segments: Vec<Segment>,
 }
 
-struct ModuleContext<'a> {
-    types: Vec<Rc<FuncType>>,
-    func_types: Vec<u32>,
-    table_types: Vec<RefType>,
-    p: Program<'a>,
-}
-
-impl<'a> ModuleContext<'a> {
+impl<'a> Program<'a> {
     fn get_type(&self, type_idx: u32) -> &FuncType {
         &self.types[type_idx as usize]
     }
@@ -197,15 +218,24 @@ impl<'a> ModuleContext<'a> {
     }
 
     fn get_imported_func(&self, func_idx: u32) -> Option<(&'a str, &'a str)> {
-        if func_idx < self.p.imported_functions.len() as u32 {
-            Some(self.p.imported_functions[func_idx as usize])
+        if func_idx < self.imported_functions.len() as u32 {
+            Some(self.imported_functions[func_idx as usize])
         } else {
             None
         }
     }
 
     fn get_exported_func(&self, func_idx: u32) -> Option<&'a str> {
-        self.p.exported_functions.get(&func_idx).copied()
+        self.exported_functions.get(&func_idx).copied()
+    }
+
+    fn get_local_func(&self, func_idx: u32) -> Option<&WriteOnceASM<'a>> {
+        if func_idx < self.imported_functions.len() as u32 {
+            None // Imported functions are not local
+        } else {
+            let local_idx = (func_idx - self.imported_functions.len() as u32) as usize;
+            self.functions.get(local_idx)
+        }
     }
 
     fn eval_const_expr(
@@ -213,39 +243,40 @@ impl<'a> ModuleContext<'a> {
         val_type: ValType,
         expr: OperatorsReader,
     ) -> wasmparser::Result<Vec<MemoryEntry>> {
-        let mut words = Vec::new();
         let mut iter = expr.into_iter();
 
         let op = iter.next().unwrap()?;
-        match op {
+        let words = match op {
             Operator::I32Const { value } => {
                 assert_eq!(val_type, ValType::I32);
-                words.push(MemoryEntry::Value(value as u32))
+                vec![MemoryEntry::Value(value as u32)]
             }
             Operator::I64Const { value } => {
                 assert_eq!(val_type, ValType::I64);
-                words.push(MemoryEntry::Value(value as u32));
-                words.push(MemoryEntry::Value((value >> 32) as u32));
+                vec![
+                    MemoryEntry::Value(value as u32),
+                    MemoryEntry::Value((value >> 32) as u32),
+                ]
             }
             Operator::F32Const { value } => {
                 assert_eq!(val_type, ValType::F32);
-                words.push(MemoryEntry::Value(value.bits()));
+                vec![MemoryEntry::Value(value.bits())]
             }
             Operator::RefFunc { function_index } => {
                 assert_eq!(val_type, ValType::Ref(RefType::FUNCREF));
-                // The first 32 bits are the function type index
-                words.push(MemoryEntry::Value(self.func_types[function_index as usize]));
-                // The second 32 bits are the function address in code space
-                words.push(MemoryEntry::Label(function_index));
+                FunctionRef {
+                    type_index: self.func_types[function_index as usize],
+                    func_index: function_index,
+                }
+                .to_memory_entries()
             }
             Operator::RefNull { .. } => {
                 assert!(matches!(val_type, ValType::Ref(_)));
                 // Since (0, 0) is a valid function reference, lets use u32::MAX to represent null.
-                words.push(MemoryEntry::Value(u32::MAX));
-                words.push(MemoryEntry::Value(u32::MAX));
+                vec![MemoryEntry::Value(u32::MAX), MemoryEntry::Value(u32::MAX)]
             }
             op => panic!("Unsupported operator in const expr: {op:?}"),
-        }
+        };
 
         let end_op = iter.next().unwrap()?;
         assert_eq!(end_op, Operator::End);
@@ -265,7 +296,7 @@ impl<'a> ModuleContext<'a> {
             return None;
         };
 
-        if self.p.memory.is_none() {
+        if self.memory.is_none() {
             let maximum_size = mem_allocator
                 .remaining_space()
                 // From all the memory available, we reserve the space for the stack, and the 8 bytes needed
@@ -287,10 +318,10 @@ impl<'a> ModuleContext<'a> {
             initial_memory.insert(segment.start, MemoryEntry::Value(mem_type.initial as u32));
             initial_memory.insert(segment.start + 4, MemoryEntry::Value(maximum_size));
 
-            self.p.memory = Some(segment);
+            self.memory = Some(segment);
         }
 
-        self.p.memory
+        self.memory
     }
 }
 
@@ -340,23 +371,22 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
 pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
     let parser = Parser::new(0);
 
-    let mut ctx = ModuleContext {
+    let mut ctx = Program {
         types: Vec::new(),
         func_types: Vec::new(),
         table_types: Vec::new(),
-        p: Program {
-            imported_functions: Vec::new(),
-            functions: Vec::new(),
-            start_function: None,
-            exported_functions: BTreeMap::new(),
-            // This is left empty for most of this function, and will be filled just before returning.
-            initial_memory: BTreeMap::new(),
-            globals: Vec::new(),
-            memory: None,
-            tables: Vec::new(),
-            elem_segments: Vec::new(),
-            data_segments: Vec::new(),
-        },
+
+        imported_functions: Vec::new(),
+        functions: Vec::new(),
+        start_function: None,
+        exported_functions: BTreeMap::new(),
+        // This is left empty for most of this function, and will be filled just before returning.
+        initial_memory: BTreeMap::new(),
+        globals: Vec::new(),
+        memory: None,
+        tables: Vec::new(),
+        elem_segments: Vec::new(),
+        data_segments: Vec::new(),
     };
 
     // This is the memory layout of the program after all the elements have been allocated:
@@ -439,7 +469,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                         log::debug!("Imported syscall: {}.{}", import.module, import.name);
 
                         ctx.func_types.push(type_idx);
-                        ctx.p.imported_functions.push((import.module, import.name));
+                        ctx.imported_functions.push((import.module, import.name));
                     }
                 }
             }
@@ -488,14 +518,15 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                         .unwrap_or(DEFAULT_MAX_TABLE_SIZE);
 
                     // We include two extra words for the table size and maximum size
-                    let segment = mem_allocator.allocate_segment(max_entries * 8 + 8);
+                    let segment = mem_allocator
+                        .allocate_segment(max_entries * 4 * FunctionRef::num_words() + 8);
 
                     // Store the table size and maximum size in the initial memory
                     initial_memory
                         .insert(segment.start, MemoryEntry::Value(table.ty.initial as u32));
                     initial_memory.insert(segment.start + 4, MemoryEntry::Value(max_entries));
 
-                    ctx.p.tables.push(segment);
+                    ctx.tables.push(segment);
                     ctx.table_types.push(table.ty.element_type);
                 }
             }
@@ -504,7 +535,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 for mem in section {
                     let mem = mem?;
 
-                    if ctx.p.memory.is_some() {
+                    if ctx.memory.is_some() {
                         unsupported_feature_found = true;
                         log::error!("Multiple memories are not supported");
                         break;
@@ -533,7 +564,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                     let ty = global.ty.content_type;
                     let var = mem_allocator.allocate_var(ty);
 
-                    log::debug!("Global variable {} has type {:?}", ctx.p.globals.len(), ty);
+                    log::debug!("Global variable {} has type {:?}", ctx.globals.len(), ty);
 
                     // Initialize the global variables
                     let words = ctx.eval_const_expr(ty, global.init_expr.get_operators_reader())?;
@@ -541,7 +572,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                         initial_memory.insert(var.address + 4 * idx as u32, word);
                     }
 
-                    ctx.p.globals.push(var);
+                    ctx.globals.push(var);
                 }
             }
             Payload::ExportSection(section_limited) => {
@@ -557,7 +588,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                     match export.kind {
                         wasmparser::ExternalKind::Func => {
-                            ctx.p.exported_functions.insert(export.index, export.name);
+                            ctx.exported_functions.insert(export.index, export.name);
                         }
                         _ => {
                             // We don't have anything to do with other kinds of exports.
@@ -567,7 +598,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
             }
             Payload::StartSection { func, .. } => {
                 log::debug!("Start Section found. Start function: {func}");
-                ctx.p.start_function = Some(func);
+                ctx.start_function = Some(func);
             }
             Payload::ElementSection(section) => {
                 log::debug!("Element Section found");
@@ -580,8 +611,13 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                         ElementItems::Functions(section) => {
                             for idx in section {
                                 let idx = idx?;
-                                values.push(MemoryEntry::Value(ctx.func_types[idx as usize]));
-                                values.push(MemoryEntry::Label(idx));
+                                values.extend(
+                                    FunctionRef {
+                                        type_index: ctx.func_types[idx as usize],
+                                        func_index: idx,
+                                    }
+                                    .to_memory_entries(),
+                                );
                             }
                         }
                         ElementItems::Expressions(ref_type, section) => {
@@ -605,19 +641,21 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                                 "Passive table segment found. Number of elements: {num_elems}"
                             );
 
-                            // We include one extra word for the segment size
-                            let segment = mem_allocator.allocate_segment(num_elems * 8 + 4);
+                            // We include one extra word: the segment size
+                            let segment = mem_allocator
+                                .allocate_segment(num_elems * 4 * FunctionRef::num_words() + 4);
 
                             // Store the segment size in the initial memory
                             initial_memory.insert(segment.start, MemoryEntry::Value(num_elems));
 
                             // Store the values in the initial memory
+                            assert_eq!(values.len() % FunctionRef::num_words() as usize, 0);
                             for (idx, word) in values.into_iter().enumerate() {
                                 initial_memory.insert(segment.start + 4 * (idx as u32 + 1), word);
                             }
 
                             // Store the segment in the context
-                            ctx.p.elem_segments.push(segment);
+                            ctx.elem_segments.push(segment);
                         }
                         wasmparser::ElementKind::Active {
                             table_index,
@@ -627,7 +665,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                             // I am assuming the table index of 0 if not provided, as hinted by the WASM binary spec.
                             let idx = table_index.unwrap_or(0);
-                            let table = &ctx.p.tables[idx as usize];
+                            let table = &ctx.tables[idx as usize];
 
                             let &[MemoryEntry::Value(offset)] = ctx
                                 .eval_const_expr(ValType::I32, offset_expr.get_operators_reader())?
@@ -646,7 +684,8 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             };
                             assert!(offset + num_elems <= table_size);
 
-                            let mut byte_offset = table.start + offset * 8 + 8;
+                            let mut byte_offset =
+                                table.start + offset * 4 * FunctionRef::num_words() + 8;
                             for value in values {
                                 initial_memory.insert(byte_offset, value);
                                 byte_offset += 4;
@@ -666,7 +705,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
             Payload::CodeSectionStart { count, .. } => {
                 log::debug!("Code Section Start found. Count: {count}");
                 assert_eq!(
-                    ctx.p.imported_functions.len() + count as usize,
+                    ctx.imported_functions.len() + count as usize,
                     ctx.func_types.len()
                 );
             }
@@ -675,7 +714,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
-                let func_idx = (ctx.p.imported_functions.len() + ctx.p.functions.len()) as u32;
+                let func_idx = (ctx.imported_functions.len() + ctx.functions.len()) as u32;
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
 
@@ -697,7 +736,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                     println!("{d}");
                 }
 
-                ctx.p.functions.push(definition);
+                ctx.functions.push(definition);
             }
             Payload::DataSection(section) => {
                 log::debug!("Data Section found");
@@ -722,7 +761,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             }
 
                             // Store the segment in the context
-                            ctx.p.data_segments.push(segment);
+                            ctx.data_segments.push(segment);
                         }
                         wasmparser::DataKind::Active {
                             memory_index,
@@ -813,9 +852,9 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
         "Only WebAssembly Release 2.0 is supported"
     );
 
-    ctx.p.initial_memory = initial_memory.0;
+    ctx.initial_memory = initial_memory.0;
 
-    Ok(ctx.p)
+    Ok(ctx)
 }
 
 /// Reads the function arguments and the explicit locals declaration.
