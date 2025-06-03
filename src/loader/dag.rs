@@ -806,7 +806,14 @@ impl<'a, 'b> StackTracker<'a, 'b> {
             }
             Op::CallIndirect { type_index, .. } => {
                 let ty = self.module.get_type(*type_index);
-                let inputs = ty.params().to_vec();
+                let inputs = ty
+                    .params()
+                    .iter()
+                    .cloned()
+                    .chain(
+                        std::iter::once(ValType::I32), // The last input is the entry index
+                    )
+                    .collect();
                 let outputs = ty.results().to_vec();
                 return Some((inputs, outputs));
             }

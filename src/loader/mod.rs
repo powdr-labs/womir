@@ -633,7 +633,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             }
                         }
                     };
-                    let num_elems = values.len() as u32 / 2;
+                    let num_elems = values.len() as u32 / FunctionRef::NUM_WORDS;
 
                     // Decide what to do with the values
                     match elem_segment.kind {

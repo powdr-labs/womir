@@ -1400,14 +1400,18 @@ fn byte_size(bytes_per_word: u32, ty: ValType) -> u32 {
             // Since this is a struct of multiple memory words (u32) that we will need to
             // unpack into registers, we need to provision enough registers for each memory
             // word independently.
-            FunctionRef::NUM_WORDS * word_count(4, bytes_per_word)
+            FunctionRef::NUM_WORDS * word_count(4, bytes_per_word) * bytes_per_word
         }
     }
 }
 
 fn split_func_ref_regs(bytes_per_word: u32, func_ref_reg: Range<u32>) -> Vec<Range<u32>> {
     let comp_size = func_ref_reg.len() as u32 / FunctionRef::NUM_WORDS;
-    assert_eq!(comp_size, byte_size(bytes_per_word, ValType::I32));
+    // Each component must have the same word-size as a I32,
+    assert_eq!(
+        comp_size,
+        word_count(byte_size(bytes_per_word, ValType::I32), bytes_per_word)
+    );
     let func_ref_regs = (0..FunctionRef::NUM_WORDS)
         .map(|i| func_ref_reg.start + i * comp_size..func_ref_reg.start + (i + 1) * comp_size)
         .collect_vec();
