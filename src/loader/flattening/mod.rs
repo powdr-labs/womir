@@ -28,6 +28,7 @@ use std::{
 use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
+    FunctionRef,
     blockless_dag::{BreakTarget, TargetType},
     dag::ValueOrigin,
 };
@@ -79,8 +80,8 @@ pub enum Directive<'a> {
     },
     /// Local jump to a label local to the current frame.
     Jump { target: String },
-    /// Jump to a local label if the condition is zero.
-    JumpIfZero {
+    /// Jump to a local label if the condition is non-zero.
+    JumpIf {
         target: String,
         condition: Register, // size: i32
     },
@@ -160,8 +161,8 @@ impl Display for Directive<'_> {
             Directive::Jump { target } => {
                 write!(f, "    Jump {target}")?;
             }
-            Directive::JumpIfZero { target, condition } => {
-                write!(f, "    JumpIfZero {target} ${condition}")?;
+            Directive::JumpIf { target, condition } => {
+                write!(f, "    JumpIf {target} ${condition}")?;
             }
             Directive::JumpAndActivateFrame {
                 target,
@@ -638,7 +639,7 @@ fn flatten_frame_tree<'a>(
                     ctrl_stack,
                 ));
             }
-            Operation::BrIf(target) => {
+            Operation::BrIfZero(target) => {
                 let curr_entry = ctrl_stack.front().unwrap();
 
                 // Get the conditional variable from the inputs.
@@ -649,8 +650,8 @@ fn flatten_frame_tree<'a>(
 
                 let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
 
-                // Emit the jump if the condition is zero.
-                directives.push(Directive::JumpIfZero {
+                // Emit the jump if the condition is non-zero.
+                directives.push(Directive::JumpIf {
                     target: cont_label.clone(),
                     condition: cond_reg.start,
                 });
@@ -671,7 +672,7 @@ fn flatten_frame_tree<'a>(
                     frame_size: None,
                 });
             }
-            Operation::BrIfZero(target) => {
+            Operation::BrIf(target) => {
                 let curr_entry = ctrl_stack.front().unwrap();
 
                 // Get the conditional variable from the inputs.
@@ -691,11 +692,11 @@ fn flatten_frame_tree<'a>(
                 );
 
                 // If the jump_directives is one plain jump to a local label, we can
-                // optimize this jump by emitting a single JumpIfZero.
+                // optimize this jump by emitting a single JumpIf.
                 if let (1, Some(Directive::Jump { target })) =
                     (jump_directives.len(), jump_directives.first())
                 {
-                    directives.push(Directive::JumpIfZero {
+                    directives.push(Directive::JumpIf {
                         target: target.clone(),
                         condition: cond_reg.start,
                     });
@@ -706,7 +707,7 @@ fn flatten_frame_tree<'a>(
 
                     // Either jump to the zero label if the condition is zero,
                     // or the next instruction is a jump to the continuation label.
-                    directives.push(Directive::JumpIfZero {
+                    directives.push(Directive::JumpIf {
                         target: zero_label.clone(),
                         condition: cond_reg.start,
                     });
@@ -1241,7 +1242,9 @@ fn byte_size(ty: ValType) -> u32 {
         ValType::I32 | ValType::F32 => 4,
         ValType::I64 | ValType::F64 => 8,
         ValType::V128 => 16,
-        ValType::Ref(..) => 4,
+        // These are memory words, which are hardcoded 4 bytes,
+        // not ISA words, which are a runtime parameter.
+        ValType::Ref(..) => 4 * FunctionRef::num_words(),
     }
 }
 
