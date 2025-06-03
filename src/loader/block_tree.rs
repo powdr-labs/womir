@@ -1,6 +1,5 @@
 use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
 
-use itertools::Itertools;
 use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader, ValType};
 
 use super::{Block, BlockKind, Element, Instruction, ModuleContext};

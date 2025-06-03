@@ -42,6 +42,7 @@ const PTR_BYTE_SIZE: u32 = 4;
 
 /// An assembly-like representation for a write-once memory machine.
 pub struct WriteOnceASM<'a> {
+    pub func_idx: u32,
     pub directives: Vec<Directive<'a>>,
 }
 
@@ -428,6 +429,15 @@ pub fn flatten_dag<'a>(
         frame_size: None,
     }];
 
+    // If this function is exported, we also add a placeholder for its name as a label.
+    let exported_name = module.get_exported_func(func_idx);
+    if let Some(name) = exported_name {
+        directives.push(Directive::Label {
+            id: String::new(),
+            frame_size: None,
+        });
+    }
+
     let frame_size = flatten_frame_tree(
         module,
         dag,
@@ -440,18 +450,23 @@ pub fn flatten_dag<'a>(
     );
 
     // Now we can fill the function label with the actual frame size.
-    let label = if let Some(name) = module.get_exported_func(func_idx) {
-        name.to_string()
-    } else {
-        format_label(func_idx, LabelType::PrivateFunction)
-    };
-
     directives[0] = Directive::Label {
-        id: label,
+        id: format_label(func_idx, LabelType::Function),
         frame_size: Some(frame_size),
     };
 
-    WriteOnceASM { directives }
+    if let Some(name) = exported_name {
+        // Fill the exported function label with the name.
+        directives[1] = Directive::Label {
+            id: name.to_string(),
+            frame_size: Some(frame_size),
+        };
+    }
+
+    WriteOnceASM {
+        func_idx,
+        directives,
+    }
 }
 
 fn flatten_frame_tree<'a>(
@@ -745,7 +760,7 @@ fn flatten_frame_tree<'a>(
                     let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
 
                     directives.push(Directive::AllocateFrame {
-                        target_frame: format_label(function_index, LabelType::PrivateFunction),
+                        target_frame: format_label(function_index, LabelType::Function),
                         result_ptr: func_frame_ptr.start,
                     });
 
@@ -771,7 +786,7 @@ fn flatten_frame_tree<'a>(
 
                     // Emit the call directive.
                     directives.push(Directive::Call {
-                        target: format_label(function_index, LabelType::PrivateFunction),
+                        target: format_label(function_index, LabelType::Function),
                         new_frame_ptr: func_frame_ptr.start,
                         saved_caller_fp: ret_fp.start,
                         saved_ret_pc: ret_pc.start,
@@ -1206,14 +1221,14 @@ fn jump_into_loop<'a>(
 }
 
 enum LabelType {
-    PrivateFunction,
+    Function,
     Local,
     Loop,
 }
 
 fn format_label(label_id: u32, label_type: LabelType) -> String {
     match label_type {
-        LabelType::PrivateFunction => format!("__priv_func_{label_id}"),
+        LabelType::Function => format!("__func_{label_id}"),
         LabelType::Local => format!("__local_{label_id}"),
         LabelType::Loop => format!("__loop_{label_id}"),
     }

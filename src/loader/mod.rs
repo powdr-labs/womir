@@ -14,7 +14,7 @@ use dag::Dag;
 use flattening::WriteOnceASM;
 use itertools::Itertools;
 use wasmparser::{
-    BlockType, CompositeInnerType, ElementItems, FuncType, LocalsReader, MemoryType, Operator,
+    CompositeInnerType, ElementItems, FuncType, LocalsReader, MemoryType, Operator,
     OperatorsReader, Parser, Payload, RefType, TableInit, TypeRef, ValType,
 };
 
@@ -208,16 +208,6 @@ impl<'a> ModuleContext<'a> {
         self.p.exported_functions.get(&func_idx).copied()
     }
 
-    fn blockty_inputs(&self, blockty: BlockType) -> &[ValType] {
-        match blockty {
-            BlockType::Empty | BlockType::Type(_) => &[],
-            BlockType::FuncType(idx) => {
-                let func_type = self.get_type(idx);
-                func_type.params()
-            }
-        }
-    }
-
     fn eval_const_expr(
         &self,
         val_type: ValType,
@@ -322,11 +312,6 @@ const fn sz(val_type: ValType) -> u32 {
         // as a function reference.
         ValType::Ref(_) => 8,
     }
-}
-
-/// Size of many types, in bytes
-fn many_sz(val_types: &[ValType]) -> u32 {
-    val_types.iter().map(|&ty| sz(ty)).sum()
 }
 
 /// Arranges the bytes in little-endian words.
