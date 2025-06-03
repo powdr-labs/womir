@@ -20,6 +20,12 @@ This files describes all the optimizations ideas we left out for now.
   breaks. The passthrough locals will be handled by the outside blocks
   and breaks, avoiding them to be copied into the loop.
 
+- [locals_data_flow]: locals that are written inside a block, but not read
+  after that block (in optimized code, this happens inside loops), will
+  propagate this superfluous output to all the outer blocks, that might
+  generate a lot of useless copies. Remove unused outputs from blocks.
+  Judging by vec_median compilation, this is very important!
+
 - [register_allocation]: also perform optimistic allocation on the nodes
   that generates outputs to returns in the top-level frame, because they
   are local frame writes like any local break.

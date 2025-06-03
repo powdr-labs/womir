@@ -365,6 +365,7 @@ enum CtrlStackType {
 }
 
 /// Contains all the information needed to jump into a new loop iteration.
+#[derive(Debug)]
 struct LoopStackEntry {
     label: String,
     /// ret_info is only present if the loop can return from the function.
@@ -463,14 +464,6 @@ fn flatten_frame_tree<'a>(
     ret_info: Option<ReturnInfo>,
     directives: &mut Vec<Directive<'a>>,
 ) -> u32 {
-    for (node_idx, node) in dag.nodes.iter().enumerate() {
-        println!("### {node_idx}: {node:?}");
-    }
-
-    for asdf in ctrl_stack.front().unwrap().allocation.nodes_outputs.iter() {
-        println!("%%% {asdf:?}");
-    }
-
     for (node_idx, node) in dag.nodes.into_iter().enumerate() {
         match node.operation {
             Operation::Inputs => {
@@ -534,10 +527,7 @@ fn flatten_frame_tree<'a>(
                 };
 
                 // Select the frame pointers needed to break into outer frames.
-                for (depth, targets) in break_targets
-                    .iter()
-                    .filter(|(depth, _)| *depth < toplevel_frame_idx)
-                {
+                for (depth, targets) in break_targets.iter() {
                     for target in targets {
                         if let TargetType::Label(_) = target {
                             saved_fps.insert(*depth);
@@ -622,7 +612,6 @@ fn flatten_frame_tree<'a>(
                 };
             }
             Operation::Br(target) => {
-                println!("node_idx: {node_idx}");
                 directives.extend(emit_jump(
                     bytes_per_word,
                     &mut reg_gen,
