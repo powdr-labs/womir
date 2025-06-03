@@ -6,6 +6,7 @@ mod locals_data_flow;
 
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    ops::RangeFrom,
     rc::Rc,
     vec,
 };
@@ -17,6 +18,11 @@ use itertools::Itertools;
 use wasmparser::{
     CompositeInnerType, ElementItems, FuncType, LocalsReader, MemoryType, Operator,
     OperatorsReader, Parser, Payload, RefType, TableInit, TypeRef, ValType,
+};
+
+use crate::loader::{
+    blockless_dag::{BlocklessDag, BreakTarget},
+    dag::ValueOrigin,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -180,13 +186,15 @@ pub struct Program<'a> {
     table_types: Vec<RefType>,
     /// The module and name of the imported functions.
     ///
-    /// Function idices are shared with `functions`. Indices [0..imported_functions.len()] refers to imported functions,
-    /// and indices [imported_functions.len()..] refers to the functions defined in the module.
+    /// Function idices overlaps with `functions` up to `imported_functions` length.
     pub imported_functions: Vec<(&'a str, &'a str)>,
     /// The functions defined in the module.
     ///
-    /// Function idices are shared with `imported_functions`. Indices [0..imported_functions.len()] refers to imported functions,
-    /// and indices [imported_functions.len()..] refers to the functions defined in the module.
+    /// Function idices overlaps with `imported_functions` up to its length.
+    ///
+    /// Indices `[0..imported_functions.len()]` refers to generated wrappers around the imported
+    /// functions, which can be used for indirect calls, and indices [imported_functions.len()..]
+    /// refers to the functions defined in the module.
     pub functions: Vec<WriteOnceASM<'a>>,
     /// The start function, if any.
     pub start_function: Option<u32>,
@@ -220,24 +228,11 @@ impl<'a> Program<'a> {
     }
 
     fn get_imported_func(&self, func_idx: u32) -> Option<(&'a str, &'a str)> {
-        if func_idx < self.imported_functions.len() as u32 {
-            Some(self.imported_functions[func_idx as usize])
-        } else {
-            None
-        }
+        self.imported_functions.get(func_idx as usize).copied()
     }
 
     fn get_exported_func(&self, func_idx: u32) -> Option<&'a str> {
         self.exported_functions.get(&func_idx).copied()
-    }
-
-    fn get_local_func(&self, func_idx: u32) -> Option<&WriteOnceASM<'a>> {
-        if func_idx < self.imported_functions.len() as u32 {
-            None // Imported functions are not local
-        } else {
-            let local_idx = (func_idx - self.imported_functions.len() as u32) as usize;
-            self.functions.get(local_idx)
-        }
     }
 
     fn eval_const_expr(
@@ -470,8 +465,14 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                     if let TypeRef::Func(type_idx) = import.ty {
                         log::debug!("Imported syscall: {}.{}", import.module, import.name);
 
+                        let func_idx = ctx.imported_functions.len() as u32;
                         ctx.func_types.push(type_idx);
                         ctx.imported_functions.push((import.module, import.name));
+                        ctx.functions.push(generate_imported_func_wrapper(
+                            &ctx,
+                            &mut label_gen,
+                            func_idx,
+                        ));
                     }
                 }
             }
@@ -716,7 +717,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
-                let func_idx = (ctx.imported_functions.len() + ctx.functions.len()) as u32;
+                let func_idx = ctx.functions.len() as u32;
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
 
@@ -857,6 +858,62 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
     ctx.initial_memory = initial_memory.0;
 
     Ok(ctx)
+}
+
+/// Generates a wrapper function for an imported function.
+fn generate_imported_func_wrapper<'a>(
+    ctx: &Program<'a>,
+    label_gen: &mut RangeFrom<u32>,
+    function_idx: u32,
+) -> WriteOnceASM<'a> {
+    let func_type = ctx.get_func_type(function_idx);
+
+    // A very simple DAG that just calls the imported function.
+    let dag = BlocklessDag {
+        nodes: vec![
+            blockless_dag::Node {
+                operation: blockless_dag::Operation::Inputs,
+                inputs: Vec::new(),
+                output_types: func_type.params().to_vec(),
+            },
+            blockless_dag::Node {
+                operation: blockless_dag::Operation::WASMOp(Operator::Call {
+                    function_index: function_idx,
+                }),
+                inputs: (0..func_type.params().len() as u32)
+                    .map(|i| ValueOrigin {
+                        node: 0,
+                        output_idx: i,
+                    })
+                    .collect(),
+                output_types: func_type.results().to_vec(),
+            },
+            blockless_dag::Node {
+                operation: blockless_dag::Operation::Br(BreakTarget {
+                    depth: 0,
+                    kind: blockless_dag::TargetType::FunctionOrLoop,
+                }),
+                inputs: (0..func_type.results().len() as u32)
+                    .map(|i| ValueOrigin {
+                        node: 1,
+                        output_idx: i,
+                    })
+                    .collect(),
+                output_types: Vec::new(),
+            },
+        ],
+    };
+
+    // Flatten the DAG into an assembly-like definition.
+    // This will not turn into an infinite recursion because a Call
+    // to an imported function if flattened into an ImportedCall.
+    flattening::flatten_dag(
+        ctx,
+        4, // 4 bytes per word
+        label_gen,
+        dag,
+        function_idx,
+    )
 }
 
 /// Reads the function arguments and the explicit locals declaration.

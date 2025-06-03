@@ -130,12 +130,20 @@ pub enum Directive<'a> {
         inputs: Vec<Range<u32>>,
         outputs: Vec<Range<u32>>,
     },
+    /// General trap, which includes an unreachable instruction.
+    Trap { reason: TrapReason },
     /// A forwarded operation from WebAssembly, only with the inputs and output registers specified.
     WASMOp {
         op: Op<'a>,
         inputs: Vec<Range<u32>>,
         output: Option<Range<u32>>,
     },
+}
+
+#[derive(Debug)]
+pub enum TrapReason {
+    Unreachable,
+    WrongIndirectCallFunctionType,
 }
 
 impl Display for Directive<'_> {
@@ -245,6 +253,15 @@ impl Display for Directive<'_> {
                         } else {
                             write!(f, " ${}..=${}", output.start, output.end - 1)?;
                         }
+                    }
+                }
+            }
+            Directive::Trap { reason } => {
+                write!(f, "    Trap")?;
+                match reason {
+                    TrapReason::Unreachable => write!(f, " (unreachable)")?,
+                    TrapReason::WrongIndirectCallFunctionType => {
+                        write!(f, " (wrong indirect call function type)")?
                     }
                 }
             }
@@ -824,8 +841,6 @@ fn flatten_frame_tree<'a>(
                 table_index,
                 type_index,
             }) => {
-                // TODO: implement CallIndirect to external functions. Which probably means
-                // there needs to be a wrapper function for each imported function.
                 let curr_entry = ctrl_stack.front().unwrap();
 
                 // First, we need to load the function reference from the table, so we allocate
@@ -872,11 +887,8 @@ fn flatten_frame_tree<'a>(
                     target: ok_label.clone(),
                     condition: eq_result.start,
                 });
-                // TODO: use an specific trap instruction here, instead of Unreachable.
-                directives.push(Directive::WASMOp {
-                    op: Op::Unreachable,
-                    inputs: vec![],
-                    output: None,
+                directives.push(Directive::Trap {
+                    reason: TrapReason::WrongIndirectCallFunctionType,
                 });
                 directives.push(Directive::Label {
                     id: ok_label,
@@ -905,6 +917,11 @@ fn flatten_frame_tree<'a>(
                     new_frame_ptr: func_frame_ptr.start,
                     saved_ret_pc: this_ret_info.ret_pc.start,
                     saved_caller_fp: this_ret_info.ret_fp.start,
+                });
+            }
+            Operation::WASMOp(Op::Unreachable) => {
+                directives.push(Directive::Trap {
+                    reason: TrapReason::Unreachable,
                 });
             }
             Operation::WASMOp(op) => {
