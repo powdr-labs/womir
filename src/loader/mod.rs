@@ -159,9 +159,11 @@ struct FunctionRef {
 }
 
 impl FunctionRef {
-    fn num_words() -> u32 {
-        3
-    }
+    const TYPE_INDEX: usize = 0;
+    const FUNC_FRAME_SIZE: usize = 1;
+    const FUNC_ADDR: usize = 2;
+    /// The number of words used by a function reference.
+    const NUM_WORDS: u32 = 3;
 
     fn to_memory_entries(&self) -> Vec<MemoryEntry> {
         vec![
@@ -519,7 +521,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                     // We include two extra words for the table size and maximum size
                     let segment = mem_allocator
-                        .allocate_segment(max_entries * 4 * FunctionRef::num_words() + 8);
+                        .allocate_segment(max_entries * 4 * FunctionRef::NUM_WORDS + 8);
 
                     // Store the table size and maximum size in the initial memory
                     initial_memory
@@ -643,13 +645,13 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                             // We include one extra word: the segment size
                             let segment = mem_allocator
-                                .allocate_segment(num_elems * 4 * FunctionRef::num_words() + 4);
+                                .allocate_segment(num_elems * 4 * FunctionRef::NUM_WORDS + 4);
 
                             // Store the segment size in the initial memory
                             initial_memory.insert(segment.start, MemoryEntry::Value(num_elems));
 
                             // Store the values in the initial memory
-                            assert_eq!(values.len() % FunctionRef::num_words() as usize, 0);
+                            assert_eq!(values.len() % FunctionRef::NUM_WORDS as usize, 0);
                             for (idx, word) in values.into_iter().enumerate() {
                                 initial_memory.insert(segment.start + 4 * (idx as u32 + 1), word);
                             }
@@ -685,7 +687,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             assert!(offset + num_elems <= table_size);
 
                             let mut byte_offset =
-                                table.start + offset * 4 * FunctionRef::num_words() + 8;
+                                table.start + offset * 4 * FunctionRef::NUM_WORDS + 8;
                             for value in values {
                                 initial_memory.insert(byte_offset, value);
                                 byte_offset += 4;

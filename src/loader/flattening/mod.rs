@@ -59,10 +59,15 @@ pub enum Directive<'a> {
         /// If this label is the start of a frame, this is the size of the frame in words.
         frame_size: Option<u32>,
     },
-    /// Allocates a new frame.
-    AllocateFrame {
+    /// Allocates a new frame from an immediate size.
+    AllocateFrameI {
         /// The same identifier as the label, which has the frame size.
         target_frame: String,
+        result_ptr: Register, // size: PTR_BYTE_SIZE
+    },
+    /// Allocates a new frame from a dynamic size
+    AllocateFrameV {
+        frame_size: Register, // size: I32
         result_ptr: Register, // size: PTR_BYTE_SIZE
     },
     /// Copies a word inside the active frame.
@@ -111,6 +116,13 @@ pub enum Directive<'a> {
         /// Where, in the new frame, to save the frame pointer of the frame we just left.
         saved_caller_fp: Register, // size: PTR_BYTE_SIZE
     },
+    /// Calls a normal function indirectly, using a function reference.
+    CallIndirect {
+        target_pc: Register,       // size: PTR_BYTE_SIZE
+        new_frame_ptr: Register,   // size: PTR_BYTE_SIZE
+        saved_ret_pc: Register,    // size: PTR_BYTE_SIZE
+        saved_caller_fp: Register, // size: PTR_BYTE_SIZE
+    },
     /// Calls an imported function.
     ImportedCall {
         module: &'a str,
@@ -136,11 +148,17 @@ impl Display for Directive<'_> {
                 };
                 write!(f, ":")?;
             }
-            Directive::AllocateFrame {
+            Directive::AllocateFrameI {
                 target_frame,
                 result_ptr,
             } => {
-                write!(f, "    AllocateFrame {target_frame} -> ${result_ptr}")?;
+                write!(f, "    AllocateFrameI {target_frame} -> ${result_ptr}")?;
+            }
+            Directive::AllocateFrameV {
+                frame_size,
+                result_ptr,
+            } => {
+                write!(f, "    AllocateFrameV ${frame_size} -> ${result_ptr}")?;
             }
             Directive::Copy {
                 src_word,
@@ -186,6 +204,17 @@ impl Display for Directive<'_> {
                 write!(
                     f,
                     "    Call {target} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
+                )?;
+            }
+            Directive::CallIndirect {
+                target_pc,
+                new_frame_ptr,
+                saved_ret_pc,
+                saved_caller_fp,
+            } => {
+                write!(
+                    f,
+                    "    CallIndirect ${target_pc} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
                 )?;
             }
             Directive::ImportedCall {
@@ -347,7 +376,7 @@ impl RegisterGenerator {
     }
 
     fn allocate_type(&mut self, bytes_per_word: u32, ty: ValType) -> Range<u32> {
-        self.allocate_bytes(bytes_per_word, byte_size(ty))
+        self.allocate_bytes(bytes_per_word, byte_size(bytes_per_word, ty))
     }
 }
 
@@ -762,37 +791,32 @@ fn flatten_frame_tree<'a>(
                     // prover "from the future").
                     let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
 
-                    directives.push(Directive::AllocateFrame {
+                    directives.push(Directive::AllocateFrameI {
                         target_frame: format_label(function_index, LabelType::Function),
                         result_ptr: func_frame_ptr.start,
                     });
 
-                    // Generate the registers in the order expected by the calling convention.
-                    let mut fn_reg_gen = RegisterGenerator::new();
-                    let ret_pc = fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-                    let ret_fp = fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-
-                    for origin in node.inputs {
-                        let src_reg = curr_entry.allocation.nodes_outputs[&origin].clone();
-                        let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-                        directives.extend(copy_into_frame(src_reg, func_frame_ptr.start, dest_reg));
-                    }
-                    for output_idx in 0..node.output_types.len() {
-                        let src_reg = curr_entry.allocation.nodes_outputs[&ValueOrigin {
-                            node: node_idx,
-                            output_idx: output_idx as u32,
-                        }]
-                            .clone();
-                        let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-                        directives.extend(copy_into_frame(src_reg, func_frame_ptr.start, dest_reg));
-                    }
+                    let inputs = node
+                        .inputs
+                        .into_iter()
+                        .map(|origin| curr_entry.allocation.nodes_outputs[&origin].clone())
+                        .collect();
+                    let this_ret_info = prepare_function_call(
+                        bytes_per_word,
+                        inputs,
+                        node_idx,
+                        node.output_types.len(),
+                        curr_entry,
+                        func_frame_ptr.start,
+                        directives,
+                    );
 
                     // Emit the call directive.
                     directives.push(Directive::Call {
                         target: format_label(function_index, LabelType::Function),
                         new_frame_ptr: func_frame_ptr.start,
-                        saved_caller_fp: ret_fp.start,
-                        saved_ret_pc: ret_pc.start,
+                        saved_caller_fp: this_ret_info.ret_fp.start,
+                        saved_ret_pc: this_ret_info.ret_pc.start,
                     });
                 }
             }
@@ -800,8 +824,88 @@ fn flatten_frame_tree<'a>(
                 table_index,
                 type_index,
             }) => {
-                // We will need to access the ROM memory to get the function address, type, and frame size.
-                todo!();
+                // TODO: implement CallIndirect to external functions. Which probably means
+                // there needs to be a wrapper function for each imported function.
+                let curr_entry = ctrl_stack.front().unwrap();
+
+                // First, we need to load the function reference from the table, so we allocate
+                // the space for it and emit the table.get directive.
+
+                // The last input of the CallIndirect operation is the table entry, the others are the function arguments.
+                let mut inputs = map_input_into_regs(node.inputs, curr_entry);
+                let table_get_inputs = vec![inputs.pop().unwrap()];
+
+                let func_ref_reg = reg_gen.allocate_type(bytes_per_word, ValType::FUNCREF);
+                directives.push(Directive::WASMOp {
+                    op: Op::TableGet { table: table_index },
+                    inputs: table_get_inputs,
+                    output: Some(func_ref_reg.clone()),
+                });
+
+                // Split the components of the function reference:
+                let func_ref_regs = split_func_ref_regs(bytes_per_word, func_ref_reg);
+
+                // We need two new registers to compare the expected function type with the loaded one.
+                let expected_func_type = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                let eq_result = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+
+                directives.push(Directive::WASMOp {
+                    op: Op::I32Const {
+                        value: type_index as i32,
+                    },
+                    inputs: vec![],
+                    output: Some(expected_func_type.clone()),
+                });
+                directives.push(Directive::WASMOp {
+                    op: Op::I32Eq,
+                    inputs: vec![
+                        expected_func_type.clone(),
+                        func_ref_regs[FunctionRef::TYPE_INDEX].clone(),
+                    ],
+                    output: Some(eq_result.clone()),
+                });
+
+                // Now we need to jump to the actual function call if the types match.
+                // Otherwise trap.
+                let ok_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+                directives.push(Directive::JumpIf {
+                    target: ok_label.clone(),
+                    condition: eq_result.start,
+                });
+                // TODO: use an specific trap instruction here, instead of Unreachable.
+                directives.push(Directive::WASMOp {
+                    op: Op::Unreachable,
+                    inputs: vec![],
+                    output: None,
+                });
+                directives.push(Directive::Label {
+                    id: ok_label,
+                    frame_size: None,
+                });
+
+                // Allocate the new function frame
+                let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                directives.push(Directive::AllocateFrameV {
+                    frame_size: func_ref_regs[FunctionRef::FUNC_FRAME_SIZE].start,
+                    result_ptr: func_frame_ptr.start,
+                });
+
+                // Perform the function call
+                let this_ret_info = prepare_function_call(
+                    bytes_per_word,
+                    inputs,
+                    node_idx,
+                    node.output_types.len(),
+                    curr_entry,
+                    func_frame_ptr.start,
+                    directives,
+                );
+                directives.push(Directive::CallIndirect {
+                    target_pc: func_ref_regs[FunctionRef::FUNC_ADDR].start,
+                    new_frame_ptr: func_frame_ptr.start,
+                    saved_ret_pc: this_ret_info.ret_pc.start,
+                    saved_caller_fp: this_ret_info.ret_fp.start,
+                });
             }
             Operation::WASMOp(op) => {
                 // Everything else is a normal operation, which will be forwarded almost as is.
@@ -831,7 +935,7 @@ fn flatten_frame_tree<'a>(
 }
 
 fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
-    let expected_size = byte_size(ty);
+    let expected_size = byte_size(bytes_per_word, ty);
     assert_eq!(
         reg.len(),
         word_count(expected_size, bytes_per_word) as usize
@@ -859,6 +963,39 @@ fn copy_into_frame<'a>(
             dest_frame,
             dest_word,
         })
+}
+
+fn prepare_function_call<'a>(
+    bytes_per_word: u32,
+    inputs: Vec<Range<u32>>,
+    node_idx: usize,
+    num_outputs: usize,
+    curr_entry: &CtrlStackEntry,
+    frame_ptr: u32,
+    directives: &mut Vec<Directive<'a>>,
+) -> ReturnInfo {
+    // Generate the registers in the order expected by the calling convention.
+    let mut fn_reg_gen = RegisterGenerator::new();
+    let ret_info = ReturnInfo {
+        ret_pc: fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE),
+        ret_fp: fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE),
+    };
+
+    for src_reg in inputs {
+        let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
+        directives.extend(copy_into_frame(src_reg, frame_ptr, dest_reg));
+    }
+    for output_idx in 0..num_outputs {
+        let src_reg = curr_entry.allocation.nodes_outputs[&ValueOrigin {
+            node: node_idx,
+            output_idx: output_idx as u32,
+        }]
+            .clone();
+        let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
+        directives.extend(copy_into_frame(src_reg, frame_ptr, dest_reg));
+    }
+
+    ret_info
 }
 
 fn emit_jump<'a>(
@@ -1135,7 +1272,7 @@ fn jump_into_loop<'a>(
 ) {
     // We start by allocating the frame.
     let loop_fp = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-    directives.push(Directive::AllocateFrame {
+    directives.push(Directive::AllocateFrameI {
         target_frame: loop_entry.label.clone(),
         result_ptr: loop_fp.start,
     });
@@ -1237,15 +1374,29 @@ fn format_label(label_id: u32, label_type: LabelType) -> String {
     }
 }
 
-fn byte_size(ty: ValType) -> u32 {
+fn byte_size(bytes_per_word: u32, ty: ValType) -> u32 {
     match ty {
         ValType::I32 | ValType::F32 => 4,
         ValType::I64 | ValType::F64 => 8,
         ValType::V128 => 16,
-        // These are memory words, which are hardcoded 4 bytes,
-        // not ISA words, which are a runtime parameter.
-        ValType::Ref(..) => 4 * FunctionRef::num_words(),
+        ValType::Ref(..) => {
+            // Since this is a struct of multiple memory words (u32) that we will need to
+            // unpack into registers, we need to provision enough registers for each memory
+            // word independently.
+            FunctionRef::NUM_WORDS * word_count(4, bytes_per_word)
+        }
     }
+}
+
+fn split_func_ref_regs(bytes_per_word: u32, func_ref_reg: Range<u32>) -> Vec<Range<u32>> {
+    let comp_size = func_ref_reg.len() as u32 / FunctionRef::NUM_WORDS;
+    assert_eq!(comp_size, byte_size(bytes_per_word, ValType::I32));
+    let func_ref_regs = (0..FunctionRef::NUM_WORDS)
+        .map(|i| func_ref_reg.start + i * comp_size..func_ref_reg.start + (i + 1) * comp_size)
+        .collect_vec();
+    assert_eq!(func_ref_reg.start, func_ref_regs[0].start);
+    assert_eq!(func_ref_reg.end, func_ref_regs.last().unwrap().end);
+    func_ref_regs
 }
 
 fn word_count(byte_size: u32, bytes_per_word: u32) -> u32 {
