@@ -22,6 +22,7 @@ use allocate_registers::{Allocation, optimistic_allocation};
 use itertools::Itertools;
 use std::{
     collections::{BTreeSet, VecDeque},
+    default,
     fmt::Display,
     ops::{Range, RangeFrom},
 };
@@ -85,6 +86,19 @@ pub enum Directive<'a> {
     },
     /// Local jump to a label local to the current frame.
     Jump { target: String },
+    /// Local jump over the next offset instructions.
+    /// This is used to implement the `br_table` instruction.
+    /// This instruction can be a little brittle, because it relies on the
+    /// following instructions to map 1-to-1 in the final ISA.
+    JumpOffset {
+        /// The number of instructions to jump over.
+        ///
+        /// To be strictly compliant to how `br_table` works, this should be
+        /// interpreted as unsigned, but assuming a 32-bit ROM address space,
+        /// and wrapping arithmetics, it makes no difference whether one considers
+        /// this as signed or unsigned.
+        offset: Register, // size: i32
+    },
     /// Jump to a local label if the condition is non-zero.
     JumpIf {
         target: String,
@@ -186,6 +200,9 @@ impl Display for Directive<'_> {
             }
             Directive::Jump { target } => {
                 write!(f, "    Jump {target}")?;
+            }
+            Directive::JumpOffset { offset } => {
+                write!(f, "    JumpOffset ${offset}")?;
             }
             Directive::JumpIf { target, condition } => {
                 write!(f, "    JumpIf {target} ${condition}")?;
@@ -739,9 +756,11 @@ fn flatten_frame_tree<'a>(
 
                 // If the jump_directives is one plain jump to a local label, we can
                 // optimize this jump by emitting a single JumpIf.
-                if let (1, Some(Directive::Jump { target })) =
-                    (jump_directives.len(), jump_directives.first())
-                {
+                if let [Directive::Jump { .. }] = jump_directives.as_slice() {
+                    let Directive::Jump { target } = jump_directives.into_iter().next().unwrap()
+                    else {
+                        unreachable!()
+                    };
                     directives.push(Directive::JumpIf {
                         target: target.clone(),
                         condition: cond_reg.start,
@@ -775,8 +794,156 @@ fn flatten_frame_tree<'a>(
                     });
                 }
             }
-            Operation::BrTable { targets } => {
-                todo!();
+            Operation::BrTable { mut targets } => {
+                let curr_entry = ctrl_stack.front().unwrap();
+
+                let mut node_inputs = node.inputs;
+                let selector =
+                    curr_entry.allocation.nodes_outputs[&node_inputs.pop().unwrap()].clone();
+
+                let mut jump_instructions = targets
+                    .into_iter()
+                    .map(|target| {
+                        // The inputs for one particular target are a permutation of the inputs
+                        // of the BrTable operation.
+                        let inputs = target
+                            .input_permutation
+                            .iter()
+                            .map(|&idx| node_inputs[idx as usize].clone())
+                            .collect_vec();
+
+                        // Emit the jump to the target label.
+                        emit_jump(
+                            bytes_per_word,
+                            &mut reg_gen,
+                            ret_info.as_ref(),
+                            &inputs,
+                            &target.target,
+                            ctrl_stack,
+                        )
+                    })
+                    .collect_vec();
+
+                // The last target is special, because it is the default target.
+                let default_target = jump_instructions.pop().unwrap();
+
+                // We need to handle the default target separately first, because it will be
+                // the target in case the selector is out of bounds.
+
+                let num_choices = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                directives.push(Directive::WASMOp {
+                    op: Op::I32Const {
+                        value: jump_instructions.len() as i32,
+                    },
+                    inputs: vec![],
+                    output: Some(num_choices.clone()),
+                });
+
+                if let [Directive::Jump { .. }] = default_target.as_slice() {
+                    // If the default target is a plain jump to a local label, the JumpIf
+                    // targets it, and the fallthrough is the table itself.
+                    let Directive::Jump { target } = default_target.into_iter().next().unwrap()
+                    else {
+                        unreachable!()
+                    };
+
+                    let is_default_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                    directives.push(Directive::WASMOp {
+                        op: Op::I32GeU,
+                        inputs: vec![selector.clone(), num_choices],
+                        output: Some(is_default_taken.clone()),
+                    });
+
+                    // Jump to the default target if the selector is out of bounds.
+                    directives.push(Directive::JumpIf {
+                        target,
+                        condition: is_default_taken.start,
+                    });
+                } else {
+                    // The default target is a complicated jump, so it is the fallthrough,
+                    // and the JumpIf will target the table.
+                    let is_default_not_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                    directives.push(Directive::WASMOp {
+                        op: Op::I32LtU,
+                        inputs: vec![selector.clone(), num_choices],
+                        output: Some(is_default_not_taken.clone()),
+                    });
+
+                    let table_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+                    directives.push(Directive::JumpIf {
+                        target: table_label.clone(),
+                        condition: is_default_not_taken.start,
+                    });
+
+                    directives.extend(default_target);
+
+                    directives.push(Directive::Label {
+                        id: table_label,
+                        frame_size: None,
+                    });
+                }
+
+                // For robustness, the jump table has two indirections:
+                // - jump_offset $selector
+                // - jump jump_to_target_0
+                // - jump jump_to_target_1
+                // - ...
+                // - jump jump_to_target_n
+                // - jump_to_target_0:
+                // - <actual instructions to jump to target 0>
+                // - jump_to_target_1:
+                // - <actual instructions to jump to target 1>
+                // - ...
+                // - jump_to_target_n:
+                // - <actual instructions to jump to target n>
+                //
+                // The exception is if the target jump contains one single local jump instruction,
+                // which can be embedded in the jump table directly.
+                //
+                // TODO: theoretically, any single instruction can be embedded in the jump table,
+                // but it would require the guarantee that further translations wouldn't implement
+                // any of them as multiple ISA instructions. It is safer to assume just Jump will
+                // remain a single instruction. Maybe also Return?
+                //
+                // TODO: if jump_offset can jump $selector * N, where N is some immediate, this
+                // can be implemented with a single indirection, but that would also require
+                // 1-to-1 mapping in all the instructions belonging to the jump table.
+                directives.push(Directive::JumpOffset {
+                    offset: selector.start,
+                });
+
+                let jump_instructions = jump_instructions
+                    .into_iter()
+                    .filter_map(|jump_directives| {
+                        if let [Directive::Jump { .. }] = jump_directives.as_slice() {
+                            let Directive::Jump { target } =
+                                jump_directives.into_iter().next().unwrap()
+                            else {
+                                unreachable!()
+                            };
+                            directives.push(Directive::Jump { target });
+                            None
+                        } else {
+                            let jump_label =
+                                format_label(label_gen.next().unwrap(), LabelType::Local);
+                            directives.push(Directive::Jump {
+                                target: jump_label.clone(),
+                            });
+                            Some((jump_label, jump_directives))
+                        }
+                    })
+                    // Collecting here is essential, because of side effects of pushing
+                    // into `directives`.
+                    .collect_vec();
+
+                // Finally emit the jump directives for each target.
+                for (jump_label, jump_directives) in jump_instructions {
+                    directives.push(Directive::Label {
+                        id: jump_label,
+                        frame_size: None,
+                    });
+                    directives.extend(jump_directives);
+                }
             }
             Operation::WASMOp(Op::Call { function_index }) => {
                 let curr_entry = ctrl_stack.front().unwrap();
@@ -1398,7 +1565,7 @@ fn byte_size(bytes_per_word: u32, ty: ValType) -> u32 {
         ValType::V128 => 16,
         ValType::Ref(..) => {
             // Since this is a struct of multiple memory words (u32) that we will need to
-            // unpack into registers, we need to provision enough registers for each memory
+            // unpack into registers, so we need to provision enough registers for each memory
             // word independently.
             FunctionRef::NUM_WORDS * word_count(4, bytes_per_word) * bytes_per_word
         }
