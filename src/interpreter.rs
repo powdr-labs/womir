@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::linker;
@@ -8,6 +9,7 @@ use crate::loader::{Program, func_idx_to_label, word_count_type};
 
 #[derive(Debug, Clone, Copy)]
 enum VRomValue {
+    Unassigned,
     Future(u32),
     Concrete(u32),
 }
@@ -21,41 +23,72 @@ impl From<u32> for VRomValue {
 impl VRomValue {
     pub fn as_u32(&self) -> u32 {
         match self {
+            VRomValue::Unassigned => panic!("Cannot convert unassigned to u32"),
             VRomValue::Future(_) => panic!("Cannot convert future to u32"),
             VRomValue::Concrete(value) => *value,
         }
     }
 }
 
-pub struct Interpreter<'a> {
+pub struct Interpreter<'a, E: ExternalFunctions> {
     // TODO: maybe these 3 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
     future_counter: u32,
-    next_free_ptr: u32,
-    vrom: HashMap<u32, VRomValue>,
+    vrom: Vec<VRomValue>,
+    ram: HashMap<u32, u32>,
     program: Program<'a>,
+    external_functions: E,
     flat_program: Vec<Directive<'a>>,
     labels: HashMap<String, linker::LabelValue>,
 }
 
-impl<'a> Interpreter<'a> {
-    pub fn new(program: &Program<'a>) -> Self {
+pub trait ExternalFunctions {
+    fn call(&mut self, module: &str, func: &str, args: &[u32]) -> Vec<u32>;
+}
+
+impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
+    pub fn new(program: Program<'a>, external_functions: E) -> Self {
         let (flat_program, labels) = linker::link(&program.functions, 0x1);
 
-        let mut interpreter = Interpreter {
+        let ram = program
+            .initial_memory
+            .iter()
+            .filter_map(|(addr, value)| {
+                let value = match value {
+                    crate::loader::MemoryEntry::Value(v) => *v,
+                    crate::loader::MemoryEntry::FuncAddr(idx) => {
+                        let label = func_idx_to_label(*idx);
+                        labels[&label].func_idx.unwrap()
+                    }
+                    crate::loader::MemoryEntry::FuncFrameSize(func_idx) => {
+                        let label = func_idx_to_label(*func_idx);
+                        labels[&label].frame_size.unwrap()
+                    }
+                };
+
+                if value == 0 {
+                    None
+                } else {
+                    Some((*addr, value))
+                }
+            })
+            .collect();
+
+        let mut interpreter = Self {
             pc: 0,
             fp: 0,
             future_counter: 0,
             // We leave 0 unused for convention = successful termination.
-            next_free_ptr: 1,
-            vrom: HashMap::new(),
-            program: program.clone(),
+            vrom: vec![VRomValue::Unassigned],
+            ram,
+            program,
+            external_functions,
             flat_program,
             labels,
         };
 
-        if let Some(start_function) = program.start_function {
+        if let Some(start_function) = interpreter.program.start_function {
             let label = func_idx_to_label(start_function);
             interpreter.run(&label, &[]);
         }
@@ -107,7 +140,7 @@ impl<'a> Interpreter<'a> {
             let mut should_inc_pc = true;
 
             match instr {
-                Directive::Label { id, frame_size } => {
+                Directive::Label { .. } => {
                     should_inc_pc = false;
                     // do nothing
                 }
@@ -121,14 +154,18 @@ impl<'a> Interpreter<'a> {
                         self.fp = fp;
                     }
                 }
-                Directive::WASMOp { op, inputs, output } => match op {
+                Directive::WASMOp {
+                    op,
+                    mut inputs,
+                    output,
+                } => match op {
                     Op::I32Const { value } => {
                         let output_reg = output.clone().unwrap().next().unwrap();
                         self.set_vrom_relative_u32(output_reg, value as u32);
                     }
                     Op::I32Add => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
+                        let a = inputs[0].start;
+                        let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
                         let a = self.get_vrom_relative(a).as_u32();
@@ -138,8 +175,8 @@ impl<'a> Interpreter<'a> {
                         self.set_vrom_relative_u32(c, r);
                     }
                     Op::I32Sub => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
+                        let a = inputs[0].start;
+                        let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
                         let a = self.get_vrom_relative(a).as_u32();
@@ -150,8 +187,8 @@ impl<'a> Interpreter<'a> {
                     }
 
                     Op::I32Mul => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
+                        let a = inputs[0].start;
+                        let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
                         let a = self.get_vrom_relative(a).as_u32();
@@ -161,8 +198,8 @@ impl<'a> Interpreter<'a> {
                         self.set_vrom_relative_u32(c, r);
                     }
                     Op::I32GtU => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
+                        let a = inputs[0].start;
+                        let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
                         let a = self.get_vrom_relative(a).as_u32();
@@ -172,8 +209,8 @@ impl<'a> Interpreter<'a> {
                         self.set_vrom_relative_u32(c, r);
                     }
                     Op::I32And => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
+                        let a = inputs[0].start;
+                        let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
                         let a = self.get_vrom_relative(a).as_u32();
@@ -183,8 +220,8 @@ impl<'a> Interpreter<'a> {
                         self.set_vrom_relative_u32(c, r);
                     }
                     Op::I32ShrU => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
+                        let a = inputs[0].start;
+                        let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
                         let a = self.get_vrom_relative(a).as_u32();
@@ -193,7 +230,36 @@ impl<'a> Interpreter<'a> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    _ => todo!(),
+                    Op::GlobalGet { global_index } => {
+                        let global_info = self.program.globals[global_index as usize];
+                        let output = output.unwrap();
+
+                        let size = word_count_type(global_info.val_type, 4);
+                        assert_eq!(size, output.len() as u32);
+
+                        for (i, output_reg) in output.enumerate() {
+                            let value = self.get_ram(global_info.address + 4 * i as u32);
+                            self.set_vrom_relative_u32(output_reg, value);
+                        }
+                    }
+                    Op::GlobalSet { global_index } => {
+                        let global_info = self.program.globals[global_index as usize];
+
+                        let origin = inputs.pop().unwrap();
+                        assert!(
+                            inputs.is_empty(),
+                            "GlobalSet should have no additional inputs"
+                        );
+
+                        let size = word_count_type(global_info.val_type, 4);
+                        assert_eq!(origin.len(), size as usize);
+
+                        for (i, origin) in origin.enumerate() {
+                            let value = self.get_vrom_relative(origin).as_u32();
+                            self.set_ram(global_info.address + 4 * i as u32, value);
+                        }
+                    }
+                    _ => todo!("Unsupported WASM operator: {op:?}"),
                 },
                 Directive::AllocateFrameI {
                     target_frame,
@@ -254,43 +320,56 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn get_ram(&self, byte_addr: u32) -> u32 {
+        *self.ram.get(&byte_addr).unwrap_or(&0)
+    }
+
+    fn set_ram(&mut self, byte_addr: u32, value: u32) {
+        if value == 0 {
+            self.ram.remove(&byte_addr);
+        } else {
+            self.ram.insert(byte_addr, value);
+        }
+    }
+
     fn get_vrom_relative(&self, addr: u32) -> VRomValue {
-        self.vrom[&(self.fp + addr)]
+        self.vrom[(self.fp + addr) as usize]
     }
 
     fn get_vrom_absolute(&self, addr: u32) -> VRomValue {
-        self.vrom[&addr]
+        self.vrom[addr as usize]
     }
 
     fn set_vrom_relative(&mut self, addr: u32, value: VRomValue) {
-        self.vrom.insert(self.fp + addr, value);
+        self.vrom[(self.fp + addr) as usize] = value;
     }
 
     fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
-        self.vrom.insert(addr, value);
+        self.vrom[addr as usize] = value;
     }
 
     fn set_vrom_relative_u32(&mut self, addr: u32, value: u32) {
-        self.vrom.insert(self.fp + addr, value.into());
+        self.vrom[(self.fp + addr) as usize] = value.into();
     }
 
     fn set_vrom_relative_range(&mut self, addr: u32, values: &[u32]) {
         for (i, &value) in values.iter().enumerate() {
-            self.vrom.insert(self.fp + addr + i as u32, value.into());
+            self.vrom[(self.fp + addr + i as u32) as usize] = value.into();
         }
     }
 
     fn set_vrom_relative_range_future(&mut self, addr: u32, amount: u32) {
         for i in addr..addr + amount {
             let future = self.new_future();
-            self.vrom.insert(self.fp + i, VRomValue::Future(future));
+            self.vrom[(self.fp + i) as usize] = VRomValue::Future(future);
         }
     }
 
     fn allocate(&mut self, size: u32) -> u32 {
-        let addr = self.next_free_ptr;
-        self.next_free_ptr += size;
-        addr
+        let addr = self.vrom.len();
+        self.vrom
+            .resize_with(addr + size as usize, || VRomValue::Unassigned);
+        addr as u32
     }
 
     fn new_future(&mut self) -> u32 {

@@ -22,7 +22,6 @@ use allocate_registers::{Allocation, optimistic_allocation};
 use itertools::Itertools;
 use std::{
     collections::{BTreeSet, VecDeque},
-    default,
     fmt::Display,
     ops::{Range, RangeFrom},
 };
@@ -795,7 +794,7 @@ fn flatten_frame_tree<'a>(
                     });
                 }
             }
-            Operation::BrTable { mut targets } => {
+            Operation::BrTable { targets } => {
                 let curr_entry = ctrl_stack.front().unwrap();
 
                 let mut node_inputs = node.inputs;
