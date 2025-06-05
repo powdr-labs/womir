@@ -5,7 +5,7 @@ use wasmparser::Operator as Op;
 
 use crate::linker;
 use crate::loader::flattening::Directive;
-use crate::loader::{Program, func_idx_to_label, word_count_type};
+use crate::loader::{Program, Segment, func_idx_to_label, word_count_type};
 
 #[derive(Debug, Clone, Copy)]
 enum VRomValue {
@@ -259,6 +259,47 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             self.set_ram(global_info.address + 4 * i as u32, value);
                         }
                     }
+                    Op::I32Store { memarg } => {
+                        let addr = inputs[0].start;
+                        let value = inputs[1].start;
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        if addr % 4 == 0 {
+                            // Aligned access
+                            memory
+                                .set_word(addr, value)
+                                .expect("Out-of-bounds memory access");
+                        } else {
+                            // Unaligned access
+                            let low_word = addr & !3;
+                            let high_word = low_word + 4;
+
+                            let low_value = memory
+                                .get_word(low_word)
+                                .expect("Out-of-bounds memory access");
+                            let high_value = memory
+                                .get_word(high_word)
+                                .expect("Out-of-bounds memory access");
+
+                            let low_shift = (addr % 4) * 8;
+                            let high_shift = 32 - low_shift;
+
+                            let low_keep_mask = (1u32 << low_shift) - 1;
+                            let high_keep_mask = 0xFFFFFFFFu32 << high_shift;
+
+                            let new_low_value = (low_value & low_keep_mask) | (value << low_shift);
+                            let new_high_value =
+                                (high_value & high_keep_mask) | (value >> high_shift);
+
+                            memory
+                                .set_word(low_word, new_low_value)
+                                .expect("Out-of-bounds memory access");
+                            memory
+                                .set_word(high_word, new_high_value)
+                                .expect("Out-of-bounds memory access");
+                        }
+                    }
                     _ => todo!("Unsupported WASM operator: {op:?}"),
                 },
                 Directive::AllocateFrameI {
@@ -305,7 +346,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
                 }
-                _ => todo!(),
+                _ => todo!("Unsupported directive: {instr:?}"),
             }
 
             if should_inc_pc {
@@ -376,5 +417,48 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let future = self.future_counter;
         self.future_counter += 1;
         future
+    }
+}
+
+struct MemoryAccessor<'a, 'b, E: ExternalFunctions> {
+    segment: Segment,
+    interpreter: &'a mut Interpreter<'b, E>,
+}
+
+impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
+    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
+        MemoryAccessor {
+            segment,
+            interpreter,
+        }
+    }
+
+    fn get_size(&self) -> u32 {
+        self.interpreter.get_ram(self.segment.start)
+    }
+    fn set_size(&mut self, size: u32) {
+        self.interpreter.set_ram(self.segment.start, size);
+    }
+    fn get_max_size(&self) -> u32 {
+        self.interpreter.get_ram(self.segment.start + 4)
+    }
+
+    fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
+        assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
+        if byte_addr >= self.get_size() {
+            return Err(());
+        }
+        let ram_addr = self.segment.start + 8 + byte_addr;
+        Ok(self.interpreter.get_ram(ram_addr))
+    }
+
+    fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
+        assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
+        if byte_addr >= self.get_size() {
+            return Err(());
+        }
+        let ram_addr = self.segment.start + 8 + byte_addr;
+        self.interpreter.set_ram(ram_addr, value);
+        Ok(())
     }
 }

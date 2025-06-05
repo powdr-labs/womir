@@ -4,6 +4,7 @@ mod dag;
 pub mod flattening;
 mod locals_data_flow;
 
+use core::panic;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     ops::RangeFrom,
@@ -37,9 +38,6 @@ pub struct AllocatedVar {
 
 /// WASM defined page size is 64 KiB.
 const PAGE_SIZE: u32 = 65536;
-
-/// What size we reserve for the stack, in bytes.
-const STACK_SIZE: u32 = 1024 * 1024 * 1024; // 1 GiB
 
 /// If the table has no specified maximum size, we assign it a large default, in number of entries.
 const DEFAULT_MAX_TABLE_SIZE: u32 = 4096;
@@ -299,9 +297,9 @@ impl<'a> Program<'a> {
         if self.memory.is_none() {
             let maximum_size = mem_allocator
                 .remaining_space()
-                // From all the memory available, we reserve the space for the stack, and the 8 bytes needed
+                // From all the memory available, we reserve the 8 bytes needed
                 // to store the size of the memory and its maximum size:
-                .saturating_sub(STACK_SIZE + 8)
+                .saturating_sub(8)
                 / PAGE_SIZE;
 
             if maximum_size < mem_type.initial as u32 {
@@ -333,15 +331,8 @@ const fn sz(val_type: ValType) -> u32 {
         ValType::F32 => 4,
         ValType::F64 => 8,
         ValType::V128 => 16,
-        // Function references are 64 bits because the first 32 bits are
-        // the function type index, and the other 32 bits are the function
-        // address in code space.
-        //
-        // For extern references (that we don't provide any means to instantiate),
-        // I am very tempted to use 0 bytes, but in the spirit that it might be
-        // useful in the future, I will use 8 bytes, so that it has the same size
-        // as a function reference.
-        ValType::Ref(_) => 8,
+        // References don't have a visible size in the WASM memory.
+        ValType::Ref(_) => panic!("Cannot get size of reference type"),
     }
 }
 
