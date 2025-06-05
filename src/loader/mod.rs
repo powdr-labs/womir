@@ -1,7 +1,7 @@
 mod block_tree;
 mod blockless_dag;
 mod dag;
-mod flattening;
+pub mod flattening;
 mod locals_data_flow;
 
 use std::{
@@ -180,6 +180,7 @@ impl FunctionRef {
     }
 }
 
+#[derive(Clone)]
 pub struct Program<'a> {
     types: Vec<Rc<FuncType>>,
     func_types: Vec<u32>,
@@ -223,7 +224,7 @@ impl<'a> Program<'a> {
         self.types[type_idx as usize].clone()
     }
 
-    fn get_func_type(&self, func_idx: u32) -> &FuncType {
+    pub fn get_func_type(&self, func_idx: u32) -> &FuncType {
         self.get_type(self.func_types[func_idx as usize])
     }
 

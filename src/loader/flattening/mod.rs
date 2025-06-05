@@ -43,6 +43,7 @@ use super::{
 const PTR_BYTE_SIZE: u32 = 4;
 
 /// An assembly-like representation for a write-once memory machine.
+#[derive(Clone)]
 pub struct WriteOnceASM<'a> {
     pub func_idx: u32,
     pub frame_size: u32,
@@ -53,7 +54,7 @@ pub struct WriteOnceASM<'a> {
 /// If the value is multi-word, the first word is at the given address, and the rest are at the next addresses.
 type Register = u32;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Directive<'a> {
     Label {
         id: String,
@@ -154,7 +155,7 @@ pub enum Directive<'a> {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TrapReason {
     Unreachable,
     WrongIndirectCallFunctionType,
