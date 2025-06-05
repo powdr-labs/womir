@@ -25,6 +25,8 @@ use crate::loader::{
     dag::ValueOrigin,
 };
 
+pub use flattening::{func_idx_to_label, word_count_type};
+
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatedVar {
     pub val_type: ValType,

@@ -411,7 +411,7 @@ impl RegisterGenerator {
     }
 
     fn allocate_type(&mut self, bytes_per_word: u32, ty: ValType) -> Range<u32> {
-        self.allocate_bytes(bytes_per_word, byte_size(bytes_per_word, ty))
+        self.allocate_words(word_count_type(ty, bytes_per_word))
     }
 }
 
@@ -1559,6 +1559,10 @@ fn format_label(label_id: u32, label_type: LabelType) -> String {
     }
 }
 
+pub fn func_idx_to_label(func_idx: u32) -> String {
+    format_label(func_idx, LabelType::Function)
+}
+
 fn byte_size(bytes_per_word: u32, ty: ValType) -> u32 {
     match ty {
         ValType::I32 | ValType::F32 => 4,
@@ -1576,10 +1580,7 @@ fn byte_size(bytes_per_word: u32, ty: ValType) -> u32 {
 fn split_func_ref_regs(bytes_per_word: u32, func_ref_reg: Range<u32>) -> Vec<Range<u32>> {
     let comp_size = func_ref_reg.len() as u32 / FunctionRef::NUM_WORDS;
     // Each component must have the same word-size as a I32,
-    assert_eq!(
-        comp_size,
-        word_count(byte_size(bytes_per_word, ValType::I32), bytes_per_word)
-    );
+    assert_eq!(comp_size, word_count_type(ValType::I32, bytes_per_word));
     let func_ref_regs = (0..FunctionRef::NUM_WORDS)
         .map(|i| func_ref_reg.start + i * comp_size..func_ref_reg.start + (i + 1) * comp_size)
         .collect_vec();
@@ -1597,4 +1598,8 @@ fn assert_ptr_size(bytes_per_word: u32, ptr: &Range<u32>) {
         ptr.len(),
         word_count(PTR_BYTE_SIZE, bytes_per_word) as usize
     );
+}
+
+pub fn word_count_type(ty: ValType, bytes_per_word: u32) -> u32 {
+    word_count(byte_size(bytes_per_word, ty), bytes_per_word)
 }

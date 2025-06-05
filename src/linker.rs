@@ -4,14 +4,16 @@ use wasmparser::Operator as Op;
 
 use crate::loader::flattening::{Directive, WriteOnceASM};
 
+pub struct LabelValue {
+    pub pc: u32,
+    pub frame_size: Option<u32>,
+    pub func_idx: Option<u32>,
+}
+
 pub fn link<'a>(
     program: &[WriteOnceASM<'a>],
     init_pc: u32,
-) -> (
-    Vec<Directive<'a>>,
-    HashMap<u32, u32>,
-    HashMap<String, (u32, Option<u32>)>,
-) {
+) -> (Vec<Directive<'a>>, HashMap<String, LabelValue>) {
     let mut pc: u32 = init_pc;
 
     let nop = Directive::WASMOp {
@@ -22,10 +24,9 @@ pub fn link<'a>(
 
     let mut flat_program = vec![nop];
 
-    let mut function_pcs = HashMap::new();
     let mut labels = HashMap::new();
     for fun in program {
-        function_pcs.insert(fun.func_idx, pc);
+        let func_pc = pc;
         flat_program.extend(
             fun.directives
                 .clone()
@@ -34,11 +35,18 @@ pub fn link<'a>(
         );
         for instr in &fun.directives {
             if let Directive::Label { id, frame_size } = instr {
-                labels.insert(id.clone(), (pc, frame_size.clone()));
+                labels.insert(
+                    id.clone(),
+                    LabelValue {
+                        pc,
+                        frame_size: frame_size.clone(),
+                        func_idx: (pc == func_pc).then_some(fun.func_idx),
+                    },
+                );
             } else {
                 pc += 1;
             }
         }
     }
-    (flat_program, function_pcs, labels)
+    (flat_program, labels)
 }

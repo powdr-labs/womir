@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use wasmparser::Operator as Op;
 
 use crate::linker;
-use crate::loader::Program;
 use crate::loader::flattening::Directive;
+use crate::loader::{Program, func_idx_to_label, word_count_type};
 
 #[derive(Debug, Clone, Copy)]
 enum VRomValue {
@@ -28,57 +28,60 @@ impl VRomValue {
 }
 
 pub struct Interpreter<'a> {
+    // TODO: maybe these 3 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
+    future_counter: u32,
     next_free_ptr: u32,
     vrom: HashMap<u32, VRomValue>,
-    future_counter: u32,
     program: Program<'a>,
     flat_program: Vec<Directive<'a>>,
-    labels: HashMap<String, (u32, Option<u32>)>,
-    function_pcs: HashMap<u32, u32>,
+    labels: HashMap<String, linker::LabelValue>,
 }
 
 impl<'a> Interpreter<'a> {
     pub fn new(program: &Program<'a>) -> Self {
-        let (flat_program, function_pcs, labels) = linker::link(&program.functions, 0x1);
+        let (flat_program, labels) = linker::link(&program.functions, 0x1);
 
-        Interpreter {
+        let mut interpreter = Interpreter {
             pc: 0,
             fp: 0,
+            future_counter: 0,
             // We leave 0 unused for convention = successful termination.
             next_free_ptr: 1,
             vrom: HashMap::new(),
-            future_counter: 0,
             program: program.clone(),
             flat_program,
             labels,
-            function_pcs,
+        };
+
+        if let Some(start_function) = program.start_function {
+            let label = func_idx_to_label(start_function);
+            interpreter.run(&label, &[]);
         }
+
+        interpreter
     }
 
-    pub fn run(&mut self, main_name: &str, inputs: &[u32]) -> Vec<u32> {
-        // TODO
-        // First call start_function if it exists, then call main.
+    pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
+        let func_label = &self.labels[func_name];
 
-        let main_idx = self
-            .program
-            .exported_functions
+        let func_type = self.program.get_func_type(func_label.func_idx.unwrap());
+        let n_inputs: u32 = func_type
+            .params()
             .iter()
-            .find(|(_, name)| **name == main_name)
-            .map(|(idx, _)| idx)
-            .expect("No main function found");
+            .map(|ty| word_count_type(*ty, 4))
+            .sum();
+        assert_eq!(inputs.len(), n_inputs as usize);
 
-        let main_func_type = self.program.get_func_type(*main_idx);
-        let n_outputs = main_func_type.results().len();
-        let main_func = &self.program.functions[*main_idx as usize];
+        let n_outputs = func_type
+            .results()
+            .iter()
+            .map(|ty| word_count_type(*ty, 4))
+            .sum();
 
-        log::trace!("Main function index: {main_idx}");
-        log::trace!("Main function type: {main_func_type:#?}");
-        log::trace!("Main function frame size: {}", main_func.frame_size);
-
-        self.pc = self.function_pcs[main_idx];
-        self.fp = self.allocate(main_func.frame_size);
+        self.pc = func_label.pc;
+        self.fp = self.allocate(func_label.frame_size.unwrap());
         let first_fp = self.fp;
 
         self.set_vrom_relative_u32(0, 0); // final return pc
@@ -86,12 +89,12 @@ impl<'a> Interpreter<'a> {
         self.set_vrom_relative_range(2, inputs);
 
         let output_start = 2 + inputs.len() as u32;
-        self.set_vrom_relative_range_future(output_start, n_outputs as u32);
+        self.set_vrom_relative_range_future(output_start, n_outputs);
 
         self.run_loop();
 
         // We assume that all output futures have been resolved.
-        (output_start..output_start + n_outputs as u32)
+        (output_start..output_start + n_outputs)
             .map(|i| self.get_vrom_absolute(first_fp + i).as_u32())
             .collect::<Vec<u32>>()
     }
@@ -196,7 +199,7 @@ impl<'a> Interpreter<'a> {
                     target_frame,
                     result_ptr,
                 } => {
-                    let frame_size = self.labels[&target_frame].1.unwrap_or(0);
+                    let frame_size = self.labels[&target_frame].frame_size.unwrap();
                     let ptr = self.allocate(frame_size);
                     self.set_vrom_relative_u32(result_ptr, ptr);
                 }
@@ -214,7 +217,7 @@ impl<'a> Interpreter<'a> {
                     new_frame_ptr,
                     saved_caller_fp,
                 } => {
-                    self.pc = self.labels[&target].0;
+                    self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
 
                     let prev_fp = self.fp;
@@ -225,7 +228,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Directive::JumpIf { target, condition } => {
-                    let target = self.labels[&target].0;
+                    let target = self.labels[&target].pc;
                     let cond = self.get_vrom_relative(condition).as_u32();
                     if cond != 0 {
                         self.pc = target;
@@ -233,7 +236,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Directive::Jump { target } => {
-                    self.pc = self.labels[&target].0;
+                    self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
                 }
                 _ => todo!(),
