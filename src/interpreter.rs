@@ -1,11 +1,13 @@
 use core::panic;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 
+use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::linker;
 use crate::loader::flattening::Directive;
-use crate::loader::{Program, Segment, func_idx_to_label, word_count_type};
+use crate::loader::{Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VRomValue {
@@ -64,7 +66,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     Some((*addr, value))
                 }
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
 
         let mut interpreter = Self {
             pc: 0,
@@ -99,7 +101,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             .sum();
         assert_eq!(inputs.len(), n_inputs as usize);
 
-        let n_outputs = func_type
+        let n_outputs: u32 = func_type
             .results()
             .iter()
             .map(|ty| word_count_type(*ty, 4))
@@ -109,12 +111,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         self.fp = self.allocate(func_label.frame_size.unwrap());
         let first_fp = self.fp;
 
-        self.set_vrom_relative_u32(0, 0); // final return pc
-        self.set_vrom_relative_u32(1, 0); // return fp success
-        self.set_vrom_relative_range(2, inputs);
+        self.set_vrom_relative_u32(0..1, 0); // final return pc
+        self.set_vrom_relative_u32(1..2, 0); // return fp success
+        self.set_vrom_relative_range(2..2 + inputs.len() as u32, inputs);
 
         let output_start = 2 + inputs.len() as u32;
-        self.set_vrom_relative_range_future(output_start, n_outputs);
+        self.set_vrom_relative_range_future(output_start..output_start + n_outputs);
 
         self.run_loop();
 
@@ -137,8 +139,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     // do nothing
                 }
                 Directive::Return { ret_pc, ret_fp } => {
-                    let pc = self.get_vrom_relative_u32(ret_pc);
-                    let fp = self.get_vrom_relative_u32(ret_fp);
+                    let pc = self.get_vrom_relative_u32(ret_pc..ret_pc + 1);
+                    let fp = self.get_vrom_relative_u32(ret_fp..ret_fp + 1);
                     if pc == 0 {
                         break fp;
                     } else {
@@ -152,13 +154,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     output,
                 } => match op {
                     Op::I32Const { value } => {
-                        let output_reg = output.clone().unwrap().next().unwrap();
-                        self.set_vrom_relative_u32(output_reg, value as u32);
+                        self.set_vrom_relative_u32(output.unwrap(), value as u32);
+                    }
+                    Op::I64Const { value } => {
+                        self.set_vrom_relative_range(
+                            output.unwrap(),
+                            &[value as u32, (value >> 32) as u32],
+                        );
                     }
                     Op::I32Add => {
-                        let a = inputs[0].start;
-                        let b = inputs[1].start;
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
@@ -166,10 +173,21 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64Add => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+                        let r = a.wrapping_add(b);
+
+                        self.set_vrom_relative_range(c, &[r as u32, (r >> 32) as u32]);
+                    }
                     Op::I32Sub => {
-                        let a = inputs[0].start;
-                        let b = inputs[1].start;
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
@@ -179,9 +197,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     }
 
                     Op::I32Mul => {
-                        let a = inputs[0].start;
-                        let b = inputs[1].start;
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
@@ -190,9 +208,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.set_vrom_relative_u32(c, r);
                     }
                     Op::I32GtU => {
-                        let a = inputs[0].start;
-                        let b = inputs[1].start;
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
@@ -201,9 +219,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.set_vrom_relative_u32(c, r);
                     }
                     Op::I32And => {
-                        let a = inputs[0].start;
-                        let b = inputs[1].start;
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
@@ -212,15 +230,54 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.set_vrom_relative_u32(c, r);
                     }
                     Op::I32ShrU => {
-                        let a = inputs[0].start;
-                        let b = inputs[1].start;
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
                         let r = a >> b;
 
                         self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Eq | Op::I64Eq => {
+                        let a = self
+                            .get_vrom_relative_range(inputs[0].clone())
+                            .collect_vec();
+                        let b = self.get_vrom_relative_range(inputs[1].clone());
+                        let c = output.unwrap();
+
+                        let val = if b.eq(a) { 1 } else { 0 };
+                        self.set_vrom_relative_u32(c, val);
+                    }
+                    Op::I32Ne | Op::I64Ne => {
+                        let a = self
+                            .get_vrom_relative_range(inputs[0].clone())
+                            .collect_vec();
+                        let b = self.get_vrom_relative_range(inputs[1].clone());
+                        let c = output.unwrap();
+
+                        let val = if !b.eq(a) { 1 } else { 0 };
+                        self.set_vrom_relative_u32(c, val);
+                    }
+                    Op::I32Eqz | Op::I64Eqz => {
+                        let mut a = self.get_vrom_relative_range(inputs[0].clone());
+                        let c = output.unwrap();
+
+                        let val = if a.all(|x| x == 0) { 1 } else { 0 };
+                        drop(a);
+                        self.set_vrom_relative_u32(c, val);
+                    }
+                    Op::Select => {
+                        let condition = self.get_vrom_relative_u32(inputs[2].clone());
+
+                        let selected = inputs[if condition != 0 { 0 } else { 1 }].clone();
+                        let value = selected.map(|r| self.get_vrom_relative(r)).collect_vec();
+
+                        let output = output.unwrap();
+                        for (output_reg, value) in output.zip_eq(value) {
+                            self.set_vrom_relative(output_reg, value);
+                        }
                     }
                     Op::GlobalGet { global_index } => {
                         let global_info = self.program.globals[global_index as usize];
@@ -229,10 +286,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let size = word_count_type(global_info.val_type, 4);
                         assert_eq!(size, output.len() as u32);
 
-                        for (i, output_reg) in output.enumerate() {
-                            let value = self.get_ram(global_info.address + 4 * i as u32);
-                            self.set_vrom_relative_u32(output_reg, value);
-                        }
+                        let value = (0..size)
+                            .map(|i| self.get_ram(global_info.address + 4 * i as u32))
+                            .collect_vec();
+                        self.set_vrom_relative_range(output, &value);
                     }
                     Op::GlobalSet { global_index } => {
                         let global_info = self.program.globals[global_index as usize];
@@ -246,14 +303,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let size = word_count_type(global_info.val_type, 4);
                         assert_eq!(origin.len(), size as usize);
 
-                        for (i, origin) in origin.enumerate() {
-                            let value = self.get_vrom_relative_u32(origin);
+                        let value = self.get_vrom_relative_range(origin).collect_vec();
+                        for (i, value) in value.into_iter().enumerate() {
                             self.set_ram(global_info.address + 4 * i as u32, value);
                         }
                     }
                     Op::I32Store { memarg } => {
-                        let addr = self.get_vrom_relative_u32(inputs[0].start);
-                        let value = self.get_vrom_relative_u32(inputs[1].start);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let value = self.get_vrom_relative_u32(inputs[1].clone());
 
                         assert_eq!(memarg.memory, 0);
                         let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
@@ -262,14 +320,45 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .expect("Out of bounds write");
                     }
                     Op::I64Store { memarg } => {
-                        let addr = self.get_vrom_relative_u32(inputs[0].start);
-                        let value = self.get_vrom_relative_u32(inputs[1].start);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let value = self
+                            .get_vrom_relative_range(inputs[1].clone())
+                            .collect_vec();
 
                         assert_eq!(memarg.memory, 0);
                         let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
                         memory
-                            .write_contiguous(addr, &[value])
+                            .write_contiguous(addr, &value)
                             .expect("Out of bounds write");
+                    }
+                    Op::I32Load { memarg } | Op::I64Load { memarg } => {
+                        let output_reg = output.unwrap();
+                        let len = output_reg.len() as u32;
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let value = memory
+                            .read_contiguous(addr, len)
+                            .expect("Out of bounds read");
+
+                        self.set_vrom_relative_range(output_reg, &value);
+                    }
+                    Op::TableGet { table } => {
+                        assert_eq!(inputs[0].len(), 1);
+                        let index = self.get_vrom_relative_u32(inputs[0].clone());
+
+                        let table = TableAccessor::new(self.program.tables[table as usize], self);
+                        let entry = table
+                            .get_entry(index)
+                            .expect("TableGet: index out of bounds");
+
+                        let output_reg = output.unwrap();
+                        self.set_vrom_relative_range(output_reg, &entry);
                     }
                     _ => todo!("Unsupported WASM operator: {op:?}"),
                 },
@@ -279,7 +368,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 } => {
                     let frame_size = self.labels[&target_frame].frame_size.unwrap();
                     let ptr = self.allocate(frame_size);
-                    self.set_vrom_relative_u32(result_ptr, ptr);
+                    self.set_vrom_relative_u32(result_ptr..result_ptr + 1, ptr);
+                }
+                Directive::Copy {
+                    src_word,
+                    dest_word,
+                } => {
+                    let value = self.get_vrom_relative(src_word);
+                    self.set_vrom_relative(dest_word, value);
                 }
                 Directive::CopyIntoFrame {
                     src_word,
@@ -287,7 +383,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     dest_word,
                 } => {
                     let value = self.get_vrom_relative(src_word);
-                    let target_ptr = self.get_vrom_relative_u32(dest_frame) + dest_word;
+                    let target_ptr =
+                        self.get_vrom_relative_u32(dest_frame..dest_frame + 1) + dest_word;
                     self.set_vrom_absolute(target_ptr, value);
                 }
                 Directive::Call {
@@ -301,10 +398,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     should_inc_pc = false;
 
                     let prev_fp = self.fp;
-                    self.fp = self.get_vrom_relative_u32(new_frame_ptr);
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
 
-                    self.set_vrom_relative_u32(saved_ret_pc, prev_pc + 1);
-                    self.set_vrom_relative_u32(saved_caller_fp, prev_fp);
+                    self.set_vrom_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    self.set_vrom_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                 }
                 Directive::JumpAndActivateFrame {
                     target,
@@ -315,15 +412,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     should_inc_pc = false;
 
                     let prev_fp = self.fp;
-                    self.fp = self.get_vrom_relative_u32(new_frame_ptr);
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
 
                     if let Some(saved_caller_fp) = saved_caller_fp {
-                        self.set_vrom_relative_u32(saved_caller_fp, prev_fp);
+                        self.set_vrom_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                     }
                 }
                 Directive::JumpIf { target, condition } => {
                     let target = self.labels[&target].pc;
-                    let cond = self.get_vrom_relative_u32(condition);
+                    let cond = self.get_vrom_relative_u32(condition..condition + 1);
                     if cond != 0 {
                         self.pc = target;
                         should_inc_pc = false;
@@ -332,6 +429,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 Directive::Jump { target } => {
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
+                }
+                Directive::Trap { reason } => {
+                    panic!("Trap encountered: {reason:?}");
                 }
                 _ => todo!("Unsupported directive: {instr:?}"),
             }
@@ -381,8 +481,20 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         }
     }
 
-    fn get_vrom_relative_u32(&mut self, addr: u32) -> u32 {
-        self.get_vrom_absolute_u32(self.fp + addr)
+    fn get_vrom_relative_u32(&mut self, addr: Range<u32>) -> u32 {
+        assert_eq!(addr.len(), 1, "Expected a single address range");
+        self.get_vrom_absolute_u32(self.fp + addr.start)
+    }
+
+    fn get_vrom_relative_u64(&mut self, addr: Range<u32>) -> u64 {
+        assert_eq!(addr.len(), 2, "Expected a single address range");
+        let low = self.get_vrom_absolute_u32(self.fp + addr.start);
+        let high = self.get_vrom_absolute_u32(self.fp + addr.start + 1);
+        (low as u64) | ((high as u64) << 32)
+    }
+
+    fn get_vrom_relative_range(&mut self, addr: Range<u32>) -> impl Iterator<Item = u32> {
+        addr.map(|i| self.get_vrom_absolute_u32(self.fp + i))
     }
 
     fn get_vrom_relative(&mut self, addr: u32) -> VRomValue {
@@ -397,6 +509,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             value = VRomValue::Future(self.new_future());
             self.vrom[addr as usize] = value;
         }
+        log::trace!("Reading VRom address {addr}: {value:?}");
         value
     }
 
@@ -406,6 +519,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
     fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
         let slot = &mut self.vrom[addr as usize];
+        log::trace!("Setting VRom address {addr}: {value:?}");
         match (*slot, value) {
             (VRomValue::Unassigned, VRomValue::Unassigned) => {
                 // This is important to catch to prevent bugs.
@@ -429,18 +543,24 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         }
     }
 
-    fn set_vrom_relative_u32(&mut self, addr: u32, value: u32) {
-        self.set_vrom_relative(addr, value.into());
+    fn set_vrom_relative_u32(&mut self, addr: Range<u32>, value: u32) {
+        assert_eq!(addr.len(), 1, "Expected a single address range");
+        self.set_vrom_relative(addr.start, value.into());
     }
 
-    fn set_vrom_relative_range(&mut self, addr: u32, values: &[u32]) {
-        for (i, &value) in values.iter().enumerate() {
-            self.set_vrom_relative(addr + i as u32, value.into());
+    fn set_vrom_relative_range(&mut self, addr: Range<u32>, values: &[u32]) {
+        assert_eq!(
+            addr.len(),
+            values.len(),
+            "Address range and values length mismatch"
+        );
+        for (addr, &value) in addr.zip(values.iter()) {
+            self.set_vrom_relative(addr, value.into());
         }
     }
 
-    fn set_vrom_relative_range_future(&mut self, addr: u32, amount: u32) {
-        for i in addr..addr + amount {
+    fn set_vrom_relative_range_future(&mut self, addr: Range<u32>) {
+        for i in addr {
             let future = self.new_future();
             self.set_vrom_relative(i, VRomValue::Future(future));
         }
@@ -463,24 +583,31 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 struct MemoryAccessor<'a, 'b, E: ExternalFunctions> {
     segment: Segment,
     interpreter: &'a mut Interpreter<'b, E>,
+    byte_size: u32,
 }
 
 impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
-        MemoryAccessor {
+        let byte_size = interpreter.get_ram(segment.start) * WASM_PAGE_SIZE;
+        let memory_accessor = MemoryAccessor {
             segment,
             interpreter,
-        }
+            byte_size,
+        };
+        memory_accessor
     }
 
     fn get_size(&self) -> u32 {
-        self.interpreter.get_ram(self.segment.start)
+        self.byte_size
     }
-    fn set_size(&mut self, size: u32) {
-        self.interpreter.set_ram(self.segment.start, size);
+
+    fn set_size(&mut self, num_pages: u32) {
+        self.interpreter.set_ram(self.segment.start, num_pages);
+        self.byte_size = num_pages * WASM_PAGE_SIZE;
     }
+
     fn get_max_size(&self) -> u32 {
-        self.interpreter.get_ram(self.segment.start + 4)
+        self.interpreter.get_ram(self.segment.start + 4) * WASM_PAGE_SIZE
     }
 
     fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
@@ -489,7 +616,9 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             return Err(());
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
-        Ok(self.interpreter.get_ram(ram_addr))
+        let value = self.interpreter.get_ram(ram_addr);
+        log::trace!("Reading Memory word at {ram_addr}: {value}");
+        Ok(value)
     }
 
     fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
@@ -499,6 +628,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         self.interpreter.set_ram(ram_addr, value);
+        log::trace!("Writing Memory word at {ram_addr}: {value}");
         Ok(())
     }
 
@@ -509,7 +639,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
                 let addr = byte_addr + (i as u32 * 4);
                 self.set_word(addr, value)?;
             }
-        } else {
+        } else if !data.is_empty() {
             // Unaligned writes
             let offset_bytes = (byte_addr % 4) as usize;
             let shift = (offset_bytes * 8) as u32;
@@ -542,5 +672,73 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             self.set_word(final_addr, new_final_word)?;
         }
         Ok(())
+    }
+
+    fn read_contiguous(&self, byte_addr: u32, num_words: u32) -> Result<Vec<u32>, ()> {
+        let mut data = Vec::with_capacity(num_words as usize);
+        if byte_addr % 4 == 0 {
+            // Simple aligned reads
+            for i in 0..num_words {
+                let addr = byte_addr + (i * 4);
+                data.push(self.get_word(addr)?);
+            }
+        } else if num_words > 0 {
+            // Unaligned reads
+            let offset_bytes = (byte_addr % 4) as usize;
+            let shift = (offset_bytes * 8) as u32;
+            let high_shift = 32u32 - shift;
+
+            let first_word_addr = byte_addr & !3;
+
+            // Read first partial word
+            let first_word = self.get_word(first_word_addr)?;
+            let mut lower_bits = first_word >> shift;
+
+            // Complete and write all the words
+            for i in 1..=num_words {
+                let current_addr = first_word_addr + (i * 4);
+                let word = self.get_word(current_addr)?;
+                data.push(lower_bits | (word << high_shift));
+                lower_bits = word >> shift;
+            }
+        }
+        Ok(data)
+    }
+}
+
+struct TableAccessor<'a, 'b, E: ExternalFunctions> {
+    segment: Segment,
+    interpreter: &'a mut Interpreter<'b, E>,
+    size: u32,
+}
+
+impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
+    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
+        let size = interpreter.get_ram(segment.start);
+        TableAccessor {
+            segment,
+            interpreter,
+            size,
+        }
+    }
+
+    /// Returns the size of the table in number of elements.
+    fn get_size(&self) -> u32 {
+        self.size
+    }
+
+    fn get_max_size(&self) -> u32 {
+        self.interpreter.get_ram(self.segment.start + 4)
+    }
+
+    fn get_entry(&self, index: u32) -> Result<[u32; 3], ()> {
+        if index >= self.size {
+            return Err(());
+        }
+        let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
+        let type_idx = self.interpreter.get_ram(base_addr);
+        let frame_size = self.interpreter.get_ram(base_addr + 4);
+        let pc = self.interpreter.get_ram(base_addr + 8);
+        Ok([type_idx, frame_size, pc])
     }
 }

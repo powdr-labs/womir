@@ -42,7 +42,7 @@ use super::{
 const PTR_BYTE_SIZE: u32 = 4;
 
 /// An assembly-like representation for a write-once memory machine.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct WriteOnceASM<'a> {
     pub func_idx: u32,
     pub frame_size: u32,
@@ -794,7 +794,7 @@ fn flatten_frame_tree<'a>(
                     });
                 }
             }
-            Operation::BrTable { targets } => {
+            Operation::BrTable { mut targets } => {
                 let curr_entry = ctrl_stack.front().unwrap();
 
                 let mut node_inputs = node.inputs;

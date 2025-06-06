@@ -37,14 +37,14 @@ pub struct AllocatedVar {
 }
 
 /// WASM defined page size is 64 KiB.
-const PAGE_SIZE: u32 = 65536;
+pub const WASM_PAGE_SIZE: u32 = 65536;
 
 /// If the table has no specified maximum size, we assign it a large default, in number of entries.
 const DEFAULT_MAX_TABLE_SIZE: u32 = 4096;
 
 /// Segment is not a WASM concept, but it is used to mean a region of memory
 /// that is allocated for a WASM table or memory.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct Segment {
     /// The start address of the segment, in bytes.
     pub start: u32,
@@ -52,7 +52,7 @@ pub struct Segment {
     pub size: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum MemoryEntry {
     /// Actual value stored in memory word.
     Value(u32),
@@ -180,7 +180,7 @@ impl FunctionRef {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Program<'a> {
     types: Vec<Rc<FuncType>>,
     func_types: Vec<u32>,
@@ -300,7 +300,7 @@ impl<'a> Program<'a> {
                 // From all the memory available, we reserve the 8 bytes needed
                 // to store the size of the memory and its maximum size:
                 .saturating_sub(8)
-                / PAGE_SIZE;
+                / WASM_PAGE_SIZE;
 
             if maximum_size < mem_type.initial as u32 {
                 panic!(
@@ -312,7 +312,7 @@ impl<'a> Program<'a> {
                 .maximum
                 .map_or(maximum_size, |v| maximum_size.min(v as u32));
 
-            let segment = mem_allocator.allocate_segment(maximum_size * PAGE_SIZE + 8);
+            let segment = mem_allocator.allocate_segment(maximum_size * WASM_PAGE_SIZE + 8);
             initial_memory.insert(segment.start, MemoryEntry::Value(mem_type.initial as u32));
             initial_memory.insert(segment.start + 4, MemoryEntry::Value(maximum_size));
 
@@ -728,10 +728,10 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 let definition =
                     flattening::flatten_dag(&ctx, 4, &mut label_gen, blockless_dag, func_idx);
 
-                println!("");
+                /*println!("");
                 for d in definition.directives.iter() {
                     println!("{d}");
-                }
+                }*/
 
                 ctx.functions.push(definition);
             }
@@ -792,7 +792,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             else {
                                 panic!("Memory size is a label");
                             };
-                            let mem_size = mem_size * PAGE_SIZE;
+                            let mem_size = mem_size * WASM_PAGE_SIZE;
                             assert!(offset + data_segment.data.len() as u32 <= mem_size);
 
                             let mut byte_offset = memory.start + 8 + offset;
