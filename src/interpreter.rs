@@ -1,13 +1,13 @@
+use core::panic;
 use std::collections::HashMap;
 
-use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::linker;
 use crate::loader::flattening::Directive;
 use crate::loader::{Program, Segment, func_idx_to_label, word_count_type};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VRomValue {
     Unassigned,
     Future(u32),
@@ -20,21 +20,12 @@ impl From<u32> for VRomValue {
     }
 }
 
-impl VRomValue {
-    pub fn as_u32(&self) -> u32 {
-        match self {
-            VRomValue::Unassigned => panic!("Cannot convert unassigned to u32"),
-            VRomValue::Future(_) => panic!("Cannot convert future to u32"),
-            VRomValue::Concrete(value) => *value,
-        }
-    }
-}
-
 pub struct Interpreter<'a, E: ExternalFunctions> {
-    // TODO: maybe these 3 initial fields should be unique per `run()` call?
+    // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
     future_counter: u32,
+    future_assignments: HashMap<u32, u32>,
     vrom: Vec<VRomValue>,
     ram: HashMap<u32, u32>,
     program: Program<'a>,
@@ -79,6 +70,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             pc: 0,
             fp: 0,
             future_counter: 0,
+            future_assignments: HashMap::new(),
             // We leave 0 unused for convention = successful termination.
             vrom: vec![VRomValue::Unassigned],
             ram,
@@ -128,7 +120,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
         // We assume that all output futures have been resolved.
         (output_start..output_start + n_outputs)
-            .map(|i| self.get_vrom_absolute(first_fp + i).as_u32())
+            .map(|i| self.get_vrom_absolute_u32(first_fp + i))
             .collect::<Vec<u32>>()
     }
 
@@ -145,8 +137,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     // do nothing
                 }
                 Directive::Return { ret_pc, ret_fp } => {
-                    let pc = self.get_vrom_relative(ret_pc).as_u32();
-                    let fp = self.get_vrom_relative(ret_fp).as_u32();
+                    let pc = self.get_vrom_relative_u32(ret_pc);
+                    let fp = self.get_vrom_relative_u32(ret_fp);
                     if pc == 0 {
                         break fp;
                     } else {
@@ -168,8 +160,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a.wrapping_add(b);
 
                         self.set_vrom_relative_u32(c, r);
@@ -179,8 +171,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a.wrapping_sub(b);
 
                         self.set_vrom_relative_u32(c, r);
@@ -191,8 +183,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a.wrapping_mul(b);
 
                         self.set_vrom_relative_u32(c, r);
@@ -202,8 +194,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = if a > b { 1 } else { 0 };
 
                         self.set_vrom_relative_u32(c, r);
@@ -213,8 +205,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a & b;
 
                         self.set_vrom_relative_u32(c, r);
@@ -224,8 +216,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = inputs[1].start;
                         let c = output.unwrap().next().unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a >> b;
 
                         self.set_vrom_relative_u32(c, r);
@@ -255,50 +247,29 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(origin.len(), size as usize);
 
                         for (i, origin) in origin.enumerate() {
-                            let value = self.get_vrom_relative(origin).as_u32();
+                            let value = self.get_vrom_relative_u32(origin);
                             self.set_ram(global_info.address + 4 * i as u32, value);
                         }
                     }
                     Op::I32Store { memarg } => {
-                        let addr = inputs[0].start;
-                        let value = inputs[1].start;
+                        let addr = self.get_vrom_relative_u32(inputs[0].start);
+                        let value = self.get_vrom_relative_u32(inputs[1].start);
 
                         assert_eq!(memarg.memory, 0);
                         let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
-                        if addr % 4 == 0 {
-                            // Aligned access
-                            memory
-                                .set_word(addr, value)
-                                .expect("Out-of-bounds memory access");
-                        } else {
-                            // Unaligned access
-                            let low_word = addr & !3;
-                            let high_word = low_word + 4;
+                        memory
+                            .write_contiguous(addr, &[value])
+                            .expect("Out of bounds write");
+                    }
+                    Op::I64Store { memarg } => {
+                        let addr = self.get_vrom_relative_u32(inputs[0].start);
+                        let value = self.get_vrom_relative_u32(inputs[1].start);
 
-                            let low_value = memory
-                                .get_word(low_word)
-                                .expect("Out-of-bounds memory access");
-                            let high_value = memory
-                                .get_word(high_word)
-                                .expect("Out-of-bounds memory access");
-
-                            let low_shift = (addr % 4) * 8;
-                            let high_shift = 32 - low_shift;
-
-                            let low_keep_mask = (1u32 << low_shift) - 1;
-                            let high_keep_mask = 0xFFFFFFFFu32 << high_shift;
-
-                            let new_low_value = (low_value & low_keep_mask) | (value << low_shift);
-                            let new_high_value =
-                                (high_value & high_keep_mask) | (value >> high_shift);
-
-                            memory
-                                .set_word(low_word, new_low_value)
-                                .expect("Out-of-bounds memory access");
-                            memory
-                                .set_word(high_word, new_high_value)
-                                .expect("Out-of-bounds memory access");
-                        }
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        memory
+                            .write_contiguous(addr, &[value])
+                            .expect("Out of bounds write");
                     }
                     _ => todo!("Unsupported WASM operator: {op:?}"),
                 },
@@ -316,8 +287,24 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     dest_word,
                 } => {
                     let value = self.get_vrom_relative(src_word);
-                    let target_ptr = self.get_vrom_relative(dest_frame).as_u32() + dest_word;
+                    let target_ptr = self.get_vrom_relative_u32(dest_frame) + dest_word;
                     self.set_vrom_absolute(target_ptr, value);
+                }
+                Directive::Call {
+                    target,
+                    new_frame_ptr,
+                    saved_ret_pc,
+                    saved_caller_fp,
+                } => {
+                    let prev_pc = self.pc;
+                    self.pc = self.labels[&target].pc;
+                    should_inc_pc = false;
+
+                    let prev_fp = self.fp;
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr);
+
+                    self.set_vrom_relative_u32(saved_ret_pc, prev_pc + 1);
+                    self.set_vrom_relative_u32(saved_caller_fp, prev_fp);
                 }
                 Directive::JumpAndActivateFrame {
                     target,
@@ -328,7 +315,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     should_inc_pc = false;
 
                     let prev_fp = self.fp;
-                    self.fp = self.get_vrom_relative(new_frame_ptr).as_u32();
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr);
 
                     if let Some(saved_caller_fp) = saved_caller_fp {
                         self.set_vrom_relative_u32(saved_caller_fp, prev_fp);
@@ -336,7 +323,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 }
                 Directive::JumpIf { target, condition } => {
                     let target = self.labels[&target].pc;
-                    let cond = self.get_vrom_relative(condition).as_u32();
+                    let cond = self.get_vrom_relative_u32(condition);
                     if cond != 0 {
                         self.pc = target;
                         should_inc_pc = false;
@@ -373,6 +360,31 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         }
     }
 
+    fn get_vrom_absolute_u32(&mut self, addr: u32) -> u32 {
+        let value = &mut self.get_vrom_absolute(addr);
+        match *value {
+            VRomValue::Concrete(v) => v,
+            VRomValue::Future(future) => {
+                // Resolve the future if it has been assigned.
+                if let Some(resolved_value) = self.future_assignments.get(&future) {
+                    *value = VRomValue::Concrete(*resolved_value);
+                    *resolved_value
+                } else {
+                    panic!(
+                        "Can not convert future {future} to u32. It has not been assigned a value yet."
+                    );
+                }
+            }
+            VRomValue::Unassigned => {
+                panic!("Can not convert unassigned to u32");
+            }
+        }
+    }
+
+    fn get_vrom_relative_u32(&mut self, addr: u32) -> u32 {
+        self.get_vrom_absolute_u32(self.fp + addr)
+    }
+
     fn get_vrom_relative(&self, addr: u32) -> VRomValue {
         self.vrom[(self.fp + addr) as usize]
     }
@@ -382,27 +394,44 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     fn set_vrom_relative(&mut self, addr: u32, value: VRomValue) {
-        self.vrom[(self.fp + addr) as usize] = value;
+        self.set_vrom_absolute(self.fp + addr, value);
     }
 
     fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
-        self.vrom[addr as usize] = value;
+        let slot = &mut self.vrom[addr as usize];
+        match (*slot, value) {
+            (VRomValue::Unassigned, _) => {
+                *slot = value;
+            }
+            (VRomValue::Future(future), VRomValue::Concrete(value)) => {
+                // Assigning Concrete values to Futures materializes it.
+                self.future_assignments
+                    .insert(future, value)
+                    .map(|old_value| {
+                        assert_eq!(old_value, value, "Attempted to overwrite a value in VRom");
+                    });
+                log::debug!("Future {future} materialized to value {value}");
+            }
+            (_, _) => {
+                assert_eq!(*slot, value, "Attempted to overwrite a value in VRom");
+            }
+        }
     }
 
     fn set_vrom_relative_u32(&mut self, addr: u32, value: u32) {
-        self.vrom[(self.fp + addr) as usize] = value.into();
+        self.set_vrom_relative(addr, value.into());
     }
 
     fn set_vrom_relative_range(&mut self, addr: u32, values: &[u32]) {
         for (i, &value) in values.iter().enumerate() {
-            self.vrom[(self.fp + addr + i as u32) as usize] = value.into();
+            self.set_vrom_relative(addr + i as u32, value.into());
         }
     }
 
     fn set_vrom_relative_range_future(&mut self, addr: u32, amount: u32) {
         for i in addr..addr + amount {
             let future = self.new_future();
-            self.vrom[(self.fp + i) as usize] = VRomValue::Future(future);
+            self.set_vrom_relative(i, VRomValue::Future(future));
         }
     }
 
@@ -459,6 +488,48 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         self.interpreter.set_ram(ram_addr, value);
+        Ok(())
+    }
+
+    fn write_contiguous(&mut self, byte_addr: u32, data: &[u32]) -> Result<(), ()> {
+        if byte_addr % 4 == 0 {
+            // Simple aligned writes
+            for (i, &value) in data.iter().enumerate() {
+                let addr = byte_addr + (i as u32 * 4);
+                self.set_word(addr, value)?;
+            }
+        } else {
+            // Unaligned writes
+            let offset_bytes = (byte_addr % 4) as usize;
+            let shift = (offset_bytes * 8) as u32;
+            let high_shift = 32u32 - shift;
+
+            let first_word_addr = byte_addr & !3;
+
+            // Handle first partial word
+            let old_first_word = self.get_word(first_word_addr)?;
+            let first_keep_mask = (1u32 << shift) - 1;
+            let mut carry_over = data[0] >> high_shift; // Bytes to write into next word
+            let new_first_word = (old_first_word & first_keep_mask) | (data[0] << shift);
+            self.set_word(first_word_addr, new_first_word)?;
+
+            // Handle full middle words
+            for i in 1..data.len() {
+                let current_addr = first_word_addr + (i as u32 * 4);
+
+                let combined = carry_over | (data[i] << shift);
+                self.set_word(current_addr, combined)?;
+                carry_over = data[i] >> high_shift;
+            }
+
+            // Final partial word (or single-word case)
+            let final_addr = first_word_addr + ((data.len() as u32) * 4);
+            let old_final_word = self.get_word(final_addr)?;
+            let final_keep_mask = 0xFFFFFFFFu32 << (offset_bytes * 8);
+            let new_final_word =
+                (old_final_word & final_keep_mask) | (carry_over & !final_keep_mask);
+            self.set_word(final_addr, new_final_word)?;
+        }
         Ok(())
     }
 }
