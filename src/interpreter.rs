@@ -370,6 +370,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     let ptr = self.allocate(frame_size);
                     self.set_vrom_relative_u32(result_ptr..result_ptr + 1, ptr);
                 }
+                Directive::AllocateFrameV {
+                    frame_size,
+                    result_ptr,
+                } => {
+                    let frame_size = self.get_vrom_relative_u32(frame_size..frame_size + 1);
+                    let ptr = self.allocate(frame_size);
+                    self.set_vrom_relative_u32(result_ptr..result_ptr + 1, ptr);
+                }
                 Directive::Copy {
                     src_word,
                     dest_word,
@@ -396,6 +404,32 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     let prev_pc = self.pc;
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
+
+                    let prev_fp = self.fp;
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+
+                    self.set_vrom_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    self.set_vrom_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                }
+                Directive::CallIndirect {
+                    target_pc,
+                    new_frame_ptr,
+                    saved_ret_pc,
+                    saved_caller_fp,
+                } => {
+                    let prev_pc = self.pc;
+                    self.pc = self.get_vrom_relative_u32(target_pc..target_pc + 1);
+                    should_inc_pc = false;
+
+                    'out: {
+                        for (label, info) in self.labels.iter() {
+                            if info.pc == self.pc {
+                                println!("Calling function: {label} {info:?}");
+                                break 'out;
+                            }
+                        }
+                        panic!("CallIndirect: target PC {} not found in labels", self.pc);
+                    }
 
                     let prev_fp = self.fp;
                     self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
