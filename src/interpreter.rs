@@ -385,12 +385,19 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         self.get_vrom_absolute_u32(self.fp + addr)
     }
 
-    fn get_vrom_relative(&self, addr: u32) -> VRomValue {
-        self.vrom[(self.fp + addr) as usize]
+    fn get_vrom_relative(&mut self, addr: u32) -> VRomValue {
+        self.get_vrom_absolute(self.fp + addr)
     }
 
-    fn get_vrom_absolute(&self, addr: u32) -> VRomValue {
-        self.vrom[addr as usize]
+    fn get_vrom_absolute(&mut self, addr: u32) -> VRomValue {
+        let mut value = self.vrom[addr as usize];
+        if let VRomValue::Unassigned = value {
+            // The only reason to read an unassigned value is to assign it later,
+            // so it must become a Future.
+            value = VRomValue::Future(self.new_future());
+            self.vrom[addr as usize] = value;
+        }
+        value
     }
 
     fn set_vrom_relative(&mut self, addr: u32, value: VRomValue) {
@@ -400,6 +407,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
         let slot = &mut self.vrom[addr as usize];
         match (*slot, value) {
+            (VRomValue::Unassigned, VRomValue::Unassigned) => {
+                // This is important to catch to prevent bugs.
+                panic!("Attempted to assign an unassigned value to VRom");
+            }
             (VRomValue::Unassigned, _) => {
                 *slot = value;
             }
