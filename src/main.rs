@@ -87,4 +87,128 @@ mod tests {
         test_interpreter("collatz.wasm", "collatz", &[1 << 22], &[22]);
         test_interpreter("collatz.wasm", "collatz", &[310], &[86]);
     }
+
+    #[test]
+    fn test_wasm_i32() {
+        test_wasm("i32.wast");
+    }
+
+    fn test_wasm(case: &str) {
+        match extract_wast_test_info(case) {
+            Ok((module, asserts)) => {
+                let module = module.unwrap();
+                asserts
+                    .iter()
+                    .filter(|assert_case| assert_case.function_name == "add")
+                    .for_each(|assert_case| {
+                        println!("Assert test case: {assert_case:#?}");
+                        test_interpreter(
+                            &module,
+                            &assert_case.function_name,
+                            &assert_case.args,
+                            &assert_case.expected,
+                        );
+                    });
+            }
+            Err(e) => panic!("Error extracting wast test info: {e}"),
+        }
+    }
+
+    use serde::Deserialize;
+    use std::fs;
+    use std::process::Command;
+
+    #[derive(Debug, Deserialize)]
+    struct TestFile {
+        commands: Vec<CommandEntry>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "type")]
+    enum CommandEntry {
+        #[serde(rename = "module")]
+        Module { filename: String },
+        #[serde(rename = "assert_return")]
+        AssertReturn { action: Action, expected: Vec<Val> },
+        #[serde(other)]
+        Other,
+    }
+
+    #[derive(Debug)]
+    pub struct AssertCase {
+        pub function_name: String,
+        pub args: Vec<u32>,
+        pub expected: Vec<u32>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct Action {
+        #[serde(rename = "type")]
+        action_type: String,
+        field: Option<String>,
+        args: Option<Vec<Val>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct Val {
+        #[serde(rename = "type")]
+        val_type: String,
+        value: serde_json::Value,
+    }
+
+    pub fn extract_wast_test_info(
+        wast_path: &str,
+    ) -> Result<(Option<String>, Vec<AssertCase>), Box<dyn std::error::Error>> {
+        let json_output_path = format!("{}/sample-programs/test.json", env!("CARGO_MANIFEST_DIR"));
+
+        let output = Command::new("wast2json")
+            .arg(wast_path)
+            .arg("-o")
+            .arg(json_output_path.clone())
+            .output()?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "wast2json failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+
+        let json_text = fs::read_to_string(json_output_path)?;
+        let test_file: TestFile = serde_json::from_str(&json_text)?;
+        let entries = test_file.commands;
+
+        let mut module_file = None;
+        let mut assert_returns = Vec::new();
+
+        for entry in entries {
+            match entry {
+                CommandEntry::Module { filename } => {
+                    module_file = Some(filename);
+                }
+                CommandEntry::AssertReturn { action, expected } => {
+                    if let Some(function_name) = action.field {
+                        let args = action.args.unwrap_or_default();
+                        let args = args
+                            .iter()
+                            .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
+                            .collect::<Vec<_>>();
+                        let expected = expected
+                            .iter()
+                            .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
+                            .collect::<Vec<_>>();
+                        assert_returns.push(AssertCase {
+                            function_name,
+                            args,
+                            expected,
+                        });
+                    }
+                }
+                CommandEntry::Other => {}
+            }
+        }
+
+        Ok((module_file, assert_returns))
+    }
 }
