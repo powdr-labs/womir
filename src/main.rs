@@ -90,16 +90,24 @@ mod tests {
 
     #[test]
     fn test_wasm_i32() {
-        test_wasm("i32.wast", &["add", "sub"]);
+        test_wasm("i32.wast", Some(&["add", "sub", "mul"]));
+        test_wasm("br.wast", None);
     }
 
-    fn test_wasm(case: &str, functions: &[&str]) {
+    fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
             Ok((module, asserts)) => {
+                println!("assert cases: {asserts:#?}");
                 let module = module.unwrap();
                 asserts
                     .iter()
-                    .filter(|assert_case| functions.contains(&assert_case.function_name.as_str()))
+                    .filter(|assert_case| {
+                        if let Some(functions) = functions {
+                            functions.contains(&assert_case.function_name.as_str())
+                        } else {
+                            true
+                        }
+                    })
                     .for_each(|assert_case| {
                         println!("Assert test case: {assert_case:#?}");
                         test_interpreter(
@@ -190,10 +198,22 @@ mod tests {
                 CommandEntry::AssertReturn { action, expected } => {
                     if let Some(function_name) = action.field {
                         let args = action.args.unwrap_or_default();
+                        if args
+                            .iter()
+                            .any(|a| a.val_type.contains("f32") || a.val_type.contains("f64"))
+                        {
+                            continue;
+                        }
                         let args = args
                             .iter()
                             .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
                             .collect::<Vec<_>>();
+                        if expected
+                            .iter()
+                            .any(|a| a.val_type.contains("f32") || a.val_type.contains("f64"))
+                        {
+                            continue;
+                        }
                         let expected = expected
                             .iter()
                             .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
