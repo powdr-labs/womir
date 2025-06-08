@@ -90,16 +90,16 @@ mod tests {
 
     #[test]
     fn test_wasm_i32() {
-        test_wasm("i32.wast");
+        test_wasm("i32.wast", &["add", "sub"]);
     }
 
-    fn test_wasm(case: &str) {
+    fn test_wasm(case: &str, functions: &[&str]) {
         match extract_wast_test_info(case) {
             Ok((module, asserts)) => {
                 let module = module.unwrap();
                 asserts
                     .iter()
-                    .filter(|assert_case| assert_case.function_name == "add")
+                    .filter(|assert_case| functions.contains(&assert_case.function_name.as_str()))
                     .for_each(|assert_case| {
                         println!("Assert test case: {assert_case:#?}");
                         test_interpreter(
