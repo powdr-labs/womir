@@ -31,6 +31,7 @@ use crate::loader::{
     FunctionRef,
     blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
+    flattening::allocate_registers::NotAllocatedError,
 };
 
 use super::{
@@ -609,7 +610,18 @@ fn flatten_frame_tree<'a>(
             node_idx,
             node,
         );
-        directives.push(node_directives);
+        match node_directives {
+            Ok(directive_tree) => {
+                directives.push(directive_tree);
+            }
+            Err(NotAllocatedError) => {
+                // Some required input for this node was not found in the allocation.
+                // This means that the node is unreachable, and we should emit a trap.
+                directives.push(DirectiveTree::Leaf(Directive::Trap {
+                    reason: TrapReason::RegisterAllocatorBug,
+                }));
+            }
+        }
     }
 
     (directives, reg_gen.next_available)
@@ -624,8 +636,8 @@ fn translate_single_node<'a>(
     ret_info: &Option<ReturnInfo>,
     node_idx: usize,
     node: Node<'a>,
-) -> DirectiveTree<'a> {
-    match node.operation {
+) -> Result<DirectiveTree<'a>, NotAllocatedError> {
+    Ok(match node.operation {
         Operation::Inputs => {
             // Inputs does not translate to any assembly directive. It is used on the node tree for its outputs.
             DirectiveTree::Empty
@@ -720,7 +732,6 @@ fn translate_single_node<'a>(
                 ret_info: loop_ret_info.clone(),
                 saved_fps: loop_outer_fps,
                 input_regs: loop_allocation
-                    .nodes_outputs
                     .iter()
                     .take_while(|(val_origin, _)| val_origin.node == 0)
                     .map(|(_, reg)| reg.clone())
@@ -736,7 +747,7 @@ fn translate_single_node<'a>(
                 ret_info.as_ref(),
                 ctrl_stack.front().unwrap(),
                 &node.inputs,
-            );
+            )?;
 
             // Emit the listing for the loop itself.
             ctrl_stack.push_front(CtrlStackEntry {
@@ -774,7 +785,7 @@ fn translate_single_node<'a>(
             &node.inputs,
             &target,
             ctrl_stack,
-        )
+        )?
         .into(),
         Operation::BrIfZero(target) => {
             let curr_entry = ctrl_stack.front().unwrap();
@@ -782,7 +793,7 @@ fn translate_single_node<'a>(
             // Get the conditional variable from the inputs.
             let mut inputs = node.inputs;
             let cond_origin = inputs.pop().unwrap();
-            let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
+            let cond_reg = curr_entry.allocation.get(&cond_origin)?;
             assert_reg(&cond_reg, bytes_per_word, ValType::I32);
 
             let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
@@ -802,7 +813,7 @@ fn translate_single_node<'a>(
                     &inputs,
                     &target,
                     ctrl_stack,
-                )
+                )?
                 .into(),
                 // Emit the continuation label.
                 Directive::Label {
@@ -818,7 +829,7 @@ fn translate_single_node<'a>(
             // Get the conditional variable from the inputs.
             let mut inputs = node.inputs;
             let cond_origin = inputs.pop().unwrap();
-            let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
+            let cond_reg = curr_entry.allocation.get(&cond_origin)?;
             assert_reg(&cond_reg, bytes_per_word, ValType::I32);
 
             // Generate the jump instructions
@@ -829,7 +840,7 @@ fn translate_single_node<'a>(
                 &inputs,
                 &target,
                 ctrl_stack,
-            ))
+            )?)
             .flatten();
 
             // If the jump_directives is one plain jump to a local label, we can
@@ -880,7 +891,7 @@ fn translate_single_node<'a>(
             let curr_entry = ctrl_stack.front().unwrap();
 
             let mut node_inputs = node.inputs;
-            let selector = curr_entry.allocation.nodes_outputs[&node_inputs.pop().unwrap()].clone();
+            let selector = curr_entry.allocation.get(&node_inputs.pop().unwrap())?;
 
             let mut jump_instructions = targets
                 .into_iter()
@@ -903,7 +914,7 @@ fn translate_single_node<'a>(
                         ctrl_stack,
                     )
                 })
-                .collect_vec();
+                .collect::<Result<Vec<_>, _>>()?;
 
             // The last target is special, because it is the default target.
             let default_target = DirectiveTree::Node(jump_instructions.pop().unwrap()).flatten();
@@ -1061,16 +1072,15 @@ fn translate_single_node<'a>(
                 // Imported functions are kinda like system calls, and we assume
                 // the implementation can access the input and output registers directly,
                 // so we just have to emit the call directive.
-                let inputs = map_input_into_regs(node.inputs, curr_entry);
+                let inputs = map_input_into_regs(node.inputs, curr_entry)?;
                 let outputs = (0..node.output_types.len())
                     .map(|output_idx| {
-                        curr_entry.allocation.nodes_outputs[&ValueOrigin {
+                        curr_entry.allocation.get(&ValueOrigin {
                             node: node_idx,
                             output_idx: output_idx as u32,
-                        }]
-                            .clone()
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 Directive::ImportedCall {
                     module,
@@ -1088,8 +1098,8 @@ fn translate_single_node<'a>(
                 let inputs = node
                     .inputs
                     .into_iter()
-                    .map(|origin| curr_entry.allocation.nodes_outputs[&origin].clone())
-                    .collect();
+                    .map(|origin| curr_entry.allocation.get(&origin))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let (call_directives, this_ret_info) = prepare_function_call(
                     bytes_per_word,
                     inputs,
@@ -1097,7 +1107,7 @@ fn translate_single_node<'a>(
                     node.output_types.len(),
                     curr_entry,
                     func_frame_ptr.start,
-                );
+                )?;
 
                 DirectiveTree::Node(vec![
                     Directive::AllocateFrameI {
@@ -1126,7 +1136,7 @@ fn translate_single_node<'a>(
             // the space for it and emit the table.get directive.
 
             // The last input of the CallIndirect operation is the table entry, the others are the function arguments.
-            let mut inputs = map_input_into_regs(node.inputs, curr_entry);
+            let mut inputs = map_input_into_regs(node.inputs, curr_entry)?;
             let table_get_inputs = vec![inputs.pop().unwrap()];
 
             let func_ref_reg = reg_gen.allocate_type(bytes_per_word, ValType::FUNCREF);
@@ -1149,7 +1159,7 @@ fn translate_single_node<'a>(
                 node.output_types.len(),
                 curr_entry,
                 func_frame_ptr.start,
-            );
+            )?;
 
             DirectiveTree::Node(vec![
                 Directive::WASMOp {
@@ -1215,16 +1225,13 @@ fn translate_single_node<'a>(
             // Everything else is a normal operation, which will be forwarded almost as is.
             // Only that the registers inputs and output are explicit.
             let curr_entry = ctrl_stack.front().unwrap();
-            let inputs = map_input_into_regs(node.inputs, curr_entry);
+            let inputs = map_input_into_regs(node.inputs, curr_entry)?;
             let output = match node.output_types.len() {
                 0 => None,
-                1 => Some(
-                    curr_entry.allocation.nodes_outputs[&ValueOrigin {
-                        node: node_idx,
-                        output_idx: 0,
-                    }]
-                        .clone(),
-                ),
+                1 => Some(curr_entry.allocation.get(&ValueOrigin {
+                    node: node_idx,
+                    output_idx: 0,
+                })?),
                 _ => {
                     // WASM instructions have at most one output, so this is a bug.
                     panic!()
@@ -1232,7 +1239,7 @@ fn translate_single_node<'a>(
             };
             Directive::WASMOp { op, inputs, output }.into()
         }
-    }
+    })
 }
 
 fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
@@ -1246,10 +1253,10 @@ fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
 fn map_input_into_regs(
     node_inputs: Vec<ValueOrigin>,
     curr_entry: &CtrlStackEntry,
-) -> Vec<Range<u32>> {
+) -> Result<Vec<Range<u32>>, NotAllocatedError> {
     node_inputs
         .into_iter()
-        .map(|origin| curr_entry.allocation.nodes_outputs[&origin].clone())
+        .map(|origin| curr_entry.allocation.get(&origin))
         .collect()
 }
 
@@ -1277,7 +1284,7 @@ fn prepare_function_call<'a>(
     num_outputs: usize,
     curr_entry: &CtrlStackEntry,
     frame_ptr: u32,
-) -> (Vec<DirectiveTree<'a>>, ReturnInfo) {
+) -> Result<(Vec<DirectiveTree<'a>>, ReturnInfo), NotAllocatedError> {
     let mut directives = Vec::new();
 
     // Generate the registers in the order expected by the calling convention.
@@ -1292,16 +1299,15 @@ fn prepare_function_call<'a>(
         directives.push(copy_into_frame(src_reg, frame_ptr, dest_reg).into());
     }
     for output_idx in 0..num_outputs {
-        let src_reg = curr_entry.allocation.nodes_outputs[&ValueOrigin {
+        let src_reg = curr_entry.allocation.get(&ValueOrigin {
             node: node_idx,
             output_idx: output_idx as u32,
-        }]
-            .clone();
+        })?;
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
         directives.push(copy_into_frame(src_reg, frame_ptr, dest_reg).into());
     }
 
-    (directives, ret_info)
+    Ok((directives, ret_info))
 }
 
 fn emit_jump<'a>(
@@ -1311,7 +1317,7 @@ fn emit_jump<'a>(
     node_inputs: &[ValueOrigin],
     target: &BreakTarget,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
-) -> Vec<DirectiveTree<'a>> {
+) -> Result<Vec<DirectiveTree<'a>>, NotAllocatedError> {
     // There are 5 different kinds of jumps, depending on the target:
     //
     // 1. Jump to a label in the current frame. We need to check if the break arguments have
@@ -1401,11 +1407,11 @@ fn copy_local_jump_args<'a>(
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     output_regs: &[Range<u32>],
-) -> Vec<DirectiveTree<'a>> {
+) -> Result<Vec<DirectiveTree<'a>>, NotAllocatedError> {
     // Copy the node inputs into the output registers, if they are not already assigned.
     let mut directives = Vec::new();
     for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
-        let src_reg = &allocation.nodes_outputs[origin];
+        let src_reg = &allocation.get(origin)?;
         if src_reg != dest_reg {
             directives.extend(src_reg.clone().zip_eq(dest_reg.clone()).map(
                 move |(src_word, dest_word)| {
@@ -1418,17 +1424,17 @@ fn copy_local_jump_args<'a>(
             ));
         }
     }
-    directives
+    Ok(directives)
 }
 
 fn local_jump<'a>(
     label_id: u32,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
-) -> Vec<DirectiveTree<'a>> {
+) -> Result<Vec<DirectiveTree<'a>>, NotAllocatedError> {
     // Copy the node inputs into the output registers, if they are not already assigned.
     let output_regs = &allocation.labels[&label_id];
-    let mut directives = copy_local_jump_args(allocation, node_inputs, output_regs);
+    let mut directives = copy_local_jump_args(allocation, node_inputs, output_regs)?;
 
     // Emit the jump directive.
     directives.push(
@@ -1438,7 +1444,7 @@ fn local_jump<'a>(
         .into(),
     );
 
-    directives
+    Ok(directives)
 }
 
 fn top_level_return<'a>(
@@ -1447,9 +1453,9 @@ fn top_level_return<'a>(
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     output_regs: &[Range<u32>],
-) -> Vec<DirectiveTree<'a>> {
+) -> Result<Vec<DirectiveTree<'a>>, NotAllocatedError> {
     // Copy the node inputs into the output registers, if they are not already assigned.
-    let mut directives = copy_local_jump_args(allocation, node_inputs, output_regs);
+    let mut directives = copy_local_jump_args(allocation, node_inputs, output_regs)?;
 
     // Emit the return directive.
     assert_ptr_size(bytes_per_word, &ret_info.ret_pc);
@@ -1462,7 +1468,7 @@ fn top_level_return<'a>(
         .into(),
     );
 
-    directives
+    Ok(directives)
 }
 
 fn return_from_loop<'a>(
@@ -1472,7 +1478,7 @@ fn return_from_loop<'a>(
     node_inputs: &[ValueOrigin],
     allocation: &Allocation,
     curr_entry: &LoopStackEntry,
-) -> Vec<DirectiveTree<'a>> {
+) -> Result<Vec<DirectiveTree<'a>>, NotAllocatedError> {
     let mut directives = Vec::new();
 
     if !output_regs.is_empty() {
@@ -1488,7 +1494,7 @@ fn return_from_loop<'a>(
 
         // Issue the copy directives.
         for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
-            let src_reg = allocation.nodes_outputs[origin].clone();
+            let src_reg = allocation.get(origin)?;
             directives.extend(copy_into_frame(src_reg, toplevel_fp, dest_reg.clone()));
         }
     }
@@ -1506,7 +1512,7 @@ fn return_from_loop<'a>(
         .into(),
     );
 
-    directives
+    Ok(directives)
 }
 
 fn jump_out_of_loop<'a>(
@@ -1515,7 +1521,7 @@ fn jump_out_of_loop<'a>(
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
     node_inputs: &[ValueOrigin],
-) -> Vec<DirectiveTree<'a>> {
+) -> Result<Vec<DirectiveTree<'a>>, NotAllocatedError> {
     let caller_entry = ctrl_stack.front().unwrap();
     let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
         &curr_entry.saved_fps[..]
@@ -1531,7 +1537,7 @@ fn jump_out_of_loop<'a>(
 
     let mut directives = Vec::new();
     for (origin, dest_reg) in node_inputs.iter().zip_eq(target_inputs.iter()) {
-        let src_reg = caller_entry.allocation.nodes_outputs[origin].clone();
+        let src_reg = caller_entry.allocation.get(origin)?;
         directives.push(copy_into_frame(src_reg, dest_fp, dest_reg.clone()).into());
     }
 
@@ -1545,7 +1551,7 @@ fn jump_out_of_loop<'a>(
         .into(),
     );
 
-    directives
+    Ok(directives)
 }
 
 fn get_fp_from_sorted(
@@ -1573,7 +1579,7 @@ fn jump_into_loop<'a>(
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
     node_inputs: &[ValueOrigin],
-) -> Vec<DirectiveTree<'a>> {
+) -> Result<Vec<DirectiveTree<'a>>, NotAllocatedError> {
     let mut directives: Vec<DirectiveTree<'a>> = Vec::new();
 
     // We start by allocating the frame.
@@ -1660,7 +1666,7 @@ fn jump_into_loop<'a>(
 
     // Copy the loop inputs into the loop frame.
     for (origin, input_reg) in node_inputs.iter().zip_eq(loop_entry.input_regs.iter()) {
-        let src_reg = caller_stack_entry.allocation.nodes_outputs[origin].clone();
+        let src_reg = caller_stack_entry.allocation.get(origin)?;
         directives.extend(copy_into_frame(src_reg, loop_fp.start, input_reg.clone()));
     }
 
@@ -1677,7 +1683,7 @@ fn jump_into_loop<'a>(
         .into(),
     );
 
-    directives
+    Ok(directives)
 }
 
 enum LabelType {

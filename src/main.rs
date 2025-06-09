@@ -115,7 +115,6 @@ mod tests {
 
     #[test]
     fn test_wasm_block() {
-        env_logger::init();
         test_wasm("wasm_testsuite/block.wast", None);
     }
 
