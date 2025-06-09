@@ -27,7 +27,7 @@ This files describes all the optimizations ideas we left out for now.
   remain orphaned Const nodes in the DAG. These nodes should be
   eliminated.
 
-- [dag]: as a generalization of the previous point, if the output
+- [dag]: as a generalization of the previous point, if the output of
   **pure** nodes are not used by any other node, they can be removed.
   It requires knowing what nodes have side effects or not. This is
   not as important as the case of Const nodes, if we assume optimized
