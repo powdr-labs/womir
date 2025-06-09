@@ -91,8 +91,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
-        println!("Labels: {:?}", self.labels);
-        println!("Func name: {func_name}");
         let func_label = &self.labels[func_name];
 
         let func_type = self.program.get_func_type(func_label.func_idx.unwrap());
@@ -622,6 +620,21 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .expect("Out of bounds read");
 
                         self.set_vrom_relative_range(output_reg, &value);
+                    }
+                    Op::I32Load8U { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let byte = memory.read_contiguous(addr, 1).expect("Out of bounds read")[0];
+
+                        self.set_vrom_relative_range(output_reg, &[byte]);
                     }
                     Op::TableGet { table } => {
                         assert_eq!(inputs[0].len(), 1);
