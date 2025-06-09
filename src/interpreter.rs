@@ -629,14 +629,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
-                        println!(
-                            "Loading byte from address: {addr}, inputs = {:?}, offfset = {}",
-                            inputs, memarg.offset
-                        );
                         assert_eq!(memarg.memory, 0);
-                        for e in self.ram.iter() {
-                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
-                        }
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
                         let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
@@ -651,21 +644,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
-                        println!(
-                            "Loading signed byte from address: {addr}, inputs = {:?}, offset = {}",
-                            inputs, memarg.offset
-                        );
                         assert_eq!(memarg.memory, 0);
-
-                        for e in self.ram.iter() {
-                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
-                        }
 
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
                         let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
 
-                        // Sign-extend to i8, convert to i32, then cast to u8 to store the lower byte only
                         let signed = (byte as i8) as i32;
                         let truncated = signed as u8;
 
@@ -679,15 +663,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
-                        println!(
-                            "Loading u16 from address: {addr}, inputs = {:?}, offset = {}",
-                            inputs, memarg.offset
-                        );
                         assert_eq!(memarg.memory, 0);
-
-                        for e in self.ram.iter() {
-                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
-                        }
 
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
@@ -703,15 +679,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
-                        println!(
-                            "Loading i16 from address: {addr}, inputs = {:?}, offset = {}",
-                            inputs, memarg.offset
-                        );
                         assert_eq!(memarg.memory, 0);
-
-                        for e in self.ram.iter() {
-                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
-                        }
 
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
