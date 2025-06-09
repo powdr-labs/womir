@@ -629,12 +629,101 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
+                        println!(
+                            "Loading byte from address: {addr}, inputs = {:?}, offfset = {}",
+                            inputs, memarg.offset
+                        );
                         assert_eq!(memarg.memory, 0);
+                        for e in self.ram.iter() {
+                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
+                        }
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let byte =
+                            memory.read_contiguous(addr, 1).expect("Out of bounds read")[0] & 0xff;
+
+                        self.set_vrom_relative_range(output_reg, &[byte]);
+                    }
+                    Op::I32Load8S { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        println!(
+                            "Loading signed byte from address: {addr}, inputs = {:?}, offset = {}",
+                            inputs, memarg.offset
+                        );
+                        assert_eq!(memarg.memory, 0);
+
+                        for e in self.ram.iter() {
+                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
+                        }
+
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
                         let byte = memory.read_contiguous(addr, 1).expect("Out of bounds read")[0];
 
-                        self.set_vrom_relative_range(output_reg, &[byte]);
+                        // Sign-extend to i8, convert to i32, then cast to u8 to store the lower byte only
+                        let signed = (byte as i8) as i32;
+                        let truncated = signed as u8;
+
+                        self.set_vrom_relative_range(output_reg, &[truncated as u32]);
+                    }
+                    Op::I32Load16U { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        println!(
+                            "Loading u16 from address: {addr}, inputs = {:?}, offset = {}",
+                            inputs, memarg.offset
+                        );
+                        assert_eq!(memarg.memory, 0);
+
+                        for e in self.ram.iter() {
+                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
+                        }
+
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let bytes = memory.read_contiguous(addr, 1).expect("Out of bounds read")[0]
+                            & 0xffff;
+
+                        self.set_vrom_relative_range(output_reg, &[bytes]);
+                    }
+                    Op::I32Load16S { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        println!(
+                            "Loading i16 from address: {addr}, inputs = {:?}, offset = {}",
+                            inputs, memarg.offset
+                        );
+                        assert_eq!(memarg.memory, 0);
+
+                        for e in self.ram.iter() {
+                            println!("RAM[{}] = 0x{:x}", e.0, e.1);
+                        }
+
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let bytes = memory.read_contiguous(addr, 1).expect("Out of bounds read")[0]
+                            & 0xffff;
+
+                        let sign_extended = bytes as i32;
+                        let truncated = sign_extended as u16;
+
+                        self.set_vrom_relative_range(output_reg, &[truncated as u32]);
                     }
                     Op::TableGet { table } => {
                         assert_eq!(inputs[0].len(), 1);
