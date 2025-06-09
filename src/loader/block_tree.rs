@@ -281,11 +281,12 @@ fn parse_contents<'a>(
                 true
             }
             Operator::BrTable { targets } => {
-                let targets = targets
+                let mut t = targets
                     .targets()
-                    .map(|target| target)
                     .collect::<wasmparser::Result<Vec<u32>>>()?;
-                output_elements.push(Instruction::BrTable { targets }.into());
+                // Default target goes last.
+                t.push(targets.default());
+                output_elements.push(Instruction::BrTable { targets: t }.into());
 
                 false
             }

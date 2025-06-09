@@ -707,11 +707,11 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 );
             }
             Payload::CodeSectionEntry(function) => {
-                log::debug!("Code Section Entry found");
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
                 let func_idx = ctx.functions.len() as u32;
+                log::debug!("Code Section Entry found, function {func_idx}");
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
 
