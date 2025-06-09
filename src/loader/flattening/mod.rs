@@ -29,7 +29,7 @@ use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
     FunctionRef,
-    blockless_dag::{BreakTarget, TargetType},
+    blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
 };
 
@@ -154,9 +154,67 @@ pub enum Directive<'a> {
     },
 }
 
+enum DirectiveTree<'a> {
+    Empty,
+    Leaf(Directive<'a>),
+    VecLeaf(Vec<Directive<'a>>),
+    Node(Vec<DirectiveTree<'a>>),
+}
+
+impl<'a> From<Directive<'a>> for DirectiveTree<'a> {
+    fn from(directive: Directive<'a>) -> Self {
+        DirectiveTree::Leaf(directive)
+    }
+}
+
+impl<'a> From<Vec<Directive<'a>>> for DirectiveTree<'a> {
+    fn from(directives: Vec<Directive<'a>>) -> Self {
+        DirectiveTree::VecLeaf(directives)
+    }
+}
+
+impl<'a> From<Vec<DirectiveTree<'a>>> for DirectiveTree<'a> {
+    fn from(directives: Vec<DirectiveTree<'a>>) -> Self {
+        if directives.is_empty() {
+            DirectiveTree::Empty
+        } else {
+            DirectiveTree::Node(directives)
+        }
+    }
+}
+
+impl<'a> DirectiveTree<'a> {
+    fn flatten(self) -> Vec<Directive<'a>> {
+        fn flatten_rec<'b>(dnode: DirectiveTree<'b>, directives: &mut Vec<Directive<'b>>) {
+            match dnode {
+                DirectiveTree::Empty => {}
+                DirectiveTree::Leaf(directive) => {
+                    directives.push(directive);
+                }
+                DirectiveTree::VecLeaf(directives_vec) => {
+                    directives.extend(directives_vec);
+                }
+                DirectiveTree::Node(children) => {
+                    for child in children {
+                        flatten_rec(child, directives);
+                    }
+                }
+            }
+        }
+
+        let mut directives = Vec::new();
+        flatten_rec(self, &mut directives);
+        directives
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TrapReason {
-    Unreachable,
+    UnreachableInstruction,
+    /// This trap happens if an instruction that was deemed unreachable
+    /// by the register allocator is actually executed. In this case,
+    /// there is necessarily a bug in the register allocator.
+    RegisterAllocatorBug,
     WrongIndirectCallFunctionType,
 }
 
@@ -276,7 +334,8 @@ impl Display for Directive<'_> {
             Directive::Trap { reason } => {
                 write!(f, "    Trap")?;
                 match reason {
-                    TrapReason::Unreachable => write!(f, " (unreachable)")?,
+                    TrapReason::UnreachableInstruction => write!(f, " (unreachable instruction)")?,
+                    TrapReason::RegisterAllocatorBug => write!(f, " (register allocator bug)")?,
                     TrapReason::WrongIndirectCallFunctionType => {
                         write!(f, " (wrong indirect call function type)")?
                     }
@@ -488,22 +547,7 @@ pub fn flatten_dag<'a>(
         allocation,
     }]);
 
-    // This first element is just a placeholder for the function label we will fill later.
-    let mut directives = vec![Directive::Label {
-        id: String::new(),
-        frame_size: None,
-    }];
-
-    // If this function is exported, we also add a placeholder for its name as a label.
-    let exported_name = module.get_exported_func(func_idx);
-    if exported_name.is_some() {
-        directives.push(Directive::Label {
-            id: String::new(),
-            frame_size: None,
-        });
-    }
-
-    let frame_size = flatten_frame_tree(
+    let (directives, frame_size) = flatten_frame_tree(
         module,
         dag,
         bytes_per_word,
@@ -511,22 +555,30 @@ pub fn flatten_dag<'a>(
         label_gen,
         &mut ctrl_stack,
         Some(ret_info),
-        &mut directives,
     );
 
     // Now we can fill the function label with the actual frame size.
-    directives[0] = Directive::Label {
-        id: format_label(func_idx, LabelType::Function),
-        frame_size: Some(frame_size),
-    };
-
-    if let Some(name) = exported_name {
-        // Fill the exported function label with the name.
-        directives[1] = Directive::Label {
-            id: name.to_string(),
+    let mut directives_with_labels = vec![
+        Directive::Label {
+            id: format_label(func_idx, LabelType::Function),
             frame_size: Some(frame_size),
-        };
+        }
+        .into(),
+    ];
+
+    if let Some(name) = module.get_exported_func(func_idx) {
+        // Fill the exported function label with the name.
+        directives_with_labels.push(
+            Directive::Label {
+                id: name.to_string(),
+                frame_size: Some(frame_size),
+            }
+            .into(),
+        );
     }
+    directives_with_labels.push(DirectiveTree::Node(directives));
+
+    let directives = DirectiveTree::Node(directives_with_labels).flatten();
 
     WriteOnceASM {
         func_idx,
@@ -543,579 +595,644 @@ fn flatten_frame_tree<'a>(
     label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: Option<ReturnInfo>,
-    directives: &mut Vec<Directive<'a>>,
-) -> u32 {
+) -> (Vec<DirectiveTree<'a>>, u32) {
+    let mut directives = Vec::new();
+
     for (node_idx, node) in dag.nodes.into_iter().enumerate() {
-        match node.operation {
-            Operation::Inputs => {
-                // Inputs does not translate to any assembly directive. It is used on the node tree for its outputs.
+        let node_directives = translate_single_node(
+            ctx,
+            bytes_per_word,
+            &mut reg_gen,
+            label_gen,
+            ctrl_stack,
+            &ret_info,
+            node_idx,
+            node,
+        );
+        directives.push(node_directives);
+    }
+
+    (directives, reg_gen.next_available)
+}
+
+fn translate_single_node<'a>(
+    ctx: &Program<'a>,
+    bytes_per_word: u32,
+    mut reg_gen: &mut RegisterGenerator,
+    label_gen: &mut RangeFrom<u32>,
+    ctrl_stack: &mut VecDeque<CtrlStackEntry>,
+    ret_info: &Option<ReturnInfo>,
+    node_idx: usize,
+    node: Node<'a>,
+) -> DirectiveTree<'a> {
+    match node.operation {
+        Operation::Inputs => {
+            // Inputs does not translate to any assembly directive. It is used on the node tree for its outputs.
+            DirectiveTree::Empty
+        }
+        Operation::Label { id } => {
+            // This is a local label.
+            Directive::Label {
+                id: format_label(id, LabelType::Local),
+                frame_size: None,
             }
-            Operation::Label { id } => {
-                // This is a local label.
-                directives.push(Directive::Label {
-                    id: format_label(id, LabelType::Local),
-                    frame_size: None,
-                });
-            }
-            Operation::Loop {
-                sub_dag,
-                break_targets,
-            } => {
-                let mut loop_reg_gen = RegisterGenerator::new();
+            .into()
+        }
+        Operation::Loop {
+            sub_dag,
+            break_targets,
+        } => {
+            let mut loop_reg_gen = RegisterGenerator::new();
 
-                // If None, this loop does not return from the function nor iterate to any outer loop.
-                let shallowest_iter_or_ret = break_targets
-                    .iter()
-                    .find(|(_, targets)| targets.first() == Some(&TargetType::FunctionOrLoop))
-                    .map(|(depth, _)| *depth);
+            // If None, this loop does not return from the function nor iterate to any outer loop.
+            let shallowest_iter_or_ret = break_targets
+                .iter()
+                .find(|(_, targets)| targets.first() == Some(&TargetType::FunctionOrLoop))
+                .map(|(depth, _)| *depth);
 
-                let mut saved_fps = BTreeSet::new();
-                let toplevel_frame_idx = ctrl_stack.len() as u32 - 1;
+            let mut saved_fps = BTreeSet::new();
+            let toplevel_frame_idx = ctrl_stack.len() as u32 - 1;
 
-                // Test if the loop can return from the function. If so, we need to
-                // forward the return info.
-                let loop_ret_info = if ret_info.is_some() && shallowest_iter_or_ret.is_some() {
-                    let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-                    let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+            // Test if the loop can return from the function. If so, we need to
+            // forward the return info.
+            let loop_ret_info = if ret_info.is_some() && shallowest_iter_or_ret.is_some() {
+                let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
 
-                    // If the function has outputs, we need to save the toplevel frame pointer, too.
-                    if let CtrlStackType::TopLevelFunction { output_regs } =
-                        &ctrl_stack.back().unwrap().entry_type
-                    {
-                        if !output_regs.is_empty() {
-                            saved_fps.insert(toplevel_frame_idx);
-                        }
-                    }
-
-                    Some(ReturnInfo { ret_pc, ret_fp })
-                } else {
-                    None
-                };
-
-                // Select the outer frame pointers that are saved in the current frame, and
-                // the loop will need in order to start iterations of some outer loop.
-                //
-                // There seems to be a recursive proof that all the copied frames are necessary,
-                // and the set is complete, but I only remember proving it in my head, not the
-                // proof itself.
-                if let (CtrlStackType::Loop(this_frame), Some(shallowest)) = (
-                    &ctrl_stack.front().unwrap().entry_type,
-                    shallowest_iter_or_ret,
-                ) {
-                    let s = &this_frame.saved_fps;
-                    let start_i = s.partition_point(|(depth, _)| *depth < shallowest);
-                    saved_fps.extend(s[start_i..].iter().map(|(depth, _)| *depth));
-                };
-
-                // Select the frame pointers needed to break into outer frames.
-                for (depth, targets) in break_targets.iter() {
-                    for target in targets {
-                        if let TargetType::Label(_) = target {
-                            saved_fps.insert(*depth);
-                            break;
-                        }
+                // If the function has outputs, we need to save the toplevel frame pointer, too.
+                if let CtrlStackType::TopLevelFunction { output_regs } =
+                    &ctrl_stack.back().unwrap().entry_type
+                {
+                    if !output_regs.is_empty() {
+                        saved_fps.insert(toplevel_frame_idx);
                     }
                 }
 
-                // Actually allocate the slots for the saved frame pointers.
-                let loop_outer_fps = saved_fps
-                    .into_iter()
-                    .map(|depth| {
-                        let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-                        (depth + 1, outer_fp)
-                    })
-                    .collect();
+                Some(ReturnInfo { ret_pc, ret_fp })
+            } else {
+                None
+            };
 
-                // Finally allocate all the registers for the loop instructions, including the inputs.
-                let loop_allocation =
-                    optimistic_allocation(&sub_dag, bytes_per_word, &mut loop_reg_gen);
+            // Select the outer frame pointers that are saved in the current frame, and
+            // the loop will need in order to start iterations of some outer loop.
+            //
+            // There seems to be a recursive proof that all the copied frames are necessary,
+            // and the set is complete, but I only remember proving it in my head, not the
+            // proof itself.
+            if let (CtrlStackType::Loop(this_frame), Some(shallowest)) = (
+                &ctrl_stack.front().unwrap().entry_type,
+                shallowest_iter_or_ret,
+            ) {
+                let s = &this_frame.saved_fps;
+                let start_i = s.partition_point(|(depth, _)| *depth < shallowest);
+                saved_fps.extend(s[start_i..].iter().map(|(depth, _)| *depth));
+            };
 
-                // Sanity check: loops have no outputs:
-                assert!(node.output_types.is_empty());
+            // Select the frame pointers needed to break into outer frames.
+            for (depth, targets) in break_targets.iter() {
+                for target in targets {
+                    if let TargetType::Label(_) = target {
+                        saved_fps.insert(*depth);
+                        break;
+                    }
+                }
+            }
 
-                // This struct contains everything we need to fill in order to jump into the loop.
-                let loop_entry = LoopStackEntry {
-                    label: format_label(label_gen.next().unwrap(), LabelType::Loop),
-                    ret_info: loop_ret_info.clone(),
-                    saved_fps: loop_outer_fps,
-                    input_regs: loop_allocation
-                        .nodes_outputs
-                        .iter()
-                        .take_while(|(val_origin, _)| val_origin.node == 0)
-                        .map(|(_, reg)| reg.clone())
-                        .collect(),
-                };
+            // Actually allocate the slots for the saved frame pointers.
+            let loop_outer_fps = saved_fps
+                .into_iter()
+                .map(|depth| {
+                    let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                    (depth + 1, outer_fp)
+                })
+                .collect();
 
-                // We can now emit all the instructions to enter the loop.
-                jump_into_loop(
-                    bytes_per_word,
-                    &loop_entry,
-                    &mut reg_gen,
-                    -1,
-                    ret_info.as_ref(),
-                    ctrl_stack.front().unwrap(),
-                    &node.inputs,
-                    directives,
-                );
+            // Finally allocate all the registers for the loop instructions, including the inputs.
+            let loop_allocation =
+                optimistic_allocation(&sub_dag, bytes_per_word, &mut loop_reg_gen);
 
-                // Finally, we actually emit the listing for the loop itself.
-                // Start with a placeholder for the label, which we will fill
-                // after we have its frame size.
-                let loop_label_idx = directives.len();
-                directives.push(Directive::Label {
-                    id: String::new(),
-                    frame_size: None,
-                });
+            // Sanity check: loops have no outputs:
+            assert!(node.output_types.is_empty());
 
-                ctrl_stack.push_front(CtrlStackEntry {
-                    entry_type: CtrlStackType::Loop(loop_entry),
-                    allocation: loop_allocation,
-                });
-                let loop_frame_size = flatten_frame_tree(
-                    ctx,
-                    sub_dag,
-                    bytes_per_word,
-                    loop_reg_gen,
-                    label_gen,
-                    ctrl_stack,
-                    loop_ret_info,
-                    directives,
-                );
-                let CtrlStackType::Loop(loop_entry) = ctrl_stack.pop_front().unwrap().entry_type
-                else {
-                    unreachable!()
-                };
+            // This struct contains everything we need to fill in order to jump into the loop.
+            let loop_entry = LoopStackEntry {
+                label: format_label(label_gen.next().unwrap(), LabelType::Loop),
+                ret_info: loop_ret_info.clone(),
+                saved_fps: loop_outer_fps,
+                input_regs: loop_allocation
+                    .nodes_outputs
+                    .iter()
+                    .take_while(|(val_origin, _)| val_origin.node == 0)
+                    .map(|(_, reg)| reg.clone())
+                    .collect(),
+            };
 
-                // Fix the label directive with the actual label and frame size.
-                directives[loop_label_idx] = Directive::Label {
+            // Emit all the instructions to enter the loop.
+            let enter_loop_directives = jump_into_loop(
+                bytes_per_word,
+                &loop_entry,
+                &mut reg_gen,
+                -1,
+                ret_info.as_ref(),
+                ctrl_stack.front().unwrap(),
+                &node.inputs,
+            );
+
+            // Emit the listing for the loop itself.
+            ctrl_stack.push_front(CtrlStackEntry {
+                entry_type: CtrlStackType::Loop(loop_entry),
+                allocation: loop_allocation,
+            });
+            let (loop_directives, loop_frame_size) = flatten_frame_tree(
+                ctx,
+                sub_dag,
+                bytes_per_word,
+                loop_reg_gen,
+                label_gen,
+                ctrl_stack,
+                loop_ret_info,
+            );
+            let CtrlStackType::Loop(loop_entry) = ctrl_stack.pop_front().unwrap().entry_type else {
+                unreachable!()
+            };
+
+            // Assemble the complete listing for this loop.
+            DirectiveTree::Node(vec![
+                enter_loop_directives.into(),
+                Directive::Label {
                     id: loop_entry.label,
                     frame_size: Some(loop_frame_size),
-                };
-            }
-            Operation::Br(target) => {
-                directives.extend(emit_jump(
-                    bytes_per_word,
-                    &mut reg_gen,
-                    ret_info.as_ref(),
-                    &node.inputs,
-                    &target,
-                    ctrl_stack,
-                ));
-            }
-            Operation::BrIfZero(target) => {
-                let curr_entry = ctrl_stack.front().unwrap();
+                }
+                .into(),
+                loop_directives.into(),
+            ])
+        }
+        Operation::Br(target) => emit_jump(
+            bytes_per_word,
+            &mut reg_gen,
+            ret_info.as_ref(),
+            &node.inputs,
+            &target,
+            ctrl_stack,
+        )
+        .into(),
+        Operation::BrIfZero(target) => {
+            let curr_entry = ctrl_stack.front().unwrap();
 
-                // Get the conditional variable from the inputs.
-                let mut inputs = node.inputs;
-                let cond_origin = inputs.pop().unwrap();
-                let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
-                assert_reg(&cond_reg, bytes_per_word, ValType::I32);
+            // Get the conditional variable from the inputs.
+            let mut inputs = node.inputs;
+            let cond_origin = inputs.pop().unwrap();
+            let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
+            assert_reg(&cond_reg, bytes_per_word, ValType::I32);
 
-                let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+            let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
 
+            DirectiveTree::Node(vec![
                 // Emit the jump if the condition is non-zero.
-                directives.push(Directive::JumpIf {
+                Directive::JumpIf {
                     target: cont_label.clone(),
                     condition: cond_reg.start,
-                });
-
+                }
+                .into(),
                 // Emit the jump to the target label.
-                directives.extend(emit_jump(
+                emit_jump(
                     bytes_per_word,
                     &mut reg_gen,
                     ret_info.as_ref(),
                     &inputs,
                     &target,
                     ctrl_stack,
-                ));
-
+                )
+                .into(),
                 // Emit the continuation label.
-                directives.push(Directive::Label {
+                Directive::Label {
                     id: cont_label,
                     frame_size: None,
-                });
-            }
-            Operation::BrIf(target) => {
-                let curr_entry = ctrl_stack.front().unwrap();
+                }
+                .into(),
+            ])
+        }
+        Operation::BrIf(target) => {
+            let curr_entry = ctrl_stack.front().unwrap();
 
-                // Get the conditional variable from the inputs.
-                let mut inputs = node.inputs;
-                let cond_origin = inputs.pop().unwrap();
-                let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
-                assert_reg(&cond_reg, bytes_per_word, ValType::I32);
+            // Get the conditional variable from the inputs.
+            let mut inputs = node.inputs;
+            let cond_origin = inputs.pop().unwrap();
+            let cond_reg = curr_entry.allocation.nodes_outputs[&cond_origin].clone();
+            assert_reg(&cond_reg, bytes_per_word, ValType::I32);
 
-                // Generate the jump instructions
-                let jump_directives = emit_jump(
-                    bytes_per_word,
-                    &mut reg_gen,
-                    ret_info.as_ref(),
-                    &inputs,
-                    &target,
-                    ctrl_stack,
-                );
+            // Generate the jump instructions
+            let jump_directives = DirectiveTree::Node(emit_jump(
+                bytes_per_word,
+                &mut reg_gen,
+                ret_info.as_ref(),
+                &inputs,
+                &target,
+                ctrl_stack,
+            ))
+            .flatten();
 
-                // If the jump_directives is one plain jump to a local label, we can
-                // optimize this jump by emitting a single JumpIf.
-                if let [Directive::Jump { .. }] = jump_directives.as_slice() {
-                    let Directive::Jump { target } = jump_directives.into_iter().next().unwrap()
-                    else {
-                        unreachable!()
-                    };
-                    directives.push(Directive::JumpIf {
-                        target: target.clone(),
-                        condition: cond_reg.start,
-                    });
-                } else {
-                    // The general case requires two helper labels to implement.
-                    let zero_label = format_label(label_gen.next().unwrap(), LabelType::Local);
-                    let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+            // If the jump_directives is one plain jump to a local label, we can
+            // optimize this jump by emitting a single JumpIf.
+            if let [Directive::Jump { .. }] = jump_directives.as_slice() {
+                let Directive::Jump { target } = jump_directives.into_iter().next().unwrap() else {
+                    unreachable!()
+                };
+                Directive::JumpIf {
+                    target: target.clone(),
+                    condition: cond_reg.start,
+                }
+                .into()
+            } else {
+                // The general case requires two helper labels to implement.
+                let zero_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+                let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
 
-                    // Either jump to the zero label if the condition is zero,
-                    // or the next instruction is a jump to the continuation label.
-                    directives.push(Directive::JumpIf {
+                // Either jump to the zero label if the condition is zero,
+                // or the next instruction is a jump to the continuation label.
+                DirectiveTree::Node(vec![
+                    Directive::JumpIf {
                         target: zero_label.clone(),
                         condition: cond_reg.start,
-                    });
-                    directives.push(Directive::Jump {
+                    }
+                    .into(),
+                    Directive::Jump {
                         target: cont_label.clone(),
-                    });
-
+                    }
+                    .into(),
                     // The zero label contains the jump directives.
-                    directives.push(Directive::Label {
+                    Directive::Label {
                         id: zero_label,
                         frame_size: None,
-                    });
-                    directives.extend(jump_directives);
-
+                    }
+                    .into(),
+                    jump_directives.into(),
                     // The continuation label is the next one.
-                    directives.push(Directive::Label {
+                    Directive::Label {
                         id: cont_label,
                         frame_size: None,
-                    });
-                }
+                    }
+                    .into(),
+                ])
             }
-            Operation::BrTable { mut targets } => {
-                let curr_entry = ctrl_stack.front().unwrap();
+        }
+        Operation::BrTable { targets } => {
+            let curr_entry = ctrl_stack.front().unwrap();
 
-                let mut node_inputs = node.inputs;
-                let selector =
-                    curr_entry.allocation.nodes_outputs[&node_inputs.pop().unwrap()].clone();
+            let mut node_inputs = node.inputs;
+            let selector = curr_entry.allocation.nodes_outputs[&node_inputs.pop().unwrap()].clone();
 
-                let mut jump_instructions = targets
-                    .into_iter()
-                    .map(|target| {
-                        // The inputs for one particular target are a permutation of the inputs
-                        // of the BrTable operation.
-                        let inputs = target
-                            .input_permutation
-                            .iter()
-                            .map(|&idx| node_inputs[idx as usize].clone())
-                            .collect_vec();
+            let mut jump_instructions = targets
+                .into_iter()
+                .map(|target| {
+                    // The inputs for one particular target are a permutation of the inputs
+                    // of the BrTable operation.
+                    let inputs = target
+                        .input_permutation
+                        .iter()
+                        .map(|&idx| node_inputs[idx as usize].clone())
+                        .collect_vec();
 
-                        // Emit the jump to the target label.
-                        emit_jump(
-                            bytes_per_word,
-                            &mut reg_gen,
-                            ret_info.as_ref(),
-                            &inputs,
-                            &target.target,
-                            ctrl_stack,
-                        )
-                    })
-                    .collect_vec();
+                    // Emit the jump to the target label.
+                    emit_jump(
+                        bytes_per_word,
+                        &mut reg_gen,
+                        ret_info.as_ref(),
+                        &inputs,
+                        &target.target,
+                        ctrl_stack,
+                    )
+                })
+                .collect_vec();
 
-                // The last target is special, because it is the default target.
-                let default_target = jump_instructions.pop().unwrap();
+            // The last target is special, because it is the default target.
+            let default_target = DirectiveTree::Node(jump_instructions.pop().unwrap()).flatten();
 
-                // We need to handle the default target separately first, because it will be
-                // the target in case the selector is out of bounds.
+            // We need to handle the default target separately first, because it will be
+            // the target in case the selector is out of bounds.
 
-                let num_choices = reg_gen.allocate_type(bytes_per_word, ValType::I32);
-                directives.push(Directive::WASMOp {
+            let num_choices = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+            let mut directives: Vec<DirectiveTree<'a>> = vec![
+                Directive::WASMOp {
                     op: Op::I32Const {
                         value: jump_instructions.len() as i32,
                     },
                     inputs: vec![],
                     output: Some(num_choices.clone()),
-                });
+                }
+                .into(),
+            ];
 
-                if let [Directive::Jump { .. }] = default_target.as_slice() {
-                    // If the default target is a plain jump to a local label, the JumpIf
-                    // targets it, and the fallthrough is the table itself.
-                    let Directive::Jump { target } = default_target.into_iter().next().unwrap()
-                    else {
-                        unreachable!()
-                    };
+            if let [Directive::Jump { .. }] = default_target.as_slice() {
+                // If the default target is a plain jump to a local label, the JumpIf
+                // targets it, and the fallthrough is the table itself.
+                let Directive::Jump { target } = default_target.into_iter().next().unwrap() else {
+                    unreachable!()
+                };
 
-                    let is_default_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
-                    directives.push(Directive::WASMOp {
+                let is_default_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                directives.push(
+                    Directive::WASMOp {
                         op: Op::I32GeU,
                         inputs: vec![selector.clone(), num_choices],
                         output: Some(is_default_taken.clone()),
-                    });
+                    }
+                    .into(),
+                );
 
-                    // Jump to the default target if the selector is out of bounds.
-                    directives.push(Directive::JumpIf {
+                // Jump to the default target if the selector is out of bounds.
+                directives.push(
+                    Directive::JumpIf {
                         target,
                         condition: is_default_taken.start,
-                    });
-                } else {
-                    // The default target is a complicated jump, so it is the fallthrough,
-                    // and the JumpIf will target the table.
-                    let is_default_not_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
-                    directives.push(Directive::WASMOp {
+                    }
+                    .into(),
+                );
+            } else {
+                // The default target is a complicated jump, so it is the fallthrough,
+                // and the JumpIf will target the table.
+                let is_default_not_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                directives.push(
+                    Directive::WASMOp {
                         op: Op::I32LtU,
                         inputs: vec![selector.clone(), num_choices],
                         output: Some(is_default_not_taken.clone()),
-                    });
+                    }
+                    .into(),
+                );
 
-                    let table_label = format_label(label_gen.next().unwrap(), LabelType::Local);
-                    directives.push(Directive::JumpIf {
+                let table_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+                directives.push(
+                    Directive::JumpIf {
                         target: table_label.clone(),
                         condition: is_default_not_taken.start,
-                    });
+                    }
+                    .into(),
+                );
 
-                    directives.extend(default_target);
+                directives.push(default_target.into());
 
-                    directives.push(Directive::Label {
+                directives.push(
+                    Directive::Label {
                         id: table_label,
                         frame_size: None,
-                    });
-                }
+                    }
+                    .into(),
+                );
+            }
 
-                // For robustness, the jump table has two indirections:
-                // - jump_offset $selector
-                // - jump jump_to_target_0
-                // - jump jump_to_target_1
-                // - ...
-                // - jump jump_to_target_n
-                // - jump_to_target_0:
-                // - <actual instructions to jump to target 0>
-                // - jump_to_target_1:
-                // - <actual instructions to jump to target 1>
-                // - ...
-                // - jump_to_target_n:
-                // - <actual instructions to jump to target n>
-                //
-                // The exception is if the target jump contains one single local jump instruction,
-                // which can be embedded in the jump table directly.
-                //
-                // TODO: theoretically, any single instruction can be embedded in the jump table,
-                // but it would require the guarantee that further translations wouldn't implement
-                // any of them as multiple ISA instructions. It is safer to assume just Jump will
-                // remain a single instruction. Maybe also Return?
-                //
-                // TODO: if jump_offset can jump $selector * N, where N is some immediate, this
-                // can be implemented with a single indirection, but that would also require
-                // 1-to-1 mapping in all the instructions belonging to the jump table.
-                directives.push(Directive::JumpOffset {
+            // For robustness, the jump table has two indirections:
+            // - jump_offset $selector
+            // - jump jump_to_target_0
+            // - jump jump_to_target_1
+            // - ...
+            // - jump jump_to_target_n
+            // - jump_to_target_0:
+            // - <actual instructions to jump to target 0>
+            // - jump_to_target_1:
+            // - <actual instructions to jump to target 1>
+            // - ...
+            // - jump_to_target_n:
+            // - <actual instructions to jump to target n>
+            //
+            // The exception is if the target jump contains one single local jump instruction,
+            // which can be embedded in the jump table directly.
+            //
+            // TODO: theoretically, any single instruction can be embedded in the jump table,
+            // but it would require the guarantee that further translations wouldn't implement
+            // any of them as multiple ISA instructions. It is safer to assume just Jump will
+            // remain a single instruction. Maybe also Return?
+            //
+            // TODO: if jump_offset can jump $selector * N, where N is some immediate, this
+            // can be implemented with a single indirection, but that would also require
+            // 1-to-1 mapping in all the instructions belonging to the jump table.
+            directives.push(
+                Directive::JumpOffset {
                     offset: selector.start,
-                });
+                }
+                .into(),
+            );
 
-                let jump_instructions = jump_instructions
-                    .into_iter()
-                    .filter_map(|jump_directives| {
-                        if let [Directive::Jump { .. }] = jump_directives.as_slice() {
-                            let Directive::Jump { target } =
-                                jump_directives.into_iter().next().unwrap()
-                            else {
-                                unreachable!()
-                            };
-                            directives.push(Directive::Jump { target });
-                            None
-                        } else {
-                            let jump_label =
-                                format_label(label_gen.next().unwrap(), LabelType::Local);
-                            directives.push(Directive::Jump {
+            let jump_instructions = jump_instructions
+                .into_iter()
+                .filter_map(|jump_directives| {
+                    let jump_directives = DirectiveTree::Node(jump_directives).flatten();
+
+                    if let [Directive::Jump { .. }] = jump_directives.as_slice() {
+                        let Directive::Jump { target } =
+                            jump_directives.into_iter().next().unwrap()
+                        else {
+                            unreachable!()
+                        };
+                        directives.push(Directive::Jump { target }.into());
+                        None
+                    } else {
+                        let jump_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+                        directives.push(
+                            Directive::Jump {
                                 target: jump_label.clone(),
-                            });
-                            Some((jump_label, jump_directives))
-                        }
-                    })
-                    // Collecting here is essential, because of side effects of pushing
-                    // into `directives`.
-                    .collect_vec();
+                            }
+                            .into(),
+                        );
+                        Some((jump_label, jump_directives))
+                    }
+                })
+                // Collecting here is essential, because of side effects of pushing
+                // into `directives`.
+                .collect_vec();
 
-                // Finally emit the jump directives for each target.
-                for (jump_label, jump_directives) in jump_instructions {
-                    directives.push(Directive::Label {
+            // Finally emit the jump directives for each target.
+            for (jump_label, jump_directives) in jump_instructions {
+                directives.push(
+                    Directive::Label {
                         id: jump_label,
                         frame_size: None,
-                    });
-                    directives.extend(jump_directives);
-                }
+                    }
+                    .into(),
+                );
+                directives.push(jump_directives.into());
             }
-            Operation::WASMOp(Op::Call { function_index }) => {
-                let curr_entry = ctrl_stack.front().unwrap();
+            directives.into()
+        }
+        Operation::WASMOp(Op::Call { function_index }) => {
+            let curr_entry = ctrl_stack.front().unwrap();
 
-                if let Some((module, function)) = ctx.get_imported_func(function_index) {
-                    // Imported functions are kinda like system calls, and we assume
-                    // the implementation can access the input and output registers directly,
-                    // so we just have to emit the call directive.
-                    let inputs = map_input_into_regs(node.inputs, curr_entry);
-                    let outputs = (0..node.output_types.len())
-                        .map(|output_idx| {
-                            curr_entry.allocation.nodes_outputs[&ValueOrigin {
-                                node: node_idx,
-                                output_idx: output_idx as u32,
-                            }]
-                                .clone()
-                        })
-                        .collect();
+            if let Some((module, function)) = ctx.get_imported_func(function_index) {
+                // Imported functions are kinda like system calls, and we assume
+                // the implementation can access the input and output registers directly,
+                // so we just have to emit the call directive.
+                let inputs = map_input_into_regs(node.inputs, curr_entry);
+                let outputs = (0..node.output_types.len())
+                    .map(|output_idx| {
+                        curr_entry.allocation.nodes_outputs[&ValueOrigin {
+                            node: node_idx,
+                            output_idx: output_idx as u32,
+                        }]
+                            .clone()
+                    })
+                    .collect();
 
-                    directives.push(Directive::ImportedCall {
-                        module,
-                        function,
-                        inputs,
-                        outputs,
-                    });
-                } else {
-                    // Normal function calls requires a frame allocation and copying of the
-                    // inputs and outputs into the frame (the outputs are provided by the
-                    // prover "from the future").
-                    let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-
-                    directives.push(Directive::AllocateFrameI {
-                        target_frame: format_label(function_index, LabelType::Function),
-                        result_ptr: func_frame_ptr.start,
-                    });
-
-                    let inputs = node
-                        .inputs
-                        .into_iter()
-                        .map(|origin| curr_entry.allocation.nodes_outputs[&origin].clone())
-                        .collect();
-                    let this_ret_info = prepare_function_call(
-                        bytes_per_word,
-                        inputs,
-                        node_idx,
-                        node.output_types.len(),
-                        curr_entry,
-                        func_frame_ptr.start,
-                        directives,
-                    );
-
-                    // Emit the call directive.
-                    directives.push(Directive::Call {
-                        target: format_label(function_index, LabelType::Function),
-                        new_frame_ptr: func_frame_ptr.start,
-                        saved_caller_fp: this_ret_info.ret_fp.start,
-                        saved_ret_pc: this_ret_info.ret_pc.start,
-                    });
+                Directive::ImportedCall {
+                    module,
+                    function,
+                    inputs,
+                    outputs,
                 }
-            }
-            Operation::WASMOp(Op::CallIndirect {
-                table_index,
-                type_index,
-            }) => {
-                let curr_entry = ctrl_stack.front().unwrap();
-
-                // First, we need to load the function reference from the table, so we allocate
-                // the space for it and emit the table.get directive.
-
-                // The last input of the CallIndirect operation is the table entry, the others are the function arguments.
-                let mut inputs = map_input_into_regs(node.inputs, curr_entry);
-                let table_get_inputs = vec![inputs.pop().unwrap()];
-
-                let func_ref_reg = reg_gen.allocate_type(bytes_per_word, ValType::FUNCREF);
-                directives.push(Directive::WASMOp {
-                    op: Op::TableGet { table: table_index },
-                    inputs: table_get_inputs,
-                    output: Some(func_ref_reg.clone()),
-                });
-
-                // Split the components of the function reference:
-                let func_ref_regs = split_func_ref_regs(bytes_per_word, func_ref_reg);
-
-                // We need two new registers to compare the expected function type with the loaded one.
-                let expected_func_type = reg_gen.allocate_type(bytes_per_word, ValType::I32);
-                let eq_result = reg_gen.allocate_type(bytes_per_word, ValType::I32);
-
-                directives.push(Directive::WASMOp {
-                    op: Op::I32Const {
-                        value: type_index as i32,
-                    },
-                    inputs: vec![],
-                    output: Some(expected_func_type.clone()),
-                });
-                directives.push(Directive::WASMOp {
-                    op: Op::I32Eq,
-                    inputs: vec![
-                        expected_func_type.clone(),
-                        func_ref_regs[FunctionRef::TYPE_INDEX].clone(),
-                    ],
-                    output: Some(eq_result.clone()),
-                });
-
-                // Now we need to jump to the actual function call if the types match.
-                // Otherwise trap.
-                let ok_label = format_label(label_gen.next().unwrap(), LabelType::Local);
-                directives.push(Directive::JumpIf {
-                    target: ok_label.clone(),
-                    condition: eq_result.start,
-                });
-                directives.push(Directive::Trap {
-                    reason: TrapReason::WrongIndirectCallFunctionType,
-                });
-                directives.push(Directive::Label {
-                    id: ok_label,
-                    frame_size: None,
-                });
-
-                // Allocate the new function frame
+                .into()
+            } else {
+                // Normal function calls requires a frame allocation and copying of the
+                // inputs and outputs into the frame (the outputs are provided by the
+                // prover "from the future").
                 let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-                directives.push(Directive::AllocateFrameV {
-                    frame_size: func_ref_regs[FunctionRef::FUNC_FRAME_SIZE].start,
-                    result_ptr: func_frame_ptr.start,
-                });
 
-                // Perform the function call
-                let this_ret_info = prepare_function_call(
+                let inputs = node
+                    .inputs
+                    .into_iter()
+                    .map(|origin| curr_entry.allocation.nodes_outputs[&origin].clone())
+                    .collect();
+                let (call_directives, this_ret_info) = prepare_function_call(
                     bytes_per_word,
                     inputs,
                     node_idx,
                     node.output_types.len(),
                     curr_entry,
                     func_frame_ptr.start,
-                    directives,
                 );
-                directives.push(Directive::CallIndirect {
+
+                DirectiveTree::Node(vec![
+                    Directive::AllocateFrameI {
+                        target_frame: format_label(function_index, LabelType::Function),
+                        result_ptr: func_frame_ptr.start,
+                    }
+                    .into(),
+                    call_directives.into(),
+                    Directive::Call {
+                        target: format_label(function_index, LabelType::Function),
+                        new_frame_ptr: func_frame_ptr.start,
+                        saved_caller_fp: this_ret_info.ret_fp.start,
+                        saved_ret_pc: this_ret_info.ret_pc.start,
+                    }
+                    .into(),
+                ])
+            }
+        }
+        Operation::WASMOp(Op::CallIndirect {
+            table_index,
+            type_index,
+        }) => {
+            let curr_entry = ctrl_stack.front().unwrap();
+
+            // First, we need to load the function reference from the table, so we allocate
+            // the space for it and emit the table.get directive.
+
+            // The last input of the CallIndirect operation is the table entry, the others are the function arguments.
+            let mut inputs = map_input_into_regs(node.inputs, curr_entry);
+            let table_get_inputs = vec![inputs.pop().unwrap()];
+
+            let func_ref_reg = reg_gen.allocate_type(bytes_per_word, ValType::FUNCREF);
+
+            // Split the components of the function reference:
+            let func_ref_regs = split_func_ref_regs(bytes_per_word, func_ref_reg.clone());
+
+            // We need two new registers to compare the expected function type with the loaded one.
+            let expected_func_type = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+            let eq_result = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+
+            let ok_label = format_label(label_gen.next().unwrap(), LabelType::Local);
+            let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+
+            // Perform the function call
+            let (call_directives, this_ret_info) = prepare_function_call(
+                bytes_per_word,
+                inputs,
+                node_idx,
+                node.output_types.len(),
+                curr_entry,
+                func_frame_ptr.start,
+            );
+
+            DirectiveTree::Node(vec![
+                Directive::WASMOp {
+                    op: Op::TableGet { table: table_index },
+                    inputs: table_get_inputs,
+                    output: Some(func_ref_reg),
+                }
+                .into(),
+                Directive::WASMOp {
+                    op: Op::I32Const {
+                        value: type_index as i32,
+                    },
+                    inputs: vec![],
+                    output: Some(expected_func_type.clone()),
+                }
+                .into(),
+                Directive::WASMOp {
+                    op: Op::I32Eq,
+                    inputs: vec![
+                        expected_func_type.clone(),
+                        func_ref_regs[FunctionRef::TYPE_INDEX].clone(),
+                    ],
+                    output: Some(eq_result.clone()),
+                }
+                .into(),
+                // Now we need to jump to the actual function call if the types match.
+                // Otherwise trap.
+                Directive::JumpIf {
+                    target: ok_label.clone(),
+                    condition: eq_result.start,
+                }
+                .into(),
+                Directive::Trap {
+                    reason: TrapReason::WrongIndirectCallFunctionType,
+                }
+                .into(),
+                Directive::Label {
+                    id: ok_label,
+                    frame_size: None,
+                }
+                .into(),
+                // Allocate the new function frame
+                Directive::AllocateFrameV {
+                    frame_size: func_ref_regs[FunctionRef::FUNC_FRAME_SIZE].start,
+                    result_ptr: func_frame_ptr.start,
+                }
+                .into(),
+                call_directives.into(),
+                Directive::CallIndirect {
                     target_pc: func_ref_regs[FunctionRef::FUNC_ADDR].start,
                     new_frame_ptr: func_frame_ptr.start,
                     saved_ret_pc: this_ret_info.ret_pc.start,
                     saved_caller_fp: this_ret_info.ret_fp.start,
-                });
-            }
-            Operation::WASMOp(Op::Unreachable) => {
-                directives.push(Directive::Trap {
-                    reason: TrapReason::Unreachable,
-                });
-            }
-            Operation::WASMOp(op) => {
-                // Everything else is a normal operation, which will be forwarded almost as is.
-                // Only that the registers inputs and output are explicit.
-                let curr_entry = ctrl_stack.front().unwrap();
-                let inputs = map_input_into_regs(node.inputs, curr_entry);
-                let output = match node.output_types.len() {
-                    0 => None,
-                    1 => Some(
-                        curr_entry.allocation.nodes_outputs[&ValueOrigin {
-                            node: node_idx,
-                            output_idx: 0,
-                        }]
-                            .clone(),
-                    ),
-                    _ => {
-                        // WASM instructions have at most one output, so this is a bug.
-                        panic!()
-                    }
-                };
-                directives.push(Directive::WASMOp { op, inputs, output });
-            }
+                }
+                .into(),
+            ])
+        }
+        Operation::WASMOp(Op::Unreachable) => Directive::Trap {
+            reason: TrapReason::UnreachableInstruction,
+        }
+        .into(),
+        Operation::WASMOp(op) => {
+            // Everything else is a normal operation, which will be forwarded almost as is.
+            // Only that the registers inputs and output are explicit.
+            let curr_entry = ctrl_stack.front().unwrap();
+            let inputs = map_input_into_regs(node.inputs, curr_entry);
+            let output = match node.output_types.len() {
+                0 => None,
+                1 => Some(
+                    curr_entry.allocation.nodes_outputs[&ValueOrigin {
+                        node: node_idx,
+                        output_idx: 0,
+                    }]
+                        .clone(),
+                ),
+                _ => {
+                    // WASM instructions have at most one output, so this is a bug.
+                    panic!()
+                }
+            };
+            Directive::WASMOp { op, inputs, output }.into()
         }
     }
-
-    reg_gen.next_available
 }
 
 fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
@@ -1140,13 +1257,17 @@ fn copy_into_frame<'a>(
     src: Range<u32>,
     dest_frame: u32,
     dest: Range<u32>,
-) -> impl Iterator<Item = Directive<'a>> {
+) -> Vec<DirectiveTree<'a>> {
     src.zip_eq(dest)
-        .map(move |(src_word, dest_word)| Directive::CopyIntoFrame {
-            src_word,
-            dest_frame,
-            dest_word,
+        .map(move |(src_word, dest_word)| {
+            Directive::CopyIntoFrame {
+                src_word,
+                dest_frame,
+                dest_word,
+            }
+            .into()
         })
+        .collect()
 }
 
 fn prepare_function_call<'a>(
@@ -1156,8 +1277,9 @@ fn prepare_function_call<'a>(
     num_outputs: usize,
     curr_entry: &CtrlStackEntry,
     frame_ptr: u32,
-    directives: &mut Vec<Directive<'a>>,
-) -> ReturnInfo {
+) -> (Vec<DirectiveTree<'a>>, ReturnInfo) {
+    let mut directives = Vec::new();
+
     // Generate the registers in the order expected by the calling convention.
     let mut fn_reg_gen = RegisterGenerator::new();
     let ret_info = ReturnInfo {
@@ -1167,7 +1289,7 @@ fn prepare_function_call<'a>(
 
     for src_reg in inputs {
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        directives.extend(copy_into_frame(src_reg, frame_ptr, dest_reg));
+        directives.push(copy_into_frame(src_reg, frame_ptr, dest_reg).into());
     }
     for output_idx in 0..num_outputs {
         let src_reg = curr_entry.allocation.nodes_outputs[&ValueOrigin {
@@ -1176,10 +1298,10 @@ fn prepare_function_call<'a>(
         }]
             .clone();
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        directives.extend(copy_into_frame(src_reg, frame_ptr, dest_reg));
+        directives.push(copy_into_frame(src_reg, frame_ptr, dest_reg).into());
     }
 
-    ret_info
+    (directives, ret_info)
 }
 
 fn emit_jump<'a>(
@@ -1189,7 +1311,7 @@ fn emit_jump<'a>(
     node_inputs: &[ValueOrigin],
     target: &BreakTarget,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
-) -> Vec<Directive<'a>> {
+) -> Vec<DirectiveTree<'a>> {
     // There are 5 different kinds of jumps, depending on the target:
     //
     // 1. Jump to a label in the current frame. We need to check if the break arguments have
@@ -1211,29 +1333,19 @@ fn emit_jump<'a>(
     //
     // We need to identify the case and emit the correct directives.
 
-    let mut directives = Vec::new();
-
     // This is a function return.
     let curr_entry = ctrl_stack.front().unwrap();
     match target {
         BreakTarget {
             depth: 0,
             kind: TargetType::Label(label),
-        } => {
-            directives.extend(local_jump(*label, &curr_entry.allocation, node_inputs));
-        }
+        } => local_jump(*label, &curr_entry.allocation, node_inputs),
         BreakTarget {
             depth,
             kind: TargetType::Label(label),
         } => {
             // This is a jump out of loop, into a previous frame of the same function.
-            directives.extend(jump_out_of_loop(
-                bytes_per_word,
-                *depth,
-                *label,
-                ctrl_stack,
-                node_inputs,
-            ));
+            jump_out_of_loop(bytes_per_word, *depth, *label, ctrl_stack, node_inputs)
         }
         BreakTarget {
             depth,
@@ -1246,25 +1358,25 @@ fn emit_jump<'a>(
                     match &curr_entry.entry_type {
                         CtrlStackType::TopLevelFunction { output_regs } => {
                             // This is a return from the toplevel frame.
-                            directives.extend(top_level_return(
+                            top_level_return(
                                 bytes_per_word,
                                 ret_info.as_ref().unwrap(),
                                 &curr_entry.allocation,
                                 node_inputs,
                                 output_regs,
-                            ));
+                            )
                         }
                         CtrlStackType::Loop(loop_entry) => {
                             // This is a return from a loop.
                             assert_eq!(loop_entry.ret_info.as_ref(), ret_info);
-                            directives.extend(return_from_loop(
+                            return_from_loop(
                                 bytes_per_word,
                                 ctrl_stack.len(),
                                 output_regs,
                                 node_inputs,
                                 &curr_entry.allocation,
                                 loop_entry,
-                            ));
+                            )
                         }
                     }
                 }
@@ -1278,51 +1390,53 @@ fn emit_jump<'a>(
                         ret_info,
                         curr_entry,
                         node_inputs,
-                        &mut directives,
-                    );
+                    )
                 }
             }
         }
     }
-
-    directives
 }
 
-fn copy_local_jump_args(
+fn copy_local_jump_args<'a>(
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     output_regs: &[Range<u32>],
-    directives: &mut Vec<Directive>,
-) {
+) -> Vec<DirectiveTree<'a>> {
     // Copy the node inputs into the output registers, if they are not already assigned.
+    let mut directives = Vec::new();
     for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
         let src_reg = &allocation.nodes_outputs[origin];
         if src_reg != dest_reg {
             directives.extend(src_reg.clone().zip_eq(dest_reg.clone()).map(
-                move |(src_word, dest_word)| Directive::Copy {
-                    src_word,
-                    dest_word,
+                move |(src_word, dest_word)| {
+                    Directive::Copy {
+                        src_word,
+                        dest_word,
+                    }
+                    .into()
                 },
             ));
         }
     }
+    directives
 }
 
 fn local_jump<'a>(
     label_id: u32,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
-) -> Vec<Directive<'a>> {
-    let mut directives = Vec::new();
-
+) -> Vec<DirectiveTree<'a>> {
     // Copy the node inputs into the output registers, if they are not already assigned.
     let output_regs = &allocation.labels[&label_id];
-    copy_local_jump_args(allocation, node_inputs, output_regs, &mut directives);
+    let mut directives = copy_local_jump_args(allocation, node_inputs, output_regs);
 
     // Emit the jump directive.
-    directives.push(Directive::Jump {
-        target: format_label(label_id, LabelType::Local),
-    });
+    directives.push(
+        Directive::Jump {
+            target: format_label(label_id, LabelType::Local),
+        }
+        .into(),
+    );
 
     directives
 }
@@ -1333,19 +1447,20 @@ fn top_level_return<'a>(
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     output_regs: &[Range<u32>],
-) -> Vec<Directive<'a>> {
-    let mut directives = Vec::new();
-
+) -> Vec<DirectiveTree<'a>> {
     // Copy the node inputs into the output registers, if they are not already assigned.
-    copy_local_jump_args(allocation, node_inputs, output_regs, &mut directives);
+    let mut directives = copy_local_jump_args(allocation, node_inputs, output_regs);
 
     // Emit the return directive.
     assert_ptr_size(bytes_per_word, &ret_info.ret_pc);
     assert_ptr_size(bytes_per_word, &ret_info.ret_fp);
-    directives.push(Directive::Return {
-        ret_pc: ret_info.ret_pc.start,
-        ret_fp: ret_info.ret_fp.start,
-    });
+    directives.push(
+        Directive::Return {
+            ret_pc: ret_info.ret_pc.start,
+            ret_fp: ret_info.ret_fp.start,
+        }
+        .into(),
+    );
 
     directives
 }
@@ -1357,7 +1472,7 @@ fn return_from_loop<'a>(
     node_inputs: &[ValueOrigin],
     allocation: &Allocation,
     curr_entry: &LoopStackEntry,
-) -> Vec<Directive<'a>> {
+) -> Vec<DirectiveTree<'a>> {
     let mut directives = Vec::new();
 
     if !output_regs.is_empty() {
@@ -1383,10 +1498,13 @@ fn return_from_loop<'a>(
     assert_ptr_size(bytes_per_word, &ret_info.ret_pc);
     assert_ptr_size(bytes_per_word, &ret_info.ret_fp);
 
-    directives.push(Directive::Return {
-        ret_pc: ret_info.ret_pc.start,
-        ret_fp: ret_info.ret_fp.start,
-    });
+    directives.push(
+        Directive::Return {
+            ret_pc: ret_info.ret_pc.start,
+            ret_fp: ret_info.ret_fp.start,
+        }
+        .into(),
+    );
 
     directives
 }
@@ -1397,7 +1515,7 @@ fn jump_out_of_loop<'a>(
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
     node_inputs: &[ValueOrigin],
-) -> Vec<Directive<'a>> {
+) -> Vec<DirectiveTree<'a>> {
     let caller_entry = ctrl_stack.front().unwrap();
     let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
         &curr_entry.saved_fps[..]
@@ -1414,15 +1532,18 @@ fn jump_out_of_loop<'a>(
     let mut directives = Vec::new();
     for (origin, dest_reg) in node_inputs.iter().zip_eq(target_inputs.iter()) {
         let src_reg = caller_entry.allocation.nodes_outputs[origin].clone();
-        directives.extend(copy_into_frame(src_reg, dest_fp, dest_reg.clone()));
+        directives.push(copy_into_frame(src_reg, dest_fp, dest_reg.clone()).into());
     }
 
-    directives.push(Directive::JumpAndActivateFrame {
-        target: format_label(label_id, LabelType::Local),
-        new_frame_ptr: dest_fp,
-        // This iteration's frame will not be needed again.
-        saved_caller_fp: None,
-    });
+    directives.push(
+        Directive::JumpAndActivateFrame {
+            target: format_label(label_id, LabelType::Local),
+            new_frame_ptr: dest_fp,
+            // This iteration's frame will not be needed again.
+            saved_caller_fp: None,
+        }
+        .into(),
+    );
 
     directives
 }
@@ -1452,29 +1573,39 @@ fn jump_into_loop<'a>(
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
     node_inputs: &[ValueOrigin],
-    directives: &mut Vec<Directive<'a>>,
-) {
+) -> Vec<DirectiveTree<'a>> {
+    let mut directives: Vec<DirectiveTree<'a>> = Vec::new();
+
     // We start by allocating the frame.
     let loop_fp = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-    directives.push(Directive::AllocateFrameI {
-        target_frame: loop_entry.label.clone(),
-        result_ptr: loop_fp.start,
-    });
+    directives.push(
+        Directive::AllocateFrameI {
+            target_frame: loop_entry.label.clone(),
+            result_ptr: loop_fp.start,
+        }
+        .into(),
+    );
 
     // Copy the return info, if needed.
     if let Some(loop_ret_info) = &loop_entry.ret_info {
         // If the loop needs a return info, then the caller must have it, too.
         let ret_info = ret_info.unwrap();
-        directives.extend(copy_into_frame(
-            ret_info.ret_pc.clone(),
-            loop_fp.start,
-            loop_ret_info.ret_pc.clone(),
-        ));
-        directives.extend(copy_into_frame(
-            ret_info.ret_fp.clone(),
-            loop_fp.start,
-            loop_ret_info.ret_fp.clone(),
-        ));
+        directives.push(
+            copy_into_frame(
+                ret_info.ret_pc.clone(),
+                loop_fp.start,
+                loop_ret_info.ret_pc.clone(),
+            )
+            .into(),
+        );
+        directives.push(
+            copy_into_frame(
+                ret_info.ret_fp.clone(),
+                loop_fp.start,
+                loop_ret_info.ret_fp.clone(),
+            )
+            .into(),
+        );
     }
 
     // Copy the outer frame pointers.
@@ -1537,11 +1668,16 @@ fn jump_into_loop<'a>(
     //
     // Jumping doesn't really do anything here, because the loop directives are
     // right ahead, but it is not worth to create a new instruction just for that.
-    directives.push(Directive::JumpAndActivateFrame {
-        target: loop_entry.label.clone(),
-        new_frame_ptr: loop_fp.start,
-        saved_caller_fp,
-    });
+    directives.push(
+        Directive::JumpAndActivateFrame {
+            target: loop_entry.label.clone(),
+            new_frame_ptr: loop_fp.start,
+            saved_caller_fp,
+        }
+        .into(),
+    );
+
+    directives
 }
 
 enum LabelType {
