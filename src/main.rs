@@ -91,15 +91,23 @@ mod tests {
     #[test]
     fn test_wasm_i32() {
         test_wasm("wasm_testsuite/i32.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_address() {
+        env_logger::init();
         test_wasm("wasm_testsuite/address.wast", None);
-        // test_wasm("wasm_testsuite/br.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_br() {
+        test_wasm("wasm_testsuite/br.wast", None);
     }
 
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
-            Ok((module, asserts)) => {
+            Ok(asserts) => {
                 // println!("assert cases: {asserts:#?}");
-                let module = module.unwrap();
                 asserts
                     .iter()
                     .filter(|assert_case| {
@@ -112,7 +120,7 @@ mod tests {
                     .for_each(|assert_case| {
                         println!("Assert test case: {assert_case:#?}");
                         test_interpreter(
-                            &module,
+                            &assert_case.module,
                             &assert_case.function_name,
                             &assert_case.args,
                             &assert_case.expected,
@@ -145,6 +153,7 @@ mod tests {
 
     #[derive(Debug)]
     pub struct AssertCase {
+        pub module: String,
         pub function_name: String,
         pub args: Vec<u32>,
         pub expected: Vec<u32>,
@@ -167,7 +176,7 @@ mod tests {
 
     pub fn extract_wast_test_info(
         wast_path: &str,
-    ) -> Result<(Option<String>, Vec<AssertCase>), Box<dyn std::error::Error>> {
+    ) -> Result<Vec<AssertCase>, Box<dyn std::error::Error>> {
         let json_output_path = format!("{}/sample-programs/test.json", env!("CARGO_MANIFEST_DIR"));
 
         let output = Command::new("wast2json")
@@ -221,6 +230,7 @@ mod tests {
                             .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
                             .collect::<Vec<_>>();
                         assert_returns.push(AssertCase {
+                            module: module_file.clone().unwrap(),
                             function_name,
                             args,
                             expected,
@@ -231,6 +241,6 @@ mod tests {
             }
         }
 
-        Ok((module_file, assert_returns))
+        Ok(assert_returns)
     }
 }
