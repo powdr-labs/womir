@@ -639,8 +639,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         }
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
-                        let byte =
-                            memory.read_contiguous(addr, 1).expect("Out of bounds read")[0] & 0xff;
+                        let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
 
                         self.set_vrom_relative_range(output_reg, &[byte]);
                     }
@@ -664,7 +663,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
-                        let byte = memory.read_contiguous(addr, 1).expect("Out of bounds read")[0];
+                        let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
 
                         // Sign-extend to i8, convert to i32, then cast to u8 to store the lower byte only
                         let signed = (byte as i8) as i32;
@@ -692,8 +691,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
-                        let bytes = memory.read_contiguous(addr, 1).expect("Out of bounds read")[0]
-                            & 0xffff;
+                        let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
 
                         self.set_vrom_relative_range(output_reg, &[bytes]);
                     }
@@ -717,8 +715,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
 
-                        let bytes = memory.read_contiguous(addr, 1).expect("Out of bounds read")[0]
-                            & 0xffff;
+                        let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
 
                         let sign_extended = bytes as i32;
                         let truncated = sign_extended as u16;
