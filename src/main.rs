@@ -104,6 +104,11 @@ mod tests {
         test_wasm("wasm_testsuite/br.wast", None);
     }
 
+    #[test]
+    fn test_wasm_block() {
+        test_wasm("wasm_testsuite/block.wast", None);
+    }
+
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
             Ok(asserts) => {
