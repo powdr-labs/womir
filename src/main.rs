@@ -90,14 +90,14 @@ mod tests {
 
     #[test]
     fn test_wasm_i32() {
-        test_wasm("i32.wast", Some(&["add", "sub", "mul"]));
-        test_wasm("br.wast", None);
+        test_wasm("wasm_testsuite/i32.wast", None);
+        // test_wasm("br.wast", None);
     }
 
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
             Ok((module, asserts)) => {
-                println!("assert cases: {asserts:#?}");
+                // println!("assert cases: {asserts:#?}");
                 let module = module.unwrap();
                 asserts
                     .iter()

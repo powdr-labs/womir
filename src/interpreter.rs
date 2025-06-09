@@ -195,7 +195,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
-
                     Op::I32Mul => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -204,6 +203,121 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
                         let r = a.wrapping_mul(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32DivU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32DivU");
+                        }
+
+                        let r = a / b;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32DivS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32DivU");
+                        }
+                        if a == i32::MIN && b == -1 {
+                            panic!("integer overflow in I32DivS");
+                        }
+
+                        let r = a.wrapping_div(b) as u32;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32RemU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32RemU");
+                        }
+
+                        let r = a % b;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32RemS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32RemS");
+                        }
+
+                        let r = a.wrapping_rem(b);
+
+                        self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I32LtU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        let r = if a < b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32LtS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a < b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32LeS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a <= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32LeU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        let r = if a <= b { 1 } else { 0 };
 
                         self.set_vrom_relative_u32(c, r);
                     }
@@ -218,6 +332,42 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I32GtS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a > b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32GeS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a >= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32GeU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        let r = if a >= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::I32And => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -229,16 +379,139 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    Op::I32ShrU => {
+                    Op::I32Or => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
-                        let r = a >> b;
+                        let r = a | b;
 
                         self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Xor => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+                        let r = a ^ b;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Shl => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F; // only lower 5 bits are used
+
+                        let r = a.wrapping_shl(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32ShrU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.wrapping_shr(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32ShrS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.wrapping_shr(b);
+
+                        self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I32Rotl => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.rotate_left(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Rotr => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.rotate_right(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Clz => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        let r = a.leading_zeros();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Ctz => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        let r = a.trailing_zeros();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Popcnt => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        let r = a.count_ones();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Extend8S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        // Take the lowest 8 bits and sign-extend to i32
+                        let r = (a as u8) as i8 as i32;
+
+                        self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I32Extend16S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        // Take lower 16 bits and sign-extend to i32
+                        let r = (a as u16) as i16 as i32;
+
+                        self.set_vrom_relative_u32(c, r as u32);
                     }
                     Op::I32Eq | Op::I64Eq => {
                         let a = self
