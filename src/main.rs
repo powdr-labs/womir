@@ -91,7 +91,8 @@ mod tests {
     #[test]
     fn test_wasm_i32() {
         test_wasm("wasm_testsuite/i32.wast", None);
-        // test_wasm("br.wast", None);
+        test_wasm("wasm_testsuite/address.wast", None);
+        // test_wasm("wasm_testsuite/br.wast", None);
     }
 
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
@@ -190,6 +191,7 @@ mod tests {
         let mut module_file = None;
         let mut assert_returns = Vec::new();
 
+        let forbidden_types = ["f32", "f64", "i64", "i128"];
         for entry in entries {
             match entry {
                 CommandEntry::Module { filename } => {
@@ -200,7 +202,7 @@ mod tests {
                         let args = action.args.unwrap_or_default();
                         if args
                             .iter()
-                            .any(|a| a.val_type.contains("f32") || a.val_type.contains("f64"))
+                            .any(|a| forbidden_types.iter().any(|t| a.val_type.contains(t)))
                         {
                             continue;
                         }
@@ -210,7 +212,7 @@ mod tests {
                             .collect::<Vec<_>>();
                         if expected
                             .iter()
-                            .any(|a| a.val_type.contains("f32") || a.val_type.contains("f64"))
+                            .any(|a| forbidden_types.iter().any(|t| a.val_type.contains(t)))
                         {
                             continue;
                         }
