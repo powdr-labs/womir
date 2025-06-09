@@ -68,8 +68,7 @@ fn main() -> wasmparser::Result<()> {
 mod tests {
     use super::*;
 
-    fn test_interpreter(file_name: &str, main_function: &str, inputs: &[u32], outputs: &[u32]) {
-        let path = format!("{}/sample-programs/{file_name}", env!("CARGO_MANIFEST_DIR"));
+    fn test_interpreter(path: &str, main_function: &str, inputs: &[u32], outputs: &[u32]) {
         let wasm_file = std::fs::read(path).unwrap();
         let program = loader::load_wasm(&wasm_file).unwrap();
         let mut interpreter = interpreter::Interpreter::new(program, Externals::new(Vec::new()));
@@ -77,15 +76,25 @@ mod tests {
         assert_eq!(got_output, outputs);
     }
 
+    fn test_interpreter_from_sample_programs(
+        path: &str,
+        main_function: &str,
+        inputs: &[u32],
+        outputs: &[u32],
+    ) {
+        let path = format!("{}/sample-programs/{path}", env!("CARGO_MANIFEST_DIR"));
+        test_interpreter(&path, main_function, inputs, outputs);
+    }
+
     #[test]
     fn test_fib() {
-        test_interpreter("fib_loop.wasm", "fib", &[10], &[55]);
+        test_interpreter_from_sample_programs("fib_loop.wasm", "fib", &[10], &[55]);
     }
 
     #[test]
     fn test_collatz() {
-        test_interpreter("collatz.wasm", "collatz", &[1 << 22], &[22]);
-        test_interpreter("collatz.wasm", "collatz", &[310], &[86]);
+        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[1 << 22], &[22]);
+        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[310], &[86]);
     }
 
     #[test]
@@ -137,8 +146,11 @@ mod tests {
     }
 
     use serde::Deserialize;
-    use std::fs;
+    use std::fs::{self, File};
+    use std::path::Path;
     use std::process::Command;
+    use tempfile::NamedTempFile;
+    use tempfile::tempdir;
 
     #[derive(Debug, Deserialize)]
     struct TestFile {
@@ -182,7 +194,11 @@ mod tests {
     pub fn extract_wast_test_info(
         wast_path: &str,
     ) -> Result<Vec<AssertCase>, Box<dyn std::error::Error>> {
-        let json_output_path = format!("{}/sample-programs/test.json", env!("CARGO_MANIFEST_DIR"));
+        let temp_file = NamedTempFile::with_prefix("test")?;
+        let Some(parent_dir) = temp_file.path().parent() else {
+            panic!("Could not determine parent directory.");
+        };
+        let json_output_path = temp_file.path().to_owned();
 
         let output = Command::new("wast2json")
             .arg(wast_path)
@@ -235,7 +251,11 @@ mod tests {
                             .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
                             .collect::<Vec<_>>();
                         assert_returns.push(AssertCase {
-                            module: module_file.clone().unwrap(),
+                            module: parent_dir
+                                .join(module_file.clone().unwrap())
+                                .to_str()
+                                .unwrap()
+                                .to_string(),
                             function_name,
                             args,
                             expected,
