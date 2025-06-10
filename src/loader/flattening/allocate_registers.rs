@@ -479,7 +479,7 @@ pub fn permute_allocation(
     inputs: Vec<Range<u32>>,
     first_non_reserved_addr: u32,
 ) -> RegisterGenerator {
-    let mut last_used_addr = 0;
+    let mut last_used_addr = first_non_reserved_addr;
 
     let map = InputPermutation::new(
         inputs,
