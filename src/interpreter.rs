@@ -694,6 +694,24 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_range(output_reg, &[truncated as u32]);
                     }
+                    Op::MemoryGrow { mem } => {
+                        let extra_pages = self.get_vrom_relative_u32(inputs[0].clone());
+
+                        assert_eq!(mem, 0, "Only memory 0 is supported in this interpreter");
+                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let old_num_pages = memory.get_size() / WASM_PAGE_SIZE;
+                        let new_num_pages = old_num_pages + extra_pages;
+
+                        let result = if new_num_pages > memory.get_max_num_pages() {
+                            0xFFFFFFFF // WASM spec says to return -1 on failure
+                        } else {
+                            memory.set_num_pages(new_num_pages);
+                            old_num_pages
+                        };
+
+                        self.set_vrom_relative_u32(output.unwrap(), result);
+                    }
                     Op::TableGet { table } => {
                         assert_eq!(inputs[0].len(), 1);
                         let index = self.get_vrom_relative_u32(inputs[0].clone());
@@ -982,17 +1000,17 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
         memory_accessor
     }
 
-    fn get_size(&self) -> u32 {
-        self.byte_size
+    fn get_max_num_pages(&self) -> u32 {
+        self.interpreter.get_ram(self.segment.start + 4)
     }
 
-    fn set_size(&mut self, num_pages: u32) {
+    fn set_num_pages(&mut self, num_pages: u32) {
         self.interpreter.set_ram(self.segment.start, num_pages);
         self.byte_size = num_pages * WASM_PAGE_SIZE;
     }
 
-    fn get_max_size(&self) -> u32 {
-        self.interpreter.get_ram(self.segment.start + 4) * WASM_PAGE_SIZE
+    fn get_size(&self) -> u32 {
+        self.byte_size
     }
 
     fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
