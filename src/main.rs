@@ -121,26 +121,32 @@ mod tests {
 
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
-            Ok(asserts) => {
-                // println!("assert cases: {asserts:#?}");
-                asserts
-                    .iter()
-                    .filter(|assert_case| {
-                        if let Some(functions) = functions {
-                            functions.contains(&assert_case.function_name.as_str())
-                        } else {
-                            true
-                        }
-                    })
-                    .for_each(|assert_case| {
-                        println!("Assert test case: {assert_case:#?}");
-                        test_interpreter(
-                            &assert_case.module,
-                            &assert_case.function_name,
-                            &assert_case.args,
-                            &assert_case.expected,
-                        );
-                    });
+            Ok(modules) => {
+                for (mod_name, asserts) in modules {
+                    println!("Module: {}", mod_name.display());
+
+                    let wasm_file = std::fs::read(mod_name).unwrap();
+                    let program = loader::load_wasm(&wasm_file).unwrap();
+                    let mut interpreter =
+                        interpreter::Interpreter::new(program, Externals::new(Vec::new()));
+
+                    // println!("assert cases: {asserts:#?}");
+                    asserts
+                        .iter()
+                        .filter(|assert_case| {
+                            if let Some(functions) = functions {
+                                functions.contains(&assert_case.function_name.as_str())
+                            } else {
+                                true
+                            }
+                        })
+                        .for_each(|assert_case| {
+                            println!("Assert test case: {assert_case:#?}");
+                            let got_output =
+                                interpreter.run(&assert_case.function_name, &assert_case.args);
+                            assert_eq!(got_output, assert_case.expected);
+                        });
+                }
             }
             Err(e) => panic!("Error extracting wast test info: {e}"),
         }
@@ -148,7 +154,7 @@ mod tests {
 
     use serde::Deserialize;
     use std::fs::{self, File};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use tempfile::NamedTempFile;
     use tempfile::tempdir;
@@ -171,7 +177,6 @@ mod tests {
 
     #[derive(Debug)]
     pub struct AssertCase {
-        pub module: String,
         pub function_name: String,
         pub args: Vec<u32>,
         pub expected: Vec<u32>,
@@ -194,7 +199,7 @@ mod tests {
 
     pub fn extract_wast_test_info(
         wast_path: &str,
-    ) -> Result<Vec<AssertCase>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(PathBuf, Vec<AssertCase>)>, Box<dyn std::error::Error>> {
         let temp_file = NamedTempFile::with_prefix("test")?;
         let Some(parent_dir) = temp_file.path().parent() else {
             panic!("Could not determine parent directory.");
@@ -219,14 +224,13 @@ mod tests {
         let test_file: TestFile = serde_json::from_str(&json_text)?;
         let entries = test_file.commands;
 
-        let mut module_file = None;
-        let mut assert_returns = Vec::new();
+        let mut assert_returns_per_module = Vec::new();
 
         let forbidden_types = ["f32", "f64", "i64", "i128"];
         for entry in entries {
             match entry {
                 CommandEntry::Module { filename } => {
-                    module_file = Some(filename);
+                    assert_returns_per_module.push((parent_dir.join(filename), Vec::new()));
                 }
                 CommandEntry::AssertReturn { action, expected } => {
                     if let Some(function_name) = action.field {
@@ -251,22 +255,21 @@ mod tests {
                             .iter()
                             .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
                             .collect::<Vec<_>>();
-                        assert_returns.push(AssertCase {
-                            module: parent_dir
-                                .join(module_file.clone().unwrap())
-                                .to_str()
-                                .unwrap()
-                                .to_string(),
-                            function_name,
-                            args,
-                            expected,
-                        });
+                        assert_returns_per_module
+                            .last_mut()
+                            .unwrap()
+                            .1
+                            .push(AssertCase {
+                                function_name,
+                                args,
+                                expected,
+                            });
                     }
                 }
                 CommandEntry::Other => {}
             }
         }
 
-        Ok(assert_returns)
+        Ok(assert_returns_per_module)
     }
 }
