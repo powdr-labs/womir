@@ -160,7 +160,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     Op::I32Const { value } => {
                         self.set_vrom_relative_u32(output.unwrap(), value as u32);
                     }
+                    Op::F32Const { value } => {
+                        self.set_vrom_relative_u32(output.unwrap(), value.bits());
+                    }
                     Op::I64Const { value } => {
+                        self.set_vrom_relative_range(
+                            output.unwrap(),
+                            &[value as u32, (value >> 32) as u32],
+                        );
+                    }
+                    Op::F64Const { value } => {
+                        let value = value.bits();
                         self.set_vrom_relative_range(
                             output.unwrap(),
                             &[value as u32, (value >> 32) as u32],
@@ -545,6 +555,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         drop(a);
                         self.set_vrom_relative_u32(c, val);
                     }
+                    Op::F32Gt => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+                        let b = f32::from_bits(self.get_vrom_relative_u32(b));
+
+                        let r = if a > b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::Select => {
                         let condition = self.get_vrom_relative_u32(inputs[2].clone());
 
@@ -817,6 +839,11 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 Directive::Jump { target } => {
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
+                }
+                Directive::JumpOffset { offset } => {
+                    let offset = self.get_vrom_relative_u32(offset..offset + 1);
+                    // Offset starts with 0, so we don't prevent the natural increment of the PC.
+                    self.pc += offset;
                 }
                 Directive::Trap { reason } => {
                     panic!("Trap encountered: {reason:?}");
