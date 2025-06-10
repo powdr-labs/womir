@@ -1,5 +1,5 @@
 use core::panic;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ops::Range;
 
 use itertools::Itertools;
@@ -52,7 +52,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     crate::loader::MemoryEntry::Value(v) => *v,
                     crate::loader::MemoryEntry::FuncAddr(idx) => {
                         let label = func_idx_to_label(*idx);
-                        labels[&label].func_idx.unwrap()
+                        labels[&label].pc
                     }
                     crate::loader::MemoryEntry::FuncFrameSize(func_idx) => {
                         let label = func_idx_to_label(*func_idx);
@@ -767,16 +767,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     self.pc = self.get_vrom_relative_u32(target_pc..target_pc + 1);
                     should_inc_pc = false;
 
-                    'out: {
-                        for (label, info) in self.labels.iter() {
-                            if info.pc == self.pc {
-                                println!("Calling function: {label} {info:?}");
-                                break 'out;
-                            }
-                        }
-                        panic!("CallIndirect: target PC {} not found in labels", self.pc);
-                    }
-
                     let prev_fp = self.fp;
                     self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
 
@@ -882,13 +872,28 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     fn get_vrom_absolute(&mut self, addr: u32) -> VRomValue {
-        let mut value = self.vrom[addr as usize];
-        if let VRomValue::Unassigned = value {
-            // The only reason to read an unassigned value is to assign it later,
-            // so it must become a Future.
-            value = VRomValue::Future(self.new_future());
-            self.vrom[addr as usize] = value;
-        }
+        let value = self.vrom[addr as usize];
+        let value = match value {
+            VRomValue::Concrete(_) => value,
+            VRomValue::Future(future) => {
+                // Resolve the future if it has been assigned.
+                if let Some(resolved_value) = self.future_assignments.get(&future) {
+                    let value = VRomValue::Concrete(*resolved_value);
+                    self.vrom[addr as usize] = value;
+                    value
+                } else {
+                    value
+                }
+            }
+            VRomValue::Unassigned => {
+                // The only reason to read an unassigned value is to assign it later,
+                // so it must become a Future.
+                let value = VRomValue::Future(self.new_future());
+                self.vrom[addr as usize] = value;
+                value
+            }
+        };
+
         log::trace!("Reading VRom address {addr}: {value:?}");
         value
     }

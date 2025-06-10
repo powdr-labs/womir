@@ -516,7 +516,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                     // We include two extra words for the table size and maximum size
                     let segment = mem_allocator
-                        .allocate_segment(max_entries * 4 * FunctionRef::NUM_WORDS + 8);
+                        .allocate_segment(max_entries * FunctionRef::NUM_WORDS * 4 + 8);
 
                     // Store the table size and maximum size in the initial memory
                     initial_memory
@@ -728,10 +728,10 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 let definition =
                     flattening::flatten_dag(&ctx, 4, &mut label_gen, blockless_dag, func_idx);
 
-                println!("Function: {func_idx}");
+                /*println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
                     println!("{d}");
-                }
+                }*/
 
                 ctx.functions.push(definition);
             }
