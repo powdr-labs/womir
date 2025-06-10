@@ -147,12 +147,16 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.pc = pc;
                         self.fp = fp;
                     }
+                    should_inc_pc = false;
                 }
                 Directive::WASMOp {
                     op,
                     mut inputs,
                     output,
                 } => match op {
+                    Op::Nop => {
+                        // No operation, just continue
+                    }
                     Op::I32Const { value } => {
                         self.set_vrom_relative_u32(output.unwrap(), value as u32);
                     }

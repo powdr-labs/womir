@@ -728,10 +728,10 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 let definition =
                     flattening::flatten_dag(&ctx, 4, &mut label_gen, blockless_dag, func_idx);
 
-                /*println!("");
+                println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
                     println!("{d}");
-                }*/
+                }
 
                 ctx.functions.push(definition);
             }
