@@ -90,6 +90,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         interpreter
     }
 
+    fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b, 'a, E> {
+        MemoryAccessor::new(self.program.memory.unwrap(), self)
+    }
+
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
         let func_label = &self.labels[func_name];
 
@@ -613,7 +617,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let value = self.get_vrom_relative_u32(inputs[1].clone());
 
                         assert_eq!(memarg.memory, 0);
-                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let mut memory = self.get_mem();
                         memory
                             .write_contiguous(addr, &[value])
                             .expect("Out of bounds write");
@@ -621,15 +625,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     Op::I32Store8 { memarg } => {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let word_byte = addr & 0x3;
+                        let shift = (addr & 0x3) * 8; // shift based on address alignment
                         let addr = addr & !0x3; // align to 4 bytes
 
                         let byte = self.get_vrom_relative_u32(inputs[1].clone()) & 0xff;
 
                         assert_eq!(memarg.memory, 0);
-                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let mut memory = self.get_mem();
                         let old_value = memory.get_word(addr).expect("Out of bounds read");
-                        let shift = 8 * word_byte;
                         let new_value = (old_value & !(0xff << shift)) | (byte << shift);
                         memory
                             .set_word(addr, new_value)
@@ -643,7 +646,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .collect_vec();
 
                         assert_eq!(memarg.memory, 0);
-                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let mut memory = self.get_mem();
                         memory
                             .write_contiguous(addr, &value)
                             .expect("Out of bounds write");
@@ -657,7 +660,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let memory = self.get_mem();
                         let value = memory
                             .read_contiguous(addr, len)
                             .expect("Out of bounds read");
@@ -673,7 +676,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let memory = self.get_mem();
 
                         let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
 
@@ -689,7 +692,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         assert_eq!(memarg.memory, 0);
 
-                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let memory = self.get_mem();
 
                         let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
 
@@ -708,7 +711,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         assert_eq!(memarg.memory, 0);
 
-                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let memory = self.get_mem();
 
                         let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
 
@@ -724,7 +727,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         assert_eq!(memarg.memory, 0);
 
-                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let memory = self.get_mem();
 
                         let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
 
@@ -737,7 +740,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let extra_pages = self.get_vrom_relative_u32(inputs[0].clone());
 
                         assert_eq!(mem, 0, "Only memory 0 is supported in this interpreter");
-                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let mut memory = self.get_mem();
 
                         let old_num_pages = memory.get_size() / WASM_PAGE_SIZE;
                         let new_num_pages = old_num_pages + extra_pages;
