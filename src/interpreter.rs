@@ -618,6 +618,23 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .write_contiguous(addr, &[value])
                             .expect("Out of bounds write");
                     }
+                    Op::I32Store8 { memarg } => {
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let word_byte = addr & 0x3;
+                        let addr = addr & !0x3; // align to 4 bytes
+
+                        let byte = self.get_vrom_relative_u32(inputs[1].clone()) & 0xff;
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let old_value = memory.get_word(addr).expect("Out of bounds read");
+                        let shift = 8 * word_byte;
+                        let new_value = (old_value & !(0xff << shift)) | (byte << shift);
+                        memory
+                            .set_word(addr, new_value)
+                            .expect("Out of bounds write");
+                    }
                     Op::I64Store { memarg } => {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
@@ -812,6 +829,23 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                     self.set_vrom_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
                     self.set_vrom_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                }
+                Directive::ImportedCall {
+                    module,
+                    function,
+                    inputs,
+                    outputs,
+                } => {
+                    let args = inputs
+                        .into_iter()
+                        .flatten()
+                        .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
+                        .collect_vec();
+                    let result = self.external_functions.call(module, function, &args);
+                    for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
+                    {
+                        self.set_vrom_relative_u32(output..output + 1, value);
+                    }
                 }
                 Directive::JumpAndActivateFrame {
                     target,
