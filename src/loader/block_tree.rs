@@ -43,6 +43,7 @@ use super::{Block, BlockKind, Element, Instruction, Program};
 ///  - a consequence of the previous, loops are only exited through breaks. An outer block is added to the loop if
 ///    needed to break out of it;
 ///  - dead code is removed after non-fallthrough loops and `br`, `br_table` and `unreachable` instructions;
+#[derive(Debug)]
 pub struct BlockTree<'a> {
     pub elements: Vec<Element<'a>>,
 }
@@ -281,11 +282,12 @@ fn parse_contents<'a>(
                 true
             }
             Operator::BrTable { targets } => {
-                let targets = targets
+                let mut t = targets
                     .targets()
-                    .map(|target| target)
                     .collect::<wasmparser::Result<Vec<u32>>>()?;
-                output_elements.push(Instruction::BrTable { targets }.into());
+                // Default target goes last.
+                t.push(targets.default());
+                output_elements.push(Instruction::BrTable { targets: t }.into());
 
                 false
             }

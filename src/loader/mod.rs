@@ -516,7 +516,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                     // We include two extra words for the table size and maximum size
                     let segment = mem_allocator
-                        .allocate_segment(max_entries * 4 * FunctionRef::NUM_WORDS + 8);
+                        .allocate_segment(max_entries * FunctionRef::NUM_WORDS * 4 + 8);
 
                     // Store the table size and maximum size in the initial memory
                     initial_memory
@@ -707,11 +707,11 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 );
             }
             Payload::CodeSectionEntry(function) => {
-                log::debug!("Code Section Entry found");
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
                 let func_idx = ctx.functions.len() as u32;
+                log::debug!("Code Section Entry found, function {func_idx}");
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
 
@@ -728,7 +728,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 let definition =
                     flattening::flatten_dag(&ctx, 4, &mut label_gen, blockless_dag, func_idx);
 
-                /*println!("");
+                /*println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
                     println!("{d}");
                 }*/
