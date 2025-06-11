@@ -4,6 +4,7 @@ use wasmparser::Operator as Op;
 
 use crate::loader::flattening::{Directive, WriteOnceASM};
 
+#[derive(Debug)]
 pub struct LabelValue {
     pub pc: u32,
     pub frame_size: Option<u32>,

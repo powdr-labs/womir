@@ -4,6 +4,7 @@ mod dag;
 pub mod flattening;
 mod locals_data_flow;
 
+use core::panic;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     ops::RangeFrom,
@@ -36,17 +37,14 @@ pub struct AllocatedVar {
 }
 
 /// WASM defined page size is 64 KiB.
-const PAGE_SIZE: u32 = 65536;
-
-/// What size we reserve for the stack, in bytes.
-const STACK_SIZE: u32 = 1024 * 1024 * 1024; // 1 GiB
+pub const WASM_PAGE_SIZE: u32 = 65536;
 
 /// If the table has no specified maximum size, we assign it a large default, in number of entries.
 const DEFAULT_MAX_TABLE_SIZE: u32 = 4096;
 
 /// Segment is not a WASM concept, but it is used to mean a region of memory
 /// that is allocated for a WASM table or memory.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct Segment {
     /// The start address of the segment, in bytes.
     pub start: u32,
@@ -54,7 +52,7 @@ pub struct Segment {
     pub size: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum MemoryEntry {
     /// Actual value stored in memory word.
     Value(u32),
@@ -182,7 +180,7 @@ impl FunctionRef {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Program<'a> {
     types: Vec<Rc<FuncType>>,
     func_types: Vec<u32>,
@@ -299,10 +297,10 @@ impl<'a> Program<'a> {
         if self.memory.is_none() {
             let maximum_size = mem_allocator
                 .remaining_space()
-                // From all the memory available, we reserve the space for the stack, and the 8 bytes needed
+                // From all the memory available, we reserve the 8 bytes needed
                 // to store the size of the memory and its maximum size:
-                .saturating_sub(STACK_SIZE + 8)
-                / PAGE_SIZE;
+                .saturating_sub(8)
+                / WASM_PAGE_SIZE;
 
             if maximum_size < mem_type.initial as u32 {
                 panic!(
@@ -314,7 +312,7 @@ impl<'a> Program<'a> {
                 .maximum
                 .map_or(maximum_size, |v| maximum_size.min(v as u32));
 
-            let segment = mem_allocator.allocate_segment(maximum_size * PAGE_SIZE + 8);
+            let segment = mem_allocator.allocate_segment(maximum_size * WASM_PAGE_SIZE + 8);
             initial_memory.insert(segment.start, MemoryEntry::Value(mem_type.initial as u32));
             initial_memory.insert(segment.start + 4, MemoryEntry::Value(maximum_size));
 
@@ -333,15 +331,8 @@ const fn sz(val_type: ValType) -> u32 {
         ValType::F32 => 4,
         ValType::F64 => 8,
         ValType::V128 => 16,
-        // Function references are 64 bits because the first 32 bits are
-        // the function type index, and the other 32 bits are the function
-        // address in code space.
-        //
-        // For extern references (that we don't provide any means to instantiate),
-        // I am very tempted to use 0 bytes, but in the spirit that it might be
-        // useful in the future, I will use 8 bytes, so that it has the same size
-        // as a function reference.
-        ValType::Ref(_) => 8,
+        // References don't have a visible size in the WASM memory.
+        ValType::Ref(_) => panic!("Cannot get size of reference type"),
     }
 }
 
@@ -525,7 +516,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                     // We include two extra words for the table size and maximum size
                     let segment = mem_allocator
-                        .allocate_segment(max_entries * 4 * FunctionRef::NUM_WORDS + 8);
+                        .allocate_segment(max_entries * FunctionRef::NUM_WORDS * 4 + 8);
 
                     // Store the table size and maximum size in the initial memory
                     initial_memory
@@ -716,11 +707,11 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 );
             }
             Payload::CodeSectionEntry(function) => {
-                log::debug!("Code Section Entry found");
                 // By the time we get here, the ctx will be complete,
                 // because all previous sections have been processed.
 
                 let func_idx = ctx.functions.len() as u32;
+                log::debug!("Code Section Entry found, function {func_idx}");
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
 
@@ -737,10 +728,10 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 let definition =
                     flattening::flatten_dag(&ctx, 4, &mut label_gen, blockless_dag, func_idx);
 
-                println!("");
+                /*println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
                     println!("{d}");
-                }
+                }*/
 
                 ctx.functions.push(definition);
             }
@@ -801,7 +792,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             else {
                                 panic!("Memory size is a label");
                             };
-                            let mem_size = mem_size * PAGE_SIZE;
+                            let mem_size = mem_size * WASM_PAGE_SIZE;
                             assert!(offset + data_segment.data.len() as u32 <= mem_size);
 
                             let mut byte_offset = memory.start + 8 + offset;

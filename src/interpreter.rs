@@ -1,13 +1,17 @@
+use core::panic;
 use std::collections::HashMap;
+use std::ops::Range;
 
+use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::linker;
 use crate::loader::flattening::Directive;
-use crate::loader::{Program, func_idx_to_label, word_count_type};
+use crate::loader::{Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VRomValue {
+    Unassigned,
     Future(u32),
     Concrete(u32),
 }
@@ -18,44 +22,67 @@ impl From<u32> for VRomValue {
     }
 }
 
-impl VRomValue {
-    pub fn as_u32(&self) -> u32 {
-        match self {
-            VRomValue::Future(_) => panic!("Cannot convert future to u32"),
-            VRomValue::Concrete(value) => *value,
-        }
-    }
-}
-
-pub struct Interpreter<'a> {
-    // TODO: maybe these 3 initial fields should be unique per `run()` call?
+pub struct Interpreter<'a, E: ExternalFunctions> {
+    // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
     future_counter: u32,
-    next_free_ptr: u32,
-    vrom: HashMap<u32, VRomValue>,
+    future_assignments: HashMap<u32, u32>,
+    vrom: Vec<VRomValue>,
+    ram: HashMap<u32, u32>,
     program: Program<'a>,
+    external_functions: E,
     flat_program: Vec<Directive<'a>>,
     labels: HashMap<String, linker::LabelValue>,
 }
 
-impl<'a> Interpreter<'a> {
-    pub fn new(program: &Program<'a>) -> Self {
+pub trait ExternalFunctions {
+    fn call(&mut self, module: &str, func: &str, args: &[u32]) -> Vec<u32>;
+}
+
+impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
+    pub fn new(program: Program<'a>, external_functions: E) -> Self {
         let (flat_program, labels) = linker::link(&program.functions, 0x1);
 
-        let mut interpreter = Interpreter {
+        let ram = program
+            .initial_memory
+            .iter()
+            .filter_map(|(addr, value)| {
+                let value = match value {
+                    crate::loader::MemoryEntry::Value(v) => *v,
+                    crate::loader::MemoryEntry::FuncAddr(idx) => {
+                        let label = func_idx_to_label(*idx);
+                        labels[&label].pc
+                    }
+                    crate::loader::MemoryEntry::FuncFrameSize(func_idx) => {
+                        let label = func_idx_to_label(*func_idx);
+                        labels[&label].frame_size.unwrap()
+                    }
+                };
+
+                if value == 0 {
+                    None
+                } else {
+                    Some((*addr, value))
+                }
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut interpreter = Self {
             pc: 0,
             fp: 0,
             future_counter: 0,
+            future_assignments: HashMap::new(),
             // We leave 0 unused for convention = successful termination.
-            next_free_ptr: 1,
-            vrom: HashMap::new(),
-            program: program.clone(),
+            vrom: vec![VRomValue::Unassigned],
+            ram,
+            program,
+            external_functions,
             flat_program,
             labels,
         };
 
-        if let Some(start_function) = program.start_function {
+        if let Some(start_function) = interpreter.program.start_function {
             let label = func_idx_to_label(start_function);
             interpreter.run(&label, &[]);
         }
@@ -74,7 +101,7 @@ impl<'a> Interpreter<'a> {
             .sum();
         assert_eq!(inputs.len(), n_inputs as usize);
 
-        let n_outputs = func_type
+        let n_outputs: u32 = func_type
             .results()
             .iter()
             .map(|ty| word_count_type(*ty, 4))
@@ -84,18 +111,18 @@ impl<'a> Interpreter<'a> {
         self.fp = self.allocate(func_label.frame_size.unwrap());
         let first_fp = self.fp;
 
-        self.set_vrom_relative_u32(0, 0); // final return pc
-        self.set_vrom_relative_u32(1, 0); // return fp success
-        self.set_vrom_relative_range(2, inputs);
+        self.set_vrom_relative_u32(0..1, 0); // final return pc
+        self.set_vrom_relative_u32(1..2, 0); // return fp success
+        self.set_vrom_relative_range(2..2 + inputs.len() as u32, inputs);
 
         let output_start = 2 + inputs.len() as u32;
-        self.set_vrom_relative_range_future(output_start, n_outputs);
+        self.set_vrom_relative_range_future(output_start..output_start + n_outputs);
 
         self.run_loop();
 
         // We assume that all output futures have been resolved.
         (output_start..output_start + n_outputs)
-            .map(|i| self.get_vrom_absolute(first_fp + i).as_u32())
+            .map(|i| self.get_vrom_absolute_u32(first_fp + i))
             .collect::<Vec<u32>>()
     }
 
@@ -107,93 +134,619 @@ impl<'a> Interpreter<'a> {
             let mut should_inc_pc = true;
 
             match instr {
-                Directive::Label { id, frame_size } => {
+                Directive::Label { .. } => {
                     should_inc_pc = false;
                     // do nothing
                 }
                 Directive::Return { ret_pc, ret_fp } => {
-                    let pc = self.get_vrom_relative(ret_pc).as_u32();
-                    let fp = self.get_vrom_relative(ret_fp).as_u32();
+                    let pc = self.get_vrom_relative_u32(ret_pc..ret_pc + 1);
+                    let fp = self.get_vrom_relative_u32(ret_fp..ret_fp + 1);
                     if pc == 0 {
                         break fp;
                     } else {
                         self.pc = pc;
                         self.fp = fp;
                     }
+                    should_inc_pc = false;
                 }
-                Directive::WASMOp { op, inputs, output } => match op {
+                Directive::WASMOp {
+                    op,
+                    mut inputs,
+                    output,
+                } => match op {
+                    Op::Nop => {
+                        // No operation, just continue
+                    }
                     Op::I32Const { value } => {
-                        let output_reg = output.clone().unwrap().next().unwrap();
-                        self.set_vrom_relative_u32(output_reg, value as u32);
+                        self.set_vrom_relative_u32(output.unwrap(), value as u32);
+                    }
+                    Op::F32Const { value } => {
+                        self.set_vrom_relative_u32(output.unwrap(), value.bits());
+                    }
+                    Op::I64Const { value } => {
+                        self.set_vrom_relative_range(
+                            output.unwrap(),
+                            &[value as u32, (value >> 32) as u32],
+                        );
+                    }
+                    Op::F64Const { value } => {
+                        let value = value.bits();
+                        self.set_vrom_relative_range(
+                            output.unwrap(),
+                            &[value as u32, (value >> 32) as u32],
+                        );
                     }
                     Op::I32Add => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a.wrapping_add(b);
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    Op::I32Sub => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
-                        let c = output.unwrap().next().unwrap();
+                    Op::I64Add => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+                        let r = a.wrapping_add(b);
+
+                        self.set_vrom_relative_range(c, &[r as u32, (r >> 32) as u32]);
+                    }
+                    Op::I32Sub => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a.wrapping_sub(b);
 
                         self.set_vrom_relative_u32(c, r);
                     }
-
                     Op::I32Mul => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
-                        let c = output.unwrap().next().unwrap();
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a.wrapping_mul(b);
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    Op::I32GtU => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
-                        let c = output.unwrap().next().unwrap();
+                    Op::I32DivU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32DivU");
+                        }
+
+                        let r = a / b;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32DivS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32DivU");
+                        }
+                        if a == i32::MIN && b == -1 {
+                            panic!("integer overflow in I32DivS");
+                        }
+
+                        let r = a.wrapping_div(b) as u32;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32RemU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32RemU");
+                        }
+
+                        let r = a % b;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32RemS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I32RemS");
+                        }
+
+                        let r = a.wrapping_rem(b);
+
+                        self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I32LtU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        let r = if a < b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32LtS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a < b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32LeS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a <= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32LeU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        let r = if a <= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32GtU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = if a > b { 1 } else { 0 };
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    Op::I32And => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
-                        let c = output.unwrap().next().unwrap();
+                    Op::I32GtS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a > b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32GeS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) as i32;
+
+                        let r = if a >= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32GeU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+
+                        let r = if a >= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32And => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
                         let r = a & b;
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    Op::I32ShrU => {
-                        let a = inputs[0].clone().next().unwrap();
-                        let b = inputs[1].clone().next().unwrap();
-                        let c = output.unwrap().next().unwrap();
+                    Op::I32Or => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
 
-                        let a = self.get_vrom_relative(a).as_u32();
-                        let b = self.get_vrom_relative(b).as_u32();
-                        let r = a >> b;
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+                        let r = a | b;
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    _ => todo!(),
+                    Op::I32Xor => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b);
+                        let r = a ^ b;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Shl => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F; // only lower 5 bits are used
+
+                        let r = a.wrapping_shl(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32ShrU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.wrapping_shr(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32ShrS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.wrapping_shr(b);
+
+                        self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I32Rotl => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.rotate_left(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Rotr => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+                        let b = self.get_vrom_relative_u32(b) & 0x1F;
+
+                        let r = a.rotate_right(b);
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Clz => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        let r = a.leading_zeros();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Ctz => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        let r = a.trailing_zeros();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Popcnt => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        let r = a.count_ones();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I32Extend8S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        // Take the lowest 8 bits and sign-extend to i32
+                        let r = (a as u8) as i8 as i32;
+
+                        self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I32Extend16S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        // Take lower 16 bits and sign-extend to i32
+                        let r = (a as u16) as i16 as i32;
+
+                        self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I32Eq | Op::I64Eq => {
+                        let a = self
+                            .get_vrom_relative_range(inputs[0].clone())
+                            .collect_vec();
+                        let b = self.get_vrom_relative_range(inputs[1].clone());
+                        let c = output.unwrap();
+
+                        let val = if b.eq(a) { 1 } else { 0 };
+                        self.set_vrom_relative_u32(c, val);
+                    }
+                    Op::I32Ne | Op::I64Ne => {
+                        let a = self
+                            .get_vrom_relative_range(inputs[0].clone())
+                            .collect_vec();
+                        let b = self.get_vrom_relative_range(inputs[1].clone());
+                        let c = output.unwrap();
+
+                        let val = if !b.eq(a) { 1 } else { 0 };
+                        self.set_vrom_relative_u32(c, val);
+                    }
+                    Op::I32Eqz | Op::I64Eqz => {
+                        let mut a = self.get_vrom_relative_range(inputs[0].clone());
+                        let c = output.unwrap();
+
+                        let val = if a.all(|x| x == 0) { 1 } else { 0 };
+                        drop(a);
+                        self.set_vrom_relative_u32(c, val);
+                    }
+                    Op::F32Gt => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+                        let b = f32::from_bits(self.get_vrom_relative_u32(b));
+
+                        let r = if a > b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::Select => {
+                        let condition = self.get_vrom_relative_u32(inputs[2].clone());
+
+                        let selected = inputs[if condition != 0 { 0 } else { 1 }].clone();
+                        let value = selected.map(|r| self.get_vrom_relative(r)).collect_vec();
+
+                        let output = output.unwrap();
+                        for (output_reg, value) in output.zip_eq(value) {
+                            self.set_vrom_relative(output_reg, value);
+                        }
+                    }
+                    Op::GlobalGet { global_index } => {
+                        let global_info = self.program.globals[global_index as usize];
+                        let output = output.unwrap();
+
+                        let size = word_count_type(global_info.val_type, 4);
+                        assert_eq!(size, output.len() as u32);
+
+                        let value = (0..size)
+                            .map(|i| self.get_ram(global_info.address + 4 * i as u32))
+                            .collect_vec();
+                        self.set_vrom_relative_range(output, &value);
+                    }
+                    Op::GlobalSet { global_index } => {
+                        let global_info = self.program.globals[global_index as usize];
+
+                        let origin = inputs.pop().unwrap();
+                        assert!(
+                            inputs.is_empty(),
+                            "GlobalSet should have no additional inputs"
+                        );
+
+                        let size = word_count_type(global_info.val_type, 4);
+                        assert_eq!(origin.len(), size as usize);
+
+                        let value = self.get_vrom_relative_range(origin).collect_vec();
+                        for (i, value) in value.into_iter().enumerate() {
+                            self.set_ram(global_info.address + 4 * i as u32, value);
+                        }
+                    }
+                    Op::I32Store { memarg } => {
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let value = self.get_vrom_relative_u32(inputs[1].clone());
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        memory
+                            .write_contiguous(addr, &[value])
+                            .expect("Out of bounds write");
+                    }
+                    Op::I64Store { memarg } => {
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let value = self
+                            .get_vrom_relative_range(inputs[1].clone())
+                            .collect_vec();
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        memory
+                            .write_contiguous(addr, &value)
+                            .expect("Out of bounds write");
+                    }
+                    Op::I32Load { memarg } | Op::I64Load { memarg } => {
+                        let output_reg = output.unwrap();
+                        let len = output_reg.len() as u32;
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+                        let value = memory
+                            .read_contiguous(addr, len)
+                            .expect("Out of bounds read");
+
+                        self.set_vrom_relative_range(output_reg, &value);
+                    }
+                    Op::I32Load8U { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
+
+                        self.set_vrom_relative_range(output_reg, &[byte]);
+                    }
+                    Op::I32Load8S { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
+
+                        let signed = (byte as i8) as i32;
+                        let truncated = signed as u8;
+
+                        self.set_vrom_relative_range(output_reg, &[truncated as u32]);
+                    }
+                    Op::I32Load16U { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
+
+                        self.set_vrom_relative_range(output_reg, &[bytes]);
+                    }
+                    Op::I32Load16S { memarg } => {
+                        let output_reg = output.unwrap();
+                        assert_eq!(output_reg.len(), 1);
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+
+                        let memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
+
+                        let sign_extended = bytes as i32;
+                        let truncated = sign_extended as u16;
+
+                        self.set_vrom_relative_range(output_reg, &[truncated as u32]);
+                    }
+                    Op::MemoryGrow { mem } => {
+                        let extra_pages = self.get_vrom_relative_u32(inputs[0].clone());
+
+                        assert_eq!(mem, 0, "Only memory 0 is supported in this interpreter");
+                        let mut memory = MemoryAccessor::new(self.program.memory.unwrap(), self);
+
+                        let old_num_pages = memory.get_size() / WASM_PAGE_SIZE;
+                        let new_num_pages = old_num_pages + extra_pages;
+
+                        let result = if new_num_pages > memory.get_max_num_pages() {
+                            0xFFFFFFFF // WASM spec says to return -1 on failure
+                        } else {
+                            memory.set_num_pages(new_num_pages);
+                            old_num_pages
+                        };
+
+                        self.set_vrom_relative_u32(output.unwrap(), result);
+                    }
+                    Op::TableGet { table } => {
+                        assert_eq!(inputs[0].len(), 1);
+                        let index = self.get_vrom_relative_u32(inputs[0].clone());
+
+                        let table = TableAccessor::new(self.program.tables[table as usize], self);
+                        let entry = table
+                            .get_entry(index)
+                            .expect("TableGet: index out of bounds");
+
+                        let output_reg = output.unwrap();
+                        self.set_vrom_relative_range(output_reg, &entry);
+                    }
+                    _ => todo!("Unsupported WASM operator: {op:?}"),
                 },
                 Directive::AllocateFrameI {
                     target_frame,
@@ -201,7 +754,22 @@ impl<'a> Interpreter<'a> {
                 } => {
                     let frame_size = self.labels[&target_frame].frame_size.unwrap();
                     let ptr = self.allocate(frame_size);
-                    self.set_vrom_relative_u32(result_ptr, ptr);
+                    self.set_vrom_relative_u32(result_ptr..result_ptr + 1, ptr);
+                }
+                Directive::AllocateFrameV {
+                    frame_size,
+                    result_ptr,
+                } => {
+                    let frame_size = self.get_vrom_relative_u32(frame_size..frame_size + 1);
+                    let ptr = self.allocate(frame_size);
+                    self.set_vrom_relative_u32(result_ptr..result_ptr + 1, ptr);
+                }
+                Directive::Copy {
+                    src_word,
+                    dest_word,
+                } => {
+                    let value = self.get_vrom_relative(src_word);
+                    self.set_vrom_relative(dest_word, value);
                 }
                 Directive::CopyIntoFrame {
                     src_word,
@@ -209,8 +777,41 @@ impl<'a> Interpreter<'a> {
                     dest_word,
                 } => {
                     let value = self.get_vrom_relative(src_word);
-                    let target_ptr = self.get_vrom_relative(dest_frame).as_u32() + dest_word;
+                    let target_ptr =
+                        self.get_vrom_relative_u32(dest_frame..dest_frame + 1) + dest_word;
                     self.set_vrom_absolute(target_ptr, value);
+                }
+                Directive::Call {
+                    target,
+                    new_frame_ptr,
+                    saved_ret_pc,
+                    saved_caller_fp,
+                } => {
+                    let prev_pc = self.pc;
+                    self.pc = self.labels[&target].pc;
+                    should_inc_pc = false;
+
+                    let prev_fp = self.fp;
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+
+                    self.set_vrom_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    self.set_vrom_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                }
+                Directive::CallIndirect {
+                    target_pc,
+                    new_frame_ptr,
+                    saved_ret_pc,
+                    saved_caller_fp,
+                } => {
+                    let prev_pc = self.pc;
+                    self.pc = self.get_vrom_relative_u32(target_pc..target_pc + 1);
+                    should_inc_pc = false;
+
+                    let prev_fp = self.fp;
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+
+                    self.set_vrom_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    self.set_vrom_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                 }
                 Directive::JumpAndActivateFrame {
                     target,
@@ -221,15 +822,15 @@ impl<'a> Interpreter<'a> {
                     should_inc_pc = false;
 
                     let prev_fp = self.fp;
-                    self.fp = self.get_vrom_relative(new_frame_ptr).as_u32();
+                    self.fp = self.get_vrom_relative_u32(new_frame_ptr..new_frame_ptr + 1);
 
                     if let Some(saved_caller_fp) = saved_caller_fp {
-                        self.set_vrom_relative_u32(saved_caller_fp, prev_fp);
+                        self.set_vrom_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                     }
                 }
                 Directive::JumpIf { target, condition } => {
                     let target = self.labels[&target].pc;
-                    let cond = self.get_vrom_relative(condition).as_u32();
+                    let cond = self.get_vrom_relative_u32(condition..condition + 1);
                     if cond != 0 {
                         self.pc = target;
                         should_inc_pc = false;
@@ -239,7 +840,15 @@ impl<'a> Interpreter<'a> {
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
                 }
-                _ => todo!(),
+                Directive::JumpOffset { offset } => {
+                    let offset = self.get_vrom_relative_u32(offset..offset + 1);
+                    // Offset starts with 0, so we don't prevent the natural increment of the PC.
+                    self.pc += offset;
+                }
+                Directive::Trap { reason } => {
+                    panic!("Trap encountered: {reason:?}");
+                }
+                _ => todo!("Unsupported directive: {instr:?}"),
             }
 
             if should_inc_pc {
@@ -254,48 +863,312 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn get_vrom_relative(&self, addr: u32) -> VRomValue {
-        self.vrom[&(self.fp + addr)]
+    fn get_ram(&self, byte_addr: u32) -> u32 {
+        *self.ram.get(&byte_addr).unwrap_or(&0)
     }
 
-    fn get_vrom_absolute(&self, addr: u32) -> VRomValue {
-        self.vrom[&addr]
-    }
-
-    fn set_vrom_relative(&mut self, addr: u32, value: VRomValue) {
-        self.vrom.insert(self.fp + addr, value);
-    }
-
-    fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
-        self.vrom.insert(addr, value);
-    }
-
-    fn set_vrom_relative_u32(&mut self, addr: u32, value: u32) {
-        self.vrom.insert(self.fp + addr, value.into());
-    }
-
-    fn set_vrom_relative_range(&mut self, addr: u32, values: &[u32]) {
-        for (i, &value) in values.iter().enumerate() {
-            self.vrom.insert(self.fp + addr + i as u32, value.into());
+    fn set_ram(&mut self, byte_addr: u32, value: u32) {
+        if value == 0 {
+            self.ram.remove(&byte_addr);
+        } else {
+            self.ram.insert(byte_addr, value);
         }
     }
 
-    fn set_vrom_relative_range_future(&mut self, addr: u32, amount: u32) {
-        for i in addr..addr + amount {
+    fn get_vrom_absolute_u32(&mut self, addr: u32) -> u32 {
+        let value = &mut self.get_vrom_absolute(addr);
+        match *value {
+            VRomValue::Concrete(v) => v,
+            VRomValue::Future(future) => {
+                // Resolve the future if it has been assigned.
+                if let Some(resolved_value) = self.future_assignments.get(&future) {
+                    *value = VRomValue::Concrete(*resolved_value);
+                    *resolved_value
+                } else {
+                    panic!(
+                        "Can not convert future {future} to u32. It has not been assigned a value yet."
+                    );
+                }
+            }
+            VRomValue::Unassigned => {
+                panic!("Can not convert unassigned to u32");
+            }
+        }
+    }
+
+    fn get_vrom_relative_u32(&mut self, addr: Range<u32>) -> u32 {
+        assert_eq!(addr.len(), 1, "Expected a single address range");
+        self.get_vrom_absolute_u32(self.fp + addr.start)
+    }
+
+    fn get_vrom_relative_u64(&mut self, addr: Range<u32>) -> u64 {
+        assert_eq!(addr.len(), 2, "Expected a single address range");
+        let low = self.get_vrom_absolute_u32(self.fp + addr.start);
+        let high = self.get_vrom_absolute_u32(self.fp + addr.start + 1);
+        (low as u64) | ((high as u64) << 32)
+    }
+
+    fn get_vrom_relative_range(&mut self, addr: Range<u32>) -> impl Iterator<Item = u32> {
+        addr.map(|i| self.get_vrom_absolute_u32(self.fp + i))
+    }
+
+    fn get_vrom_relative(&mut self, addr: u32) -> VRomValue {
+        self.get_vrom_absolute(self.fp + addr)
+    }
+
+    fn get_vrom_absolute(&mut self, addr: u32) -> VRomValue {
+        let value = self.vrom[addr as usize];
+        let value = match value {
+            VRomValue::Concrete(_) => value,
+            VRomValue::Future(future) => {
+                // Resolve the future if it has been assigned.
+                if let Some(resolved_value) = self.future_assignments.get(&future) {
+                    let value = VRomValue::Concrete(*resolved_value);
+                    self.vrom[addr as usize] = value;
+                    value
+                } else {
+                    value
+                }
+            }
+            VRomValue::Unassigned => {
+                // The only reason to read an unassigned value is to assign it later,
+                // so it must become a Future.
+                let value = VRomValue::Future(self.new_future());
+                self.vrom[addr as usize] = value;
+                value
+            }
+        };
+
+        log::trace!("Reading VRom address {addr}: {value:?}");
+        value
+    }
+
+    fn set_vrom_relative(&mut self, addr: u32, value: VRomValue) {
+        self.set_vrom_absolute(self.fp + addr, value);
+    }
+
+    fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
+        let slot = &mut self.vrom[addr as usize];
+        log::trace!("Setting VRom address {addr}: {value:?}");
+        match (*slot, value) {
+            (VRomValue::Unassigned, VRomValue::Unassigned) => {
+                // This is important to catch to prevent bugs.
+                panic!("Attempted to assign an unassigned value to VRom");
+            }
+            (VRomValue::Unassigned, _) => {
+                *slot = value;
+            }
+            (VRomValue::Future(future), VRomValue::Concrete(value)) => {
+                // Assigning Concrete values to Futures materializes it.
+                self.future_assignments
+                    .insert(future, value)
+                    .map(|old_value| {
+                        assert_eq!(old_value, value, "Attempted to overwrite a value in VRom");
+                    });
+                log::debug!("Future {future} materialized to value {value}");
+            }
+            (_, _) => {
+                assert_eq!(*slot, value, "Attempted to overwrite a value in VRom");
+            }
+        }
+    }
+
+    fn set_vrom_relative_u32(&mut self, addr: Range<u32>, value: u32) {
+        assert_eq!(addr.len(), 1, "Expected a single address range");
+        self.set_vrom_relative(addr.start, value.into());
+    }
+
+    fn set_vrom_relative_range(&mut self, addr: Range<u32>, values: &[u32]) {
+        assert_eq!(
+            addr.len(),
+            values.len(),
+            "Address range and values length mismatch"
+        );
+        for (addr, &value) in addr.zip(values.iter()) {
+            self.set_vrom_relative(addr, value.into());
+        }
+    }
+
+    fn set_vrom_relative_range_future(&mut self, addr: Range<u32>) {
+        for i in addr {
             let future = self.new_future();
-            self.vrom.insert(self.fp + i, VRomValue::Future(future));
+            self.set_vrom_relative(i, VRomValue::Future(future));
         }
     }
 
     fn allocate(&mut self, size: u32) -> u32 {
-        let addr = self.next_free_ptr;
-        self.next_free_ptr += size;
-        addr
+        let addr = self.vrom.len();
+        self.vrom
+            .resize_with(addr + size as usize, || VRomValue::Unassigned);
+        addr as u32
     }
 
     fn new_future(&mut self) -> u32 {
         let future = self.future_counter;
         self.future_counter += 1;
         future
+    }
+}
+
+struct MemoryAccessor<'a, 'b, E: ExternalFunctions> {
+    segment: Segment,
+    interpreter: &'a mut Interpreter<'b, E>,
+    byte_size: u32,
+}
+
+impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
+    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
+        let byte_size = interpreter.get_ram(segment.start) * WASM_PAGE_SIZE;
+        let memory_accessor = MemoryAccessor {
+            segment,
+            interpreter,
+            byte_size,
+        };
+        memory_accessor
+    }
+
+    fn get_max_num_pages(&self) -> u32 {
+        self.interpreter.get_ram(self.segment.start + 4)
+    }
+
+    fn set_num_pages(&mut self, num_pages: u32) {
+        self.interpreter.set_ram(self.segment.start, num_pages);
+        self.byte_size = num_pages * WASM_PAGE_SIZE;
+    }
+
+    fn get_size(&self) -> u32 {
+        self.byte_size
+    }
+
+    fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
+        assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
+        if byte_addr >= self.get_size() {
+            return Err(());
+        }
+        let ram_addr = self.segment.start + 8 + byte_addr;
+        let value = self.interpreter.get_ram(ram_addr);
+        log::trace!("Reading Memory word at {ram_addr}: {value}");
+        Ok(value)
+    }
+
+    fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
+        assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
+        if byte_addr >= self.get_size() {
+            return Err(());
+        }
+        let ram_addr = self.segment.start + 8 + byte_addr;
+        self.interpreter.set_ram(ram_addr, value);
+        log::trace!("Writing Memory word at {ram_addr}: {value}");
+        Ok(())
+    }
+
+    fn write_contiguous(&mut self, byte_addr: u32, data: &[u32]) -> Result<(), ()> {
+        if byte_addr % 4 == 0 {
+            // Simple aligned writes
+            for (i, &value) in data.iter().enumerate() {
+                let addr = byte_addr + (i as u32 * 4);
+                self.set_word(addr, value)?;
+            }
+        } else if !data.is_empty() {
+            // Unaligned writes
+            let offset_bytes = (byte_addr % 4) as usize;
+            let shift = (offset_bytes * 8) as u32;
+            let high_shift = 32u32 - shift;
+
+            let first_word_addr = byte_addr & !3;
+
+            // Handle first partial word
+            let old_first_word = self.get_word(first_word_addr)?;
+            let first_keep_mask = (1u32 << shift) - 1;
+            let mut carry_over = data[0] >> high_shift; // Bytes to write into next word
+            let new_first_word = (old_first_word & first_keep_mask) | (data[0] << shift);
+            self.set_word(first_word_addr, new_first_word)?;
+
+            // Handle full middle words
+            for i in 1..data.len() {
+                let current_addr = first_word_addr + (i as u32 * 4);
+
+                let combined = carry_over | (data[i] << shift);
+                self.set_word(current_addr, combined)?;
+                carry_over = data[i] >> high_shift;
+            }
+
+            // Final partial word (or single-word case)
+            let final_addr = first_word_addr + ((data.len() as u32) * 4);
+            let old_final_word = self.get_word(final_addr)?;
+            let final_keep_mask = 0xFFFFFFFFu32 << (offset_bytes * 8);
+            let new_final_word =
+                (old_final_word & final_keep_mask) | (carry_over & !final_keep_mask);
+            self.set_word(final_addr, new_final_word)?;
+        }
+        Ok(())
+    }
+
+    fn read_contiguous(&self, byte_addr: u32, num_words: u32) -> Result<Vec<u32>, ()> {
+        let mut data = Vec::with_capacity(num_words as usize);
+        if byte_addr % 4 == 0 {
+            // Simple aligned reads
+            for i in 0..num_words {
+                let addr = byte_addr + (i * 4);
+                data.push(self.get_word(addr)?);
+            }
+        } else if num_words > 0 {
+            // Unaligned reads
+            let offset_bytes = (byte_addr % 4) as usize;
+            let shift = (offset_bytes * 8) as u32;
+            let high_shift = 32u32 - shift;
+
+            let first_word_addr = byte_addr & !3;
+
+            // Read first partial word
+            let first_word = self.get_word(first_word_addr)?;
+            let mut lower_bits = first_word >> shift;
+
+            // Complete and write all the words
+            for i in 1..=num_words {
+                let current_addr = first_word_addr + (i * 4);
+                let word = self.get_word(current_addr)?;
+                data.push(lower_bits | (word << high_shift));
+                lower_bits = word >> shift;
+            }
+        }
+        Ok(data)
+    }
+}
+
+struct TableAccessor<'a, 'b, E: ExternalFunctions> {
+    segment: Segment,
+    interpreter: &'a mut Interpreter<'b, E>,
+    size: u32,
+}
+
+impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
+    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
+        let size = interpreter.get_ram(segment.start);
+        TableAccessor {
+            segment,
+            interpreter,
+            size,
+        }
+    }
+
+    /// Returns the size of the table in number of elements.
+    fn get_size(&self) -> u32 {
+        self.size
+    }
+
+    fn get_max_size(&self) -> u32 {
+        self.interpreter.get_ram(self.segment.start + 4)
+    }
+
+    fn get_entry(&self, index: u32) -> Result<[u32; 3], ()> {
+        if index >= self.size {
+            return Err(());
+        }
+        let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
+        let type_idx = self.interpreter.get_ram(base_addr);
+        let frame_size = self.interpreter.get_ram(base_addr + 4);
+        let pc = self.interpreter.get_ram(base_addr + 8);
+        Ok([type_idx, frame_size, pc])
     }
 }

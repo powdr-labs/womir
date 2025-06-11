@@ -140,14 +140,29 @@ impl AssignmentSet {
     }
 }
 
+pub struct NotAllocatedError;
+
 /// One possible register allocation for a given DAG.
 pub struct Allocation {
     /// The registers assigned to the nodes outputs.
-    pub nodes_outputs: BTreeMap<ValueOrigin, Range<u32>>,
+    nodes_outputs: BTreeMap<ValueOrigin, Range<u32>>,
     /// The registers assigned to the labels. On a break, there is a chance that
     /// the register were already written with the correct value. If not, it must
     /// be written on demand, just before the break.
     pub labels: HashMap<u32, Vec<Range<u32>>>,
+}
+
+impl Allocation {
+    pub fn get(&self, origin: &ValueOrigin) -> Result<Range<u32>, NotAllocatedError> {
+        self.nodes_outputs
+            .get(origin)
+            .cloned()
+            .ok_or(NotAllocatedError)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ValueOrigin, &Range<u32>)> {
+        self.nodes_outputs.iter()
+    }
 }
 
 /// Allocates registers for a given DAG. It is not optimal, but it tries to
@@ -464,7 +479,7 @@ pub fn permute_allocation(
     inputs: Vec<Range<u32>>,
     first_non_reserved_addr: u32,
 ) -> RegisterGenerator {
-    let mut last_used_addr = 0;
+    let mut last_used_addr = first_non_reserved_addr;
 
     let map = InputPermutation::new(
         inputs,
