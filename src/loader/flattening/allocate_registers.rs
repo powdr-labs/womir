@@ -26,43 +26,47 @@ struct AssignmentSet {
 impl AssignmentSet {
     fn assign_or_reserve(
         &mut self,
-        writer: ValueOrigin,
+        writer: Option<ValueOrigin>,
         reg_range: Range<u32>,
         curr_node_idx: usize,
     ) {
         // First we test if the writer is already assigned to a register range.
-        let mut w2r = match self.writer_to_regs.entry(writer) {
-            btree_map::Entry::Occupied(entry) => {
-                // Test the very rare special case where the writer
-                // is already assigned to the range we need.
-                if entry.get() == &reg_range {
-                    // Already correctly assigned, nothing to do.
-                    return;
-                } else {
-                    None
+        let mut w2r = if let Some(writer) = writer {
+            match self.writer_to_regs.entry(writer) {
+                btree_map::Entry::Occupied(entry) => {
+                    // Test the very rare special case where the writer
+                    // is already assigned to the range we need.
+                    if entry.get() == &reg_range {
+                        // Already correctly assigned, nothing to do.
+                        return;
+                    } else {
+                        None
+                    }
                 }
+                btree_map::Entry::Vacant(entry) => Some(entry),
             }
-            btree_map::Entry::Vacant(entry) => Some(entry),
+        } else {
+            None
         };
 
         // Second we need to check if the registers are already reserved.
         let mut removed_writers = Vec::new();
         for reg in reg_range.clone() {
-            if let hash_map::Entry::Occupied(entry) = self.reg_to_writers.entry(reg) {
+            if let Some(writers) = self.reg_to_writers.get(&reg) {
                 // Already used or reserved. We have a conflict and can't optimistically
                 // set the writer. If the conflict is with a writer node above us, it
                 // means it was also optimistically assigned, and we must clear it.
-                removed_writers.extend(entry.get().iter().filter(|w| w.node < curr_node_idx));
+                removed_writers.extend(writers.iter().filter(|w| w.node < curr_node_idx));
                 w2r = None;
             }
         }
 
         if let Some(w2r) = w2r {
             // Both are writer and registers are free, so we can assign the register to the writer.
-            w2r.insert(reg_range.clone());
-            for r in reg_range {
-                self.reg_to_writers.entry(r).or_default().push(writer);
+            for r in reg_range.clone() {
+                self.reg_to_writers.entry(r).or_default().push(*w2r.key());
             }
+            w2r.insert(reg_range);
         } else {
             // We can't optimistically assign the registers, but we still need to
             // reserve them to be written on demand.
@@ -72,8 +76,7 @@ impl AssignmentSet {
 
             // We must to clear any conflicting optimistic assignment we found.
             removed_writers.sort_unstable();
-            removed_writers.dedup();
-            for w in removed_writers {
+            for w in removed_writers.into_iter().dedup() {
                 let regs = self.writer_to_regs.remove(&w).unwrap();
                 for r in regs {
                     self.reg_to_writers
@@ -135,7 +138,7 @@ impl AssignmentSet {
 
         // Insert the optimistic assignments, possibly detecting conflicts.
         for (writer, reg_range) in optimistic_assignments {
-            self.assign_or_reserve(writer, reg_range, curr_node_idx);
+            self.assign_or_reserve(Some(writer), reg_range, curr_node_idx);
         }
     }
 }
@@ -239,7 +242,7 @@ pub fn optimistic_allocation<'a>(
     let handle_break = |active_path: &mut PerPathData,
                         target: &BreakTarget,
                         labels: &mut HashMap<u32, LabelAllocation>,
-                        inputs: &[ValueOrigin],
+                        inputs: Option<&[ValueOrigin]>,
                         current_node_idx: usize| {
         // First, we merge the path from the target label
         let Some(target_label) =
@@ -252,7 +255,7 @@ pub fn optimistic_allocation<'a>(
         // the inputs of the break, or at least leave the registers reserved in case of
         // conflicts.
         for (input_idx, reg) in target_label.regs.iter().enumerate() {
-            let origin = inputs[input_idx];
+            let origin = inputs.map(|inputs| inputs[input_idx]);
 
             active_path
                 .assignments
@@ -292,7 +295,7 @@ pub fn optimistic_allocation<'a>(
                     &mut active_path,
                     target,
                     &mut labels,
-                    &node.inputs,
+                    Some(&node.inputs),
                     node_idx,
                 );
             }
@@ -303,7 +306,7 @@ pub fn optimistic_allocation<'a>(
                     &mut active_path,
                     target,
                     &mut labels,
-                    &node.inputs,
+                    Some(&node.inputs),
                     node_idx,
                 );
             }
@@ -321,7 +324,7 @@ pub fn optimistic_allocation<'a>(
                         &mut active_path,
                         &target.target,
                         &mut labels,
-                        &inputs,
+                        Some(&inputs),
                         node_idx,
                     );
                 }
@@ -332,13 +335,14 @@ pub fn optimistic_allocation<'a>(
                 active_path = new_path();
                 for (depth, targets) in break_targets.iter() {
                     for kind in targets {
-                        merge_path_from_target(
+                        handle_break(
                             &mut active_path,
                             &BreakTarget {
                                 depth: *depth,
                                 kind: *kind,
                             },
                             &mut labels,
+                            None,
                             node_idx,
                         );
                     }
