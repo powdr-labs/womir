@@ -1,10 +1,9 @@
+//! Run with, e.g.:
+//! womir vec_median.wasm main 0,0 5,11,15,75,6,5,1,4,7,3,2,9,2
+
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    pub fn read_u32_base(x: u32) -> u32;
-}
-
-fn read_u32(x: u32) -> u32 {
-    unsafe { read_u32_base(x) }
+    pub safe fn read_u32(x: u32) -> u32;
 }
 
 fn main() {
