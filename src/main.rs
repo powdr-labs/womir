@@ -75,6 +75,7 @@ fn main() -> wasmparser::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_log::test;
 
     fn test_interpreter(path: &str, main_function: &str, inputs: &[u32], outputs: &[u32]) {
         let wasm_file = std::fs::read(path).unwrap();
@@ -106,14 +107,23 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_i32() {
-        test_wasm("wasm_testsuite/i32.wast", None);
+    fn test_wasm_address() {
+        test_wasm("wasm_testsuite/address.wast", None);
     }
 
     #[test]
-    fn test_wasm_address() {
-        env_logger::init();
-        test_wasm("wasm_testsuite/address.wast", None);
+    fn test_wasm_block() {
+        test_wasm("wasm_testsuite/block.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_br_if() {
+        test_wasm("wasm_testsuite/br_if.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_br_table() {
+        test_wasm("wasm_testsuite/br_table.wast", None);
     }
 
     #[test]
@@ -122,9 +132,8 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_block() {
-        env_logger::init();
-        test_wasm("wasm_testsuite/block.wast", None);
+    fn test_wasm_i32() {
+        test_wasm("wasm_testsuite/i32.wast", None);
     }
 
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
@@ -234,7 +243,6 @@ mod tests {
 
         let mut assert_returns_per_module = Vec::new();
 
-        let forbidden_types = ["f32", "f64", "i64", "i128"];
         for entry in entries {
             match entry {
                 CommandEntry::Module { filename } => {
@@ -243,26 +251,10 @@ mod tests {
                 CommandEntry::AssertReturn { action, expected } => {
                     if let Some(function_name) = action.field {
                         let args = action.args.unwrap_or_default();
-                        if args
-                            .iter()
-                            .any(|a| forbidden_types.iter().any(|t| a.val_type.contains(t)))
-                        {
-                            continue;
-                        }
-                        let args = args
-                            .iter()
-                            .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
-                            .collect::<Vec<_>>();
-                        if expected
-                            .iter()
-                            .any(|a| forbidden_types.iter().any(|t| a.val_type.contains(t)))
-                        {
-                            continue;
-                        }
-                        let expected = expected
-                            .iter()
-                            .map(|a| a.value.as_str().unwrap().parse::<u32>().unwrap())
-                            .collect::<Vec<_>>();
+
+                        let args = args.iter().flat_map(parse_val).collect::<Vec<_>>();
+
+                        let expected = expected.iter().flat_map(parse_val).collect::<Vec<_>>();
                         assert_returns_per_module
                             .last_mut()
                             .unwrap()
@@ -279,5 +271,18 @@ mod tests {
         }
 
         Ok(assert_returns_per_module)
+    }
+
+    fn parse_val(val: &Val) -> Vec<u32> {
+        match val.val_type.as_str() {
+            "i32" | "f32" => vec![val.value.as_str().unwrap().parse::<u32>().unwrap()],
+            "i64" | "f64" => {
+                let v = val.value.as_str().unwrap().parse::<u64>().unwrap();
+                vec![v as u32, (v >> 32) as u32]
+            }
+            // three bytes to be compatible with our `funcref`
+            "externref" => vec![0, 0, val.value.as_str().unwrap().parse::<u32>().unwrap()],
+            _ => todo!(),
+        }
     }
 }

@@ -678,7 +678,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     }
                     Op::I32Load { memarg } | Op::I64Load { memarg } => {
                         let output_reg = output.unwrap();
-                        let len = output_reg.len() as u32;
+                        let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
                         let addr =
@@ -687,14 +687,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
                         let memory = self.get_mem();
                         let value = memory
-                            .read_contiguous_bytes(addr, len * 4)
+                            .read_contiguous_bytes(addr, word_len * 4)
                             .expect("Out of bounds read");
 
                         self.set_vrom_relative_range(output_reg, &value);
                     }
-                    Op::I32Load8U { memarg } => {
+                    Op::I32Load8U { memarg } | Op::I64Load8U { memarg } => {
                         let output_reg = output.unwrap();
-                        assert_eq!(output_reg.len(), 1);
+                        let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
                         let addr =
@@ -703,10 +703,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
                         let memory = self.get_mem();
 
-                        let byte =
-                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xff;
+                        let byte = memory
+                            .read_contiguous_bytes(addr, 1)
+                            .expect("Out of bounds read")[0]
+                            & 0xff;
 
-                        self.set_vrom_relative_range(output_reg, &[byte]);
+                        let mut value = vec![0; word_len as usize];
+                        value[0] = byte as u32;
+                        self.set_vrom_relative_range(output_reg, &value);
                     }
                     Op::I32Load8S { memarg } => {
                         let output_reg = output.unwrap();
@@ -719,8 +723,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
 
                         let memory = self.get_mem();
-                        let byte =
-                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xff;
+                        let byte = memory
+                            .read_contiguous_bytes(addr, 1)
+                            .expect("Out of bounds read")[0]
+                            & 0xff;
 
                         let signed = (byte as i8) as i32;
                         let truncated = signed as u8;
@@ -738,8 +744,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
 
                         let memory = self.get_mem();
-                        let bytes =
-                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xffff;
+                        let bytes = memory
+                            .read_contiguous_bytes(addr, 2)
+                            .expect("Out of bounds read")[0]
+                            & 0xffff;
 
                         self.set_vrom_relative_range(output_reg, &[bytes]);
                     }
@@ -754,8 +762,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
 
                         let memory = self.get_mem();
-                        let bytes =
-                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xffff;
+                        let bytes = memory
+                            .read_contiguous_bytes(addr, 2)
+                            .expect("Out of bounds read")[0]
+                            & 0xffff;
 
                         let sign_extended = bytes as i32;
                         let truncated = sign_extended as u16;
@@ -1234,13 +1244,18 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     /// The high bytes of the last returned word can be anything if `num_bytes` is
     /// not a multiple of 4.
     fn read_contiguous_bytes(&self, byte_addr: u32, num_bytes: u32) -> Result<Vec<u32>, ()> {
+        println!(
+            "Reading {num_bytes} bytes from memory at address {byte_addr}, memory size: {}",
+            self.get_size()
+        );
+
         let num_words = (num_bytes + 3) / 4;
         let mut data = Vec::with_capacity(num_words as usize);
         if byte_addr % 4 == 0 {
             // Simple aligned reads
             for i in 0..num_words {
                 let addr = byte_addr + (i * 4);
-                data.push(self.get_word(addr)?);
+                data.push(self.get_word(addr).unwrap());
             }
         } else if num_words > 0 {
             // Unaligned reads
@@ -1251,29 +1266,35 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             let first_word_addr = byte_addr & !3;
 
             // Read first partial word
-            let first_word = self.get_word(first_word_addr)?;
+            let first_word = self.get_word(first_word_addr).unwrap();
             let mut lower_bits = first_word >> shift;
 
             // Before doing the general case loop, we need to decide if
-            // the lower bits of the last bits are sufficient to complete
+            // the lower bits of the last word are sufficient to complete
             // the number of bytes requested.
-            let remaining_bytes = num_bytes % 4;
-            let num_bytes_carried_over = high_shift / 8;
-            let extra_reading_iter = if num_bytes_carried_over <= remaining_bytes {
+            let num_bytes_last_word = (num_bytes - 1) % 4 + 1; // From 1 to 4 bytes needed in the last word
+            let num_bytes_carried_over = 4 - offset_bytes as u32;
+            let extra_reading_iter = if num_bytes_carried_over >= num_bytes_last_word {
+                // The final read is not needed to form the last word.
                 0
             } else {
+                // We need to read one more word to get the remaining bytes
                 1
             };
+
+            println!(
+                "num_bytes_last_word: {num_bytes_last_word}, num_bytes_carried_over: {num_bytes_carried_over}, extra_reading_iter: {extra_reading_iter}"
+            );
 
             // Do all the full words
             for i in 1..(num_words + extra_reading_iter) {
                 let current_addr = first_word_addr + (i * 4);
-                let word = self.get_word(current_addr)?;
+                let word = self.get_word(current_addr).unwrap();
                 data.push(lower_bits | (word << high_shift));
                 lower_bits = word >> shift;
             }
 
-            // Handle the last word, if partial
+            // Handle the last word, if we skipped the last read
             if extra_reading_iter == 0 {
                 data.push(lower_bits);
             }
