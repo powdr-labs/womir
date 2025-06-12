@@ -136,6 +136,11 @@ mod tests {
         test_wasm("wasm_testsuite/i32.wast", None);
     }
 
+    #[test]
+    fn test_wasm_loop() {
+        test_wasm("wasm_testsuite/loop.wast", None);
+    }
+
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
             Ok(modules) => {

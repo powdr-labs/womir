@@ -215,6 +215,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64Sub => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+                        let r = a.wrapping_sub(b);
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
                     Op::I32Mul => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -225,6 +236,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let r = a.wrapping_mul(b);
 
                         self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64Mul => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+                        let r = a.wrapping_mul(b);
+
+                        self.set_vrom_relative_u64(c, r);
                     }
                     Op::I32DivU => {
                         let a = inputs[0].clone();
@@ -348,6 +370,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
+                        let r = if a > b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64GtU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
                         let r = if a > b { 1 } else { 0 };
 
                         self.set_vrom_relative_u32(c, r);
