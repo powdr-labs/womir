@@ -676,7 +676,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .write_contiguous(addr, &value)
                             .expect("Out of bounds write");
                     }
-                    Op::I32Load { memarg } | Op::I64Load { memarg } => {
+                    Op::I32Load { memarg }
+                    | Op::I64Load { memarg }
+                    | Op::F32Load { memarg }
+                    | Op::F64Load { memarg } => {
                         let output_reg = output.unwrap();
                         let word_len = output_reg.len() as u32;
 
@@ -708,69 +711,101 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .expect("Out of bounds read")[0]
                             & 0xff;
 
-                        let mut value = vec![0; word_len as usize];
-                        value[0] = byte as u32;
-                        self.set_vrom_relative_range(output_reg, &value);
+                        let value = [byte as u32, 0];
+                        self.set_vrom_relative_range(output_reg, &value[0..word_len as usize]);
                     }
-                    Op::I32Load8S { memarg } => {
+                    Op::I32Load8S { memarg } | Op::I64Load8S { memarg } => {
                         let output_reg = output.unwrap();
-                        assert_eq!(output_reg.len(), 1);
+                        let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-
                         let memory = self.get_mem();
+
                         let byte = memory
                             .read_contiguous_bytes(addr, 1)
-                            .expect("Out of bounds read")[0]
-                            & 0xff;
+                            .expect("Out of bounds read")[0];
 
-                        let signed = (byte as i8) as i32;
-                        let truncated = signed as u8;
+                        let signed = byte as i8 as i64;
 
-                        self.set_vrom_relative_range(output_reg, &[truncated as u32]);
+                        let value = [signed as u32, (signed >> 32) as u32];
+                        self.set_vrom_relative_range(output_reg, &value[0..word_len as usize]);
                     }
-                    Op::I32Load16U { memarg } => {
+                    Op::I32Load16U { memarg } | Op::I64Load16U { memarg } => {
                         let output_reg = output.unwrap();
-                        assert_eq!(output_reg.len(), 1);
+                        let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-
                         let memory = self.get_mem();
+
                         let bytes = memory
                             .read_contiguous_bytes(addr, 2)
                             .expect("Out of bounds read")[0]
                             & 0xffff;
 
-                        self.set_vrom_relative_range(output_reg, &[bytes]);
+                        let value = [bytes, 0];
+                        self.set_vrom_relative_range(output_reg, &value[0..word_len as usize]);
                     }
-                    Op::I32Load16S { memarg } => {
+                    Op::I32Load16S { memarg } | Op::I64Load16S { memarg } => {
                         let output_reg = output.unwrap();
-                        assert_eq!(output_reg.len(), 1);
+                        let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-
                         let memory = self.get_mem();
-                        let bytes = memory
+
+                        let value = memory
                             .read_contiguous_bytes(addr, 2)
-                            .expect("Out of bounds read")[0]
-                            & 0xffff;
+                            .expect("Out of bounds read")[0];
 
-                        let sign_extended = bytes as i32;
-                        let truncated = sign_extended as u16;
+                        let signed = value as i16 as i64;
 
-                        self.set_vrom_relative_range(output_reg, &[truncated as u32]);
+                        let value = [signed as u32, (signed >> 32) as u32];
+                        self.set_vrom_relative_range(output_reg, &value[0..word_len as usize]);
+                    }
+                    Op::I64Load32U { memarg } => {
+                        let output_reg = output.unwrap();
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+                        let memory = self.get_mem();
+
+                        let word = memory
+                            .read_contiguous_bytes(addr, 4)
+                            .expect("Out of bounds read")[0];
+
+                        self.set_vrom_relative_range(output_reg, &[word, 0]);
+                    }
+                    Op::I64Load32S { memarg } => {
+                        let output_reg = output.unwrap();
+
+                        assert_eq!(inputs.len(), 1);
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+
+                        assert_eq!(memarg.memory, 0);
+                        let memory = self.get_mem();
+
+                        let word = memory
+                            .read_contiguous_bytes(addr, 4)
+                            .expect("Out of bounds read")[0];
+
+                        let signed = word as i32 as i64;
+                        let value = [signed as u32, (signed >> 32) as u32];
+                        self.set_vrom_relative_range(output_reg, &value);
                     }
                     Op::MemoryGrow { mem } => {
                         let extra_pages = self.get_vrom_relative_u32(inputs[0].clone());
@@ -1244,18 +1279,13 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     /// The high bytes of the last returned word can be anything if `num_bytes` is
     /// not a multiple of 4.
     fn read_contiguous_bytes(&self, byte_addr: u32, num_bytes: u32) -> Result<Vec<u32>, ()> {
-        println!(
-            "Reading {num_bytes} bytes from memory at address {byte_addr}, memory size: {}",
-            self.get_size()
-        );
-
         let num_words = (num_bytes + 3) / 4;
         let mut data = Vec::with_capacity(num_words as usize);
         if byte_addr % 4 == 0 {
             // Simple aligned reads
             for i in 0..num_words {
                 let addr = byte_addr + (i * 4);
-                data.push(self.get_word(addr).unwrap());
+                data.push(self.get_word(addr)?);
             }
         } else if num_words > 0 {
             // Unaligned reads
@@ -1266,7 +1296,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             let first_word_addr = byte_addr & !3;
 
             // Read first partial word
-            let first_word = self.get_word(first_word_addr).unwrap();
+            let first_word = self.get_word(first_word_addr)?;
             let mut lower_bits = first_word >> shift;
 
             // Before doing the general case loop, we need to decide if
@@ -1289,7 +1319,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             // Do all the full words
             for i in 1..(num_words + extra_reading_iter) {
                 let current_addr = first_word_addr + (i * 4);
-                let word = self.get_word(current_addr).unwrap();
+                let word = self.get_word(current_addr)?;
                 data.push(lower_bits | (word << high_shift));
                 lower_bits = word >> shift;
             }
