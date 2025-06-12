@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, btree_map, hash_map},
+    collections::{BTreeMap, HashMap, btree_map},
     ops::Range,
 };
 
@@ -104,21 +104,19 @@ impl AssignmentSet {
             .iter()
             .chain(other.reg_to_writers.iter())
         {
-            let mut final_writers = writers
-                .iter()
-                .filter(|w| w.node >= curr_node_idx)
-                .peekable();
-
-            if final_writers.peek().is_some() {
+            let is_final = writers.iter().all(|w| w.node >= curr_node_idx);
+            if is_final {
                 // TODO: I think it is not really necessary to save the writers that are
                 // already final, but I am doing it for consistency.
-                let writers = self.reg_to_writers.entry(*reg).or_default();
-                writers.extend(final_writers);
+                let new_writers = self.reg_to_writers.entry(*reg).or_default();
+                new_writers.extend(writers);
 
                 // It is very easy to have duplicates, because the path might diverge and
                 // then converge again. We need to remove them.
-                writers.sort_unstable();
-                writers.dedup();
+                new_writers.sort_unstable();
+                new_writers.dedup();
+            } else {
+                assert_eq!(writers.len(), 1);
             }
         }
 
@@ -191,7 +189,7 @@ pub fn optimistic_allocation<'a>(
 ) -> Allocation {
     let mut number_of_saved_copies = 0;
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     struct PerPathData {
         reg_gen: RegisterGenerator,
         assignments: AssignmentSet,
