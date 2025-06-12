@@ -168,17 +168,19 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.set_vrom_relative_u32(output.unwrap(), value.bits());
                     }
                     Op::I64Const { value } => {
-                        self.set_vrom_relative_range(
-                            output.unwrap(),
-                            &[value as u32, (value >> 32) as u32],
-                        );
+                        self.set_vrom_relative_u64(output.unwrap(), value as u64);
                     }
                     Op::F64Const { value } => {
                         let value = value.bits();
-                        self.set_vrom_relative_range(
-                            output.unwrap(),
-                            &[value as u32, (value >> 32) as u32],
-                        );
+                        self.set_vrom_relative_u64(output.unwrap(), value as u64);
+                    }
+                    Op::I64ExtendI32U => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        self.set_vrom_relative_u64(c, a as u64);
                     }
                     Op::I32Add => {
                         let a = inputs[0].clone();
@@ -200,7 +202,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = self.get_vrom_relative_u64(b);
                         let r = a.wrapping_add(b);
 
-                        self.set_vrom_relative_range(c, &[r as u32, (r >> 32) as u32]);
+                        self.set_vrom_relative_u64(c, r);
                     }
                     Op::I32Sub => {
                         let a = inputs[0].clone();
@@ -408,6 +410,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64Or => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+                        let r = a | b;
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
                     Op::I32Xor => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -425,11 +438,23 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
-                        let b = self.get_vrom_relative_u32(b) & 0x1F; // only lower 5 bits are used
+                        let b = self.get_vrom_relative_u32(b);
 
                         let r = a.wrapping_shl(b);
 
                         self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64Shl => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+
+                        let r = a.wrapping_shl(b as u32);
+
+                        self.set_vrom_relative_u64(c, r);
                     }
                     Op::I32ShrU => {
                         let a = inputs[0].clone();
@@ -662,7 +687,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
                         let memory = self.get_mem();
                         let value = memory
-                            .read_contiguous(addr, len)
+                            .read_contiguous_bytes(addr, len * 4)
                             .expect("Out of bounds read");
 
                         self.set_vrom_relative_range(output_reg, &value);
@@ -678,7 +703,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
                         let memory = self.get_mem();
 
-                        let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
+                        let byte =
+                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xff;
 
                         self.set_vrom_relative_range(output_reg, &[byte]);
                     }
@@ -693,8 +719,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
 
                         let memory = self.get_mem();
-
-                        let byte = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xff;
+                        let byte =
+                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xff;
 
                         let signed = (byte as i8) as i32;
                         let truncated = signed as u8;
@@ -712,8 +738,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
 
                         let memory = self.get_mem();
-
-                        let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
+                        let bytes =
+                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xffff;
 
                         self.set_vrom_relative_range(output_reg, &[bytes]);
                     }
@@ -728,8 +754,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(memarg.memory, 0);
 
                         let memory = self.get_mem();
-
-                        let bytes = memory.read_contiguous(addr, 1).unwrap_or(vec![0])[0] & 0xffff;
+                        let bytes =
+                            memory.read_contiguous_bytes(addr, 4).unwrap_or(vec![0])[0] & 0xffff;
 
                         let sign_extended = bytes as i32;
                         let truncated = sign_extended as u16;
@@ -753,6 +779,64 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         };
 
                         self.set_vrom_relative_u32(output.unwrap(), result);
+                    }
+                    Op::MemoryCopy { dst_mem, src_mem } => {
+                        assert_eq!(dst_mem, 0);
+                        assert_eq!(src_mem, 0);
+
+                        let dst = self.get_vrom_relative_u32(inputs[0].clone());
+                        let src = self.get_vrom_relative_u32(inputs[1].clone());
+                        let size = self.get_vrom_relative_u32(inputs[2].clone());
+                        let mut remaining = size % 4;
+
+                        let mut memory = self.get_mem();
+                        // Load the entire thing into memory, this is the easiest way to
+                        // handle overlapping copies.
+                        let mut data = memory
+                            .read_contiguous_bytes(src, size)
+                            .expect("Out of bounds read");
+                        if remaining > 0 {
+                            let last_word = data.pop().unwrap();
+                            // Zero the bytes that were not to be copied.
+                            let mut mask = !(!0 << remaining * 8);
+                            let mut last_word = last_word & mask;
+
+                            // We now need to write the remaining bytes in either 1 or 2
+                            // words, depending on the alignment of the destination.
+                            let dst_byte_addr = dst + size - remaining - 1;
+                            let mut dst_word_addr = dst_byte_addr & !0x3; // align to 4 bytes
+                            // Does it fit completely in the last word?
+                            let mut space_in_word = 4 - (dst_byte_addr % 4);
+                            if space_in_word < remaining {
+                                // Doesn't fit, write the second to last word.
+                                remaining -= space_in_word;
+                                let rshift = remaining * 8;
+                                let old_value =
+                                    memory.get_word(dst_word_addr).expect("Out of bounds read");
+                                let new_value =
+                                    (old_value & !(mask >> rshift)) | (last_word >> rshift);
+                                memory
+                                    .set_word(dst_word_addr, new_value)
+                                    .expect("Out of bounds write");
+
+                                mask >>= space_in_word * 8;
+                                last_word = last_word & mask;
+                                dst_word_addr += 4;
+                                space_in_word = 4;
+                            }
+
+                            // Write the last word.
+                            let lshift = (space_in_word - remaining) * 8;
+                            let old_value =
+                                memory.get_word(dst_word_addr).expect("Out of bounds read");
+                            let new_value = (old_value & !(mask << lshift)) | (last_word << lshift);
+                            memory
+                                .set_word(dst_word_addr, new_value)
+                                .expect("Out of bounds write");
+                        }
+                        memory
+                            .write_contiguous(dst, &data)
+                            .expect("Out of bounds write");
                     }
                     Op::TableGet { table } => {
                         assert_eq!(inputs[0].len(), 1);
@@ -1015,6 +1099,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         self.set_vrom_relative(addr.start, value.into());
     }
 
+    fn set_vrom_relative_u64(&mut self, addr: Range<u32>, value: u64) {
+        self.set_vrom_relative_range(addr, &[value as u32, (value >> 32) as u32]);
+    }
+
     fn set_vrom_relative_range(&mut self, addr: Range<u32>, values: &[u32]) {
         assert_eq!(
             addr.len(),
@@ -1141,7 +1229,12 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
         Ok(())
     }
 
-    fn read_contiguous(&self, byte_addr: u32, num_words: u32) -> Result<Vec<u32>, ()> {
+    /// Reads a contiguous block of memory starting at `byte_addr` for `num_bytes`.
+    ///
+    /// The high bytes of the last returned word can be anything if `num_bytes` is
+    /// not a multiple of 4.
+    fn read_contiguous_bytes(&self, byte_addr: u32, num_bytes: u32) -> Result<Vec<u32>, ()> {
+        let num_words = (num_bytes + 3) / 4;
         let mut data = Vec::with_capacity(num_words as usize);
         if byte_addr % 4 == 0 {
             // Simple aligned reads
@@ -1161,12 +1254,28 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             let first_word = self.get_word(first_word_addr)?;
             let mut lower_bits = first_word >> shift;
 
-            // Complete and write all the words
-            for i in 1..=num_words {
+            // Before doing the general case loop, we need to decide if
+            // the lower bits of the last bits are sufficient to complete
+            // the number of bytes requested.
+            let remaining_bytes = num_bytes % 4;
+            let num_bytes_carried_over = high_shift / 8;
+            let extra_reading_iter = if num_bytes_carried_over <= remaining_bytes {
+                0
+            } else {
+                1
+            };
+
+            // Do all the full words
+            for i in 1..(num_words + extra_reading_iter) {
                 let current_addr = first_word_addr + (i * 4);
                 let word = self.get_word(current_addr)?;
                 data.push(lower_bits | (word << high_shift));
                 lower_bits = word >> shift;
+            }
+
+            // Handle the last word, if partial
+            if extra_reading_iter == 0 {
+                data.push(lower_bits);
             }
         }
         Ok(data)

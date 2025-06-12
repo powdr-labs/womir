@@ -1,27 +1,26 @@
+use itertools::Itertools;
+
 use crate::interpreter::{ExternalFunctions, Interpreter};
 
 mod interpreter;
 mod linker;
 mod loader;
 
-struct Externals {
+struct DataInput {
     values: Vec<u32>,
-    counter: usize,
 }
 
-impl Externals {
+impl DataInput {
     fn new(values: Vec<u32>) -> Self {
-        Self { values, counter: 0 }
+        Self { values }
     }
 }
 
-impl ExternalFunctions for Externals {
+impl ExternalFunctions for DataInput {
     fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
-                let val = self.values[self.counter];
-                self.counter = (self.counter + 1) % self.values.len();
-                vec![val]
+                vec![self.values[args[0] as usize]]
             }
             ("env", "abort") => {
                 panic!("Abort called with args: {:?}", args);
@@ -45,19 +44,28 @@ fn main() -> wasmparser::Result<()> {
     let wasm_file_path = &args[1];
 
     let func_name = args.get(2);
-    let inputs: Vec<u32> = args[3..]
-        .iter()
+    let func_inputs = args
+        .get(3)
+        .unwrap_or(&String::new())
+        .split(',')
         .filter_map(|s| s.parse::<u32>().ok())
-        .collect();
+        .collect_vec();
+
+    let data_inputs = args
+        .get(4)
+        .unwrap_or(&String::new())
+        .split(',')
+        .filter_map(|s| s.parse::<u32>().ok())
+        .collect_vec();
 
     let wasm_file = std::fs::read(&wasm_file_path).unwrap();
 
     let program = loader::load_wasm(&wasm_file)?;
 
     if let Some(func_name) = func_name {
-        let mut interpreter = Interpreter::new(program, Externals::new(vec![25, 5]));
+        let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         log::info!("Executing function: {func_name}");
-        let outputs = interpreter.run(func_name, &inputs);
+        let outputs = interpreter.run(func_name, &func_inputs);
         println!("Outputs: {:?}", outputs);
     }
 
@@ -71,7 +79,7 @@ mod tests {
     fn test_interpreter(path: &str, main_function: &str, inputs: &[u32], outputs: &[u32]) {
         let wasm_file = std::fs::read(path).unwrap();
         let program = loader::load_wasm(&wasm_file).unwrap();
-        let mut interpreter = interpreter::Interpreter::new(program, Externals::new(Vec::new()));
+        let mut interpreter = interpreter::Interpreter::new(program, DataInput::new(Vec::new()));
         let got_output = interpreter.run(main_function, inputs);
         assert_eq!(got_output, outputs);
     }
@@ -128,7 +136,7 @@ mod tests {
                     let wasm_file = std::fs::read(mod_name).unwrap();
                     let program = loader::load_wasm(&wasm_file).unwrap();
                     let mut interpreter =
-                        interpreter::Interpreter::new(program, Externals::new(Vec::new()));
+                        interpreter::Interpreter::new(program, DataInput::new(Vec::new()));
 
                     // println!("assert cases: {asserts:#?}");
                     asserts
