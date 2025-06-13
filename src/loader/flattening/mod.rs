@@ -44,9 +44,6 @@ use super::{
     blockless_dag::{BlocklessDag, Operation},
 };
 
-/// Size, in bytes, used both to frame pointers and return addresses.
-const PTR_BYTE_SIZE: u32 = 4;
-
 /// An assembly-like representation for a write-once memory machine.
 #[derive(Debug, Clone)]
 pub struct WriteOnceASM<'a> {
@@ -70,12 +67,12 @@ pub enum Directive<'a> {
     AllocateFrameI {
         /// The same identifier as the label, which has the frame size.
         target_frame: String,
-        result_ptr: Register, // size: PTR_BYTE_SIZE
+        result_ptr: Register, // size: PTR
     },
     /// Allocates a new frame from a dynamic size
     AllocateFrameV {
-        frame_size: Register, // size: I32
-        result_ptr: Register, // size: PTR_BYTE_SIZE
+        frame_size: Register, // size: i32
+        result_ptr: Register, // size: PTR
     },
     /// Copies a word inside the active frame.
     Copy {
@@ -87,7 +84,7 @@ pub enum Directive<'a> {
     /// Copies a word from the active frame to a given place in the given frame.
     CopyIntoFrame {
         src_word: Register,   // size: 1 word
-        dest_frame: Register, // size: PTR_BYTE_SIZE
+        dest_frame: Register, // size: PTR
         dest_word: Register,  // size: 1 word
     },
     /// Local jump to a label local to the current frame.
@@ -113,35 +110,38 @@ pub enum Directive<'a> {
     /// Jump and activate a frame.
     JumpAndActivateFrame {
         target: String,
-        new_frame_ptr: Register, // size: PTR_BYTE_SIZE
+        new_frame_ptr: Register, // size: PTR
         /// Where, in the new frame, to save the frame pointer of the frame Wwe just left.
         /// May be None if the frame pointer is not needed.
-        saved_caller_fp: Option<Register>, // size: PTR_BYTE_SIZE
+        saved_caller_fp: Option<Register>, // size: PTR
     },
     /// Returns from the function.
     ///
     /// Similar to `JumpAndActivateFrame`, but the target is a dynamic address taken
     /// from a register, and it can't save the caller frame pointer.
     Return {
-        ret_pc: Register, // size: PTR_BYTE_SIZE
-        ret_fp: Register, // size: PTR_BYTE_SIZE
+        ret_pc: Register, // size: PTR
+        ret_fp: Register, // size: PTR
     },
     /// Calls a normal function.
     /// Use `JumpAndActivateFrame` for a tail call.
     Call {
         target: String,
-        new_frame_ptr: Register, // size: PTR_BYTE_SIZE
+        new_frame_ptr: Register, // size: PTR
         /// Where, in the new frame, to save the return PC at the call site.
-        saved_ret_pc: Register, // size: PTR_BYTE_SIZE
+        saved_ret_pc: Register, // size: PTR
         /// Where, in the new frame, to save the frame pointer of the frame we just left.
-        saved_caller_fp: Register, // size: PTR_BYTE_SIZE
+        saved_caller_fp: Register, // size: PTR
     },
     /// Calls a normal function indirectly, using a function reference.
     CallIndirect {
-        target_pc: Register,       // size: PTR_BYTE_SIZE
-        new_frame_ptr: Register,   // size: PTR_BYTE_SIZE
-        saved_ret_pc: Register,    // size: PTR_BYTE_SIZE
-        saved_caller_fp: Register, // size: PTR_BYTE_SIZE
+        // Notice the target_pc is an i32, not a PTR. This is because
+        // the value is taken from the memory, and for now, code pointers are fixed to
+        // 32 bits there.
+        target_pc: Register,       // size: i32
+        new_frame_ptr: Register,   // size: PTR
+        saved_ret_pc: Register,    // size: PTR
+        saved_caller_fp: Register, // size: PTR
     },
     /// Calls an imported function.
     ImportedCall {
@@ -522,8 +522,8 @@ pub fn flatten_dag<'a, S: Settings>(
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::<S>::new();
 
-    let ret_pc = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
-    let ret_fp = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+    let ret_pc = reg_gen.allocate_words(S::words_per_ptr());
+    let ret_fp = reg_gen.allocate_words(S::words_per_ptr());
 
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
@@ -675,8 +675,8 @@ fn translate_single_node<'a, S: Settings>(
             // Test if the loop can return from the function. If so, we need to
             // forward the return info.
             let loop_ret_info = if ret_info.is_some() && shallowest_iter_or_ret.is_some() {
-                let ret_pc = loop_reg_gen.allocate_bytes(PTR_BYTE_SIZE);
-                let ret_fp = loop_reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+                let ret_pc = loop_reg_gen.allocate_words(S::words_per_ptr());
+                let ret_fp = loop_reg_gen.allocate_words(S::words_per_ptr());
 
                 // If the function has outputs, we need to save the toplevel frame pointer, too.
                 if let CtrlStackType::TopLevelFunction { output_regs } =
@@ -721,7 +721,7 @@ fn translate_single_node<'a, S: Settings>(
             let loop_outer_fps = saved_fps
                 .into_iter()
                 .map(|depth| {
-                    let outer_fp = loop_reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+                    let outer_fp = loop_reg_gen.allocate_words(S::words_per_ptr());
                     (depth + 1, outer_fp)
                 })
                 .collect();
@@ -1093,7 +1093,7 @@ fn translate_single_node<'a, S: Settings>(
                 // Normal function calls requires a frame allocation and copying of the
                 // inputs and outputs into the frame (the outputs are provided by the
                 // prover "from the future").
-                let func_frame_ptr = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+                let func_frame_ptr = reg_gen.allocate_words(S::words_per_ptr());
 
                 let inputs = node
                     .inputs
@@ -1148,7 +1148,7 @@ fn translate_single_node<'a, S: Settings>(
             let eq_result = reg_gen.allocate_type(ValType::I32);
 
             let ok_label = format_label(label_gen.next().unwrap(), LabelType::Local);
-            let func_frame_ptr = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+            let func_frame_ptr = reg_gen.allocate_words(S::words_per_ptr());
 
             // Perform the function call
             let (call_directives, this_ret_info) = prepare_function_call::<S>(
@@ -1178,7 +1178,7 @@ fn translate_single_node<'a, S: Settings>(
                     op: Op::I32Eq,
                     inputs: vec![
                         expected_func_type.clone(),
-                        func_ref_regs[FunctionRef::TYPE_INDEX].clone(),
+                        func_ref_regs[FunctionRef::<S>::TYPE_INDEX].clone(),
                     ],
                     output: Some(eq_result.clone()),
                 }
@@ -1201,13 +1201,13 @@ fn translate_single_node<'a, S: Settings>(
                 .into(),
                 // Allocate the new function frame
                 Directive::AllocateFrameV {
-                    frame_size: func_ref_regs[FunctionRef::FUNC_FRAME_SIZE].start,
+                    frame_size: func_ref_regs[FunctionRef::<S>::FUNC_FRAME_SIZE].start,
                     result_ptr: func_frame_ptr.start,
                 }
                 .into(),
                 call_directives.into(),
                 Directive::CallIndirect {
-                    target_pc: func_ref_regs[FunctionRef::FUNC_ADDR].start,
+                    target_pc: func_ref_regs[FunctionRef::<S>::FUNC_ADDR].start,
                     new_frame_ptr: func_frame_ptr.start,
                     saved_ret_pc: this_ret_info.ret_pc.start,
                     saved_caller_fp: this_ret_info.ret_fp.start,
@@ -1284,8 +1284,8 @@ fn prepare_function_call<'a, S: Settings>(
     // Generate the registers in the order expected by the calling convention.
     let mut fn_reg_gen = RegisterGenerator::<S>::new();
     let ret_info = ReturnInfo {
-        ret_pc: fn_reg_gen.allocate_bytes(PTR_BYTE_SIZE),
-        ret_fp: fn_reg_gen.allocate_bytes(PTR_BYTE_SIZE),
+        ret_pc: fn_reg_gen.allocate_words(S::words_per_ptr()),
+        ret_fp: fn_reg_gen.allocate_words(S::words_per_ptr()),
     };
 
     for src_reg in inputs {
@@ -1563,7 +1563,7 @@ fn jump_into_loop<'a, S: Settings>(
     let mut directives: Vec<DirectiveTree<'a>> = Vec::new();
 
     // We start by allocating the frame.
-    let loop_fp = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+    let loop_fp = reg_gen.allocate_words(S::words_per_ptr());
     directives.push(
         Directive::AllocateFrameI {
             target_frame: loop_entry.label.clone(),
@@ -1689,25 +1689,20 @@ fn byte_size<S: Settings>(ty: ValType) -> u32 {
         ValType::I32 | ValType::F32 => 4,
         ValType::I64 | ValType::F64 => 8,
         ValType::V128 => 16,
-        ValType::Ref(..) => {
-            // Since this is a struct of multiple memory words (u32) that we will need to
-            // unpack into registers, so we need to provision enough registers for each memory
-            // word independently.
-            FunctionRef::NUM_WORDS * word_count::<S>(4) * S::bytes_per_word()
-        }
+        ValType::Ref(..) => FunctionRef::<S>::total_byte_size(),
     }
 }
 
-fn split_func_ref_regs<S: Settings>(func_ref_reg: Range<u32>) -> Vec<Range<u32>> {
-    let comp_size = func_ref_reg.len() as u32 / FunctionRef::NUM_WORDS;
-    // Each component must have the same word-size as a I32,
-    assert_eq!(comp_size, word_count_type::<S>(ValType::I32));
-    let func_ref_regs = (0..FunctionRef::NUM_WORDS)
-        .map(|i| func_ref_reg.start + i * comp_size..func_ref_reg.start + (i + 1) * comp_size)
-        .collect_vec();
-    assert_eq!(func_ref_reg.start, func_ref_regs[0].start);
-    assert_eq!(func_ref_reg.end, func_ref_regs.last().unwrap().end);
-    func_ref_regs
+fn split_func_ref_regs<S: Settings>(func_ref_reg: Range<u32>) -> [Range<u32>; 3] {
+    let i32_word_count = word_count_type::<S>(ValType::I32);
+
+    let type_index = func_ref_reg.start..func_ref_reg.start + i32_word_count;
+    let func_addr = type_index.end..type_index.end + i32_word_count;
+    let func_frame_size = func_addr.end..func_addr.end + i32_word_count;
+
+    assert_eq!(func_frame_size.end, func_ref_reg.end);
+
+    [type_index, func_addr, func_frame_size]
 }
 
 fn word_count<S: Settings>(byte_size: u32) -> u32 {
@@ -1715,7 +1710,7 @@ fn word_count<S: Settings>(byte_size: u32) -> u32 {
 }
 
 fn assert_ptr_size<S: Settings>(ptr: &Range<u32>) {
-    assert_eq!(ptr.len(), word_count::<S>(PTR_BYTE_SIZE) as usize);
+    assert_eq!(ptr.len(), S::words_per_ptr() as usize);
 }
 
 pub fn word_count_type<S: Settings>(ty: ValType) -> u32 {

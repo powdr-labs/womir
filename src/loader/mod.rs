@@ -7,6 +7,7 @@ mod locals_data_flow;
 use core::panic;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    marker::PhantomData,
     ops::RangeFrom,
     rc::Rc,
     vec,
@@ -158,27 +159,66 @@ impl InitialMemory {
 }
 
 /// The table entry high level layout.
-struct FunctionRef {
+struct FunctionRef<S: Settings> {
     /// The type index of the function type.
     type_index: u32,
     /// The function index.
     func_index: u32,
+    settings: PhantomData<S>,
 }
 
-impl FunctionRef {
+/// A function reference in the table is a 3-tuple of u32 values:
+/// - The type index of the function type.
+/// - The function frame size, in words.
+/// - The function address, which is a pointer to the function code.
+///
+/// If the architecture uses a different size for function pointers, it needs to be converted
+/// to the correct size in the implementations of the instructions that use function references.
+///
+/// This struct is used to tell where, inside an entry, each of the values is stored.
+impl<S: Settings> FunctionRef<S> {
     const TYPE_INDEX: usize = 0;
     const FUNC_FRAME_SIZE: usize = 1;
     const FUNC_ADDR: usize = 2;
-    /// The number of words used by a function reference.
-    const NUM_WORDS: u32 = 3;
 
     fn to_memory_entries(&self) -> Vec<MemoryEntry> {
-        vec![
-            MemoryEntry::Value(self.type_index),
-            MemoryEntry::FuncFrameSize(self.func_index),
-            MemoryEntry::FuncAddr(self.func_index),
-        ]
+        // If needed, this can be made to support non-power-of-two word sizes.
+        // Which I doubt will ever be needed. People are not this crazy.
+        assert!(S::bytes_per_word().is_power_of_two());
+
+        let mut entries = Vec::with_capacity(Self::total_byte_size() as usize / 4);
+        entries.push(MemoryEntry::Value(self.type_index));
+        entries.extend(itertools::repeat_n(
+            MemoryEntry::Value(0),
+            Self::u32_padding(),
+        ));
+        entries.push(MemoryEntry::FuncFrameSize(self.func_index));
+        entries.extend(itertools::repeat_n(
+            MemoryEntry::Value(0),
+            Self::u32_padding(),
+        ));
+        entries.push(MemoryEntry::FuncAddr(self.func_index));
+        entries.extend(itertools::repeat_n(
+            MemoryEntry::Value(0),
+            Self::u32_padding(),
+        ));
+        entries
     }
+
+    /// How many memory words of padding are needed after a u32 value.
+    fn u32_padding() -> usize {
+        let alignment = S::bytes_per_word().max(4);
+        ((align(4, alignment) - 4) / 4) as usize
+    }
+
+    fn total_byte_size() -> u32 {
+        let alignment = S::bytes_per_word().max(4);
+        3 * align(4, alignment)
+    }
+}
+
+const fn align(value: u32, power_of_two_alignment: u32) -> u32 {
+    (value + power_of_two_alignment - 1) & !(power_of_two_alignment - 1)
 }
 
 #[derive(Debug, Clone)]
@@ -237,7 +277,7 @@ impl<'a> Program<'a> {
         self.exported_functions.get(&func_idx).copied()
     }
 
-    fn eval_const_expr(
+    fn eval_const_expr<S: Settings>(
         &self,
         val_type: ValType,
         expr: OperatorsReader,
@@ -266,6 +306,7 @@ impl<'a> Program<'a> {
                 FunctionRef {
                     type_index: self.func_types[function_index as usize],
                     func_index: function_index,
+                    settings: PhantomData::<S>,
                 }
                 .to_memory_entries()
             }
@@ -517,7 +558,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 
                     // We include two extra words for the table size and maximum size
                     let segment = mem_allocator
-                        .allocate_segment(max_entries * FunctionRef::NUM_WORDS * 4 + 8);
+                        .allocate_segment(max_entries * FunctionRef::<S>::total_byte_size() + 8);
 
                     // Store the table size and maximum size in the initial memory
                     initial_memory
@@ -565,7 +606,8 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                     log::debug!("Global variable {} has type {:?}", ctx.globals.len(), ty);
 
                     // Initialize the global variables
-                    let words = ctx.eval_const_expr(ty, global.init_expr.get_operators_reader())?;
+                    let words =
+                        ctx.eval_const_expr::<S>(ty, global.init_expr.get_operators_reader())?;
                     for (idx, word) in words.into_iter().enumerate() {
                         initial_memory.insert(var.address + 4 * idx as u32, word);
                     }
@@ -613,6 +655,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                                     FunctionRef {
                                         type_index: ctx.func_types[idx as usize],
                                         func_index: idx,
+                                        settings: PhantomData::<S>,
                                     }
                                     .to_memory_entries(),
                                 );
@@ -620,7 +663,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                         }
                         ElementItems::Expressions(ref_type, section) => {
                             for elem in section {
-                                let val = ctx.eval_const_expr(
+                                let val = ctx.eval_const_expr::<S>(
                                     ValType::Ref(ref_type),
                                     elem?.get_operators_reader(),
                                 )?;
@@ -628,7 +671,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             }
                         }
                     };
-                    let num_elems = values.len() as u32 / FunctionRef::NUM_WORDS;
+                    let num_elems = values.len() as u32 / (FunctionRef::<S>::total_byte_size() / 4);
 
                     // Decide what to do with the values
                     match elem_segment.kind {
@@ -640,14 +683,14 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             );
 
                             // We include one extra word: the segment size
-                            let segment = mem_allocator
-                                .allocate_segment(num_elems * 4 * FunctionRef::NUM_WORDS + 4);
+                            let segment = mem_allocator.allocate_segment(
+                                4 + num_elems * FunctionRef::<S>::total_byte_size(),
+                            );
 
                             // Store the segment size in the initial memory
                             initial_memory.insert(segment.start, MemoryEntry::Value(num_elems));
 
                             // Store the values in the initial memory
-                            assert_eq!(values.len() % FunctionRef::NUM_WORDS as usize, 0);
                             for (idx, word) in values.into_iter().enumerate() {
                                 initial_memory.insert(segment.start + 4 * (idx as u32 + 1), word);
                             }
@@ -666,7 +709,10 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             let table = &ctx.tables[idx as usize];
 
                             let &[MemoryEntry::Value(offset)] = ctx
-                                .eval_const_expr(ValType::I32, offset_expr.get_operators_reader())?
+                                .eval_const_expr::<S>(
+                                    ValType::I32,
+                                    offset_expr.get_operators_reader(),
+                                )?
                                 .as_slice()
                             else {
                                 panic!("Offset is not a u32 value");
@@ -683,7 +729,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             assert!(offset + num_elems <= table_size);
 
                             let mut byte_offset =
-                                table.start + offset * 4 * FunctionRef::NUM_WORDS + 8;
+                                table.start + 8 + offset * FunctionRef::<S>::total_byte_size();
                             for value in values {
                                 initial_memory.insert(byte_offset, value);
                                 byte_offset += 4;
@@ -783,7 +829,10 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             };
 
                             let &[MemoryEntry::Value(offset)] = ctx
-                                .eval_const_expr(ValType::I32, offset_expr.get_operators_reader())?
+                                .eval_const_expr::<S>(
+                                    ValType::I32,
+                                    offset_expr.get_operators_reader(),
+                                )?
                                 .as_slice()
                             else {
                                 panic!("Offset is not a u32 value");
