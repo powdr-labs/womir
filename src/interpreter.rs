@@ -617,6 +617,73 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         drop(a);
                         self.set_vrom_relative_u32(c, val);
                     }
+                    Op::F32Add => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+                        let b = f32::from_bits(self.get_vrom_relative_u32(b));
+
+                        let r = a + b;
+                        let r = r.to_bits();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::F32Sub => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+                        let b = f32::from_bits(self.get_vrom_relative_u32(b));
+
+                        let r = a - b;
+                        let r = r.to_bits();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::F32Div => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+                        let b = f32::from_bits(self.get_vrom_relative_u32(b));
+
+                        if b == 0f32 {
+                            panic!("integer divide by zero in I32DivU");
+                        }
+
+                        let r = a / b;
+                        let r = r.to_bits();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::F32Eq => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+                        let b = f32::from_bits(self.get_vrom_relative_u32(b));
+
+                        let r = if a == b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::F32Lt => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+                        let b = f32::from_bits(self.get_vrom_relative_u32(b));
+
+                        let r = if a < b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::F32Gt => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
