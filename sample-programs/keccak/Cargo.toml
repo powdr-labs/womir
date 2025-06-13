@@ -1,0 +1,18 @@
+[workspace]
+[package]
+name = "keccak"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
