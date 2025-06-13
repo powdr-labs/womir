@@ -443,6 +443,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64And => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+                        let r = a & b;
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
                     Op::I64Or => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -451,6 +462,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let a = self.get_vrom_relative_u64(a);
                         let b = self.get_vrom_relative_u64(b);
                         let r = a | b;
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
+                    Op::I64Xor => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+                        let r = a ^ b;
 
                         self.set_vrom_relative_u64(c, r);
                     }
@@ -486,6 +508,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = self.get_vrom_relative_u64(b);
 
                         let r = a.wrapping_shl(b as u32);
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
+                    Op::I64Rotl => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+
+                        let r = a.rotate_left(b as u32);
 
                         self.set_vrom_relative_u64(c, r);
                     }
@@ -759,6 +793,21 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let mut memory = self.get_mem();
                         let old_value = memory.get_word(addr).expect("Out of bounds read");
                         let new_value = (old_value & !(0xff << shift)) | (byte << shift);
+                        memory
+                            .set_word(addr, new_value)
+                            .expect("Out of bounds write");
+                    }
+                    Op::I32Store16 { memarg } => {
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = addr & !0x3; // align to 4 bytes
+
+                        let bytes = self.get_vrom_relative_u32(inputs[1].clone()) & 0xffff;
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = self.get_mem();
+                        let old_value = memory.get_word(addr).expect("Out of bounds read");
+                        let new_value = (old_value & 0xffff0000) | bytes;
                         memory
                             .set_word(addr, new_value)
                             .expect("Out of bounds write");
