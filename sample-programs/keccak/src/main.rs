@@ -10,7 +10,7 @@ pub fn main() {
     let inputs = [b"Solidity", b"Powdrrrr"];
     let mut output = [0u8; 32];
     let mut hasher = Keccak::v256();
-    for input in inputs.into_iter().cycle().take(1) {
+    for input in inputs.into_iter().cycle().take(100) {
         hasher.update(input);
     }
     hasher.finalize(&mut output);
