@@ -17,12 +17,17 @@
 //! break inputs are explicitly marked.
 
 mod allocate_registers;
+mod settings;
+
+use derive_where::derive_where;
+pub use settings::Settings;
 
 use allocate_registers::{Allocation, optimistic_allocation};
 use itertools::Itertools;
 use std::{
     collections::{BTreeSet, VecDeque},
     fmt::Display,
+    marker::PhantomData,
     ops::{Range, RangeFrom},
 };
 use wasmparser::{Operator as Op, ValType};
@@ -443,14 +448,18 @@ fn format_op(op: &Op<'_>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RegisterGenerator {
+#[derive_where(Debug, Clone, Copy)]
+struct RegisterGenerator<S: Settings> {
     next_available: u32,
+    settings: PhantomData<S>,
 }
 
-impl RegisterGenerator {
+impl<S: Settings> RegisterGenerator<S> {
     fn new() -> Self {
-        Self { next_available: 0 }
+        Self {
+            next_available: 0,
+            settings: PhantomData,
+        }
     }
 
     fn merge(&mut self, other: Self) {
@@ -465,12 +474,12 @@ impl RegisterGenerator {
         start..self.next_available
     }
 
-    fn allocate_bytes(&mut self, bytes_per_word: u32, byte_size: u32) -> Range<u32> {
-        self.allocate_words(word_count(byte_size, bytes_per_word))
+    fn allocate_bytes(&mut self, byte_size: u32) -> Range<u32> {
+        self.allocate_words(word_count::<S>(byte_size))
     }
 
-    fn allocate_type(&mut self, bytes_per_word: u32, ty: ValType) -> Range<u32> {
-        self.allocate_words(word_count_type(ty, bytes_per_word))
+    fn allocate_type(&mut self, ty: ValType) -> Range<u32> {
+        self.allocate_words(word_count_type::<S>(ty))
     }
 }
 
@@ -504,18 +513,17 @@ struct LoopStackEntry {
     input_regs: Vec<Range<u32>>,
 }
 
-pub fn flatten_dag<'a>(
+pub fn flatten_dag<'a, S: Settings>(
     module: &Program<'a>,
-    bytes_per_word: u32,
     label_gen: &mut RangeFrom<u32>,
     dag: BlocklessDag<'a>,
     func_idx: u32,
 ) -> WriteOnceASM<'a> {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
-    let mut reg_gen = RegisterGenerator::new();
+    let mut reg_gen = RegisterGenerator::<S>::new();
 
-    let ret_pc = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-    let ret_fp = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+    let ret_pc = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+    let ret_fp = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
 
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
@@ -524,24 +532,27 @@ pub fn flatten_dag<'a>(
     let input_regs = func_type
         .params()
         .iter()
-        .map(|ty| reg_gen.allocate_type(bytes_per_word, *ty))
+        .map(|ty| reg_gen.allocate_type(*ty))
         .collect_vec();
     let output_regs = func_type
         .results()
         .iter()
-        .map(|ty| reg_gen.allocate_type(bytes_per_word, *ty))
+        .map(|ty| reg_gen.allocate_type(*ty))
         .collect_vec();
 
     let ret_info = ReturnInfo { ret_pc, ret_fp };
 
     // Perform the register allocation for the function's top-level frame.
-    let mut allocation = optimistic_allocation(&dag, bytes_per_word, &mut RegisterGenerator::new());
+    let mut allocation = optimistic_allocation(&dag, &mut RegisterGenerator::<S>::new());
 
     // Since this is the top-level frame, the allocation can
     // not be arbitrary. It must conform to the calling convention,
     // so we must permute the allocation we found to match it.
-    let reg_gen =
-        allocate_registers::permute_allocation(&mut allocation, input_regs, reg_gen.next_available);
+    let reg_gen = allocate_registers::permute_allocation::<S>(
+        &mut allocation,
+        input_regs,
+        reg_gen.next_available,
+    );
 
     let mut ctrl_stack = VecDeque::from([CtrlStackEntry {
         entry_type: CtrlStackType::TopLevelFunction { output_regs },
@@ -551,7 +562,6 @@ pub fn flatten_dag<'a>(
     let (directives, frame_size) = flatten_frame_tree(
         module,
         dag,
-        bytes_per_word,
         reg_gen,
         label_gen,
         &mut ctrl_stack,
@@ -588,11 +598,10 @@ pub fn flatten_dag<'a>(
     }
 }
 
-fn flatten_frame_tree<'a>(
+fn flatten_frame_tree<'a, S: Settings>(
     ctx: &Program<'a>,
     dag: BlocklessDag<'a>,
-    bytes_per_word: u32,
-    mut reg_gen: RegisterGenerator,
+    mut reg_gen: RegisterGenerator<S>,
     label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: Option<ReturnInfo>,
@@ -602,7 +611,6 @@ fn flatten_frame_tree<'a>(
     for (node_idx, node) in dag.nodes.into_iter().enumerate() {
         let node_directives = translate_single_node(
             ctx,
-            bytes_per_word,
             &mut reg_gen,
             label_gen,
             ctrl_stack,
@@ -627,10 +635,9 @@ fn flatten_frame_tree<'a>(
     (directives, reg_gen.next_available)
 }
 
-fn translate_single_node<'a>(
+fn translate_single_node<'a, S: Settings>(
     ctx: &Program<'a>,
-    bytes_per_word: u32,
-    mut reg_gen: &mut RegisterGenerator,
+    mut reg_gen: &mut RegisterGenerator<S>,
     label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: &Option<ReturnInfo>,
@@ -654,7 +661,7 @@ fn translate_single_node<'a>(
             sub_dag,
             break_targets,
         } => {
-            let mut loop_reg_gen = RegisterGenerator::new();
+            let mut loop_reg_gen = RegisterGenerator::<S>::new();
 
             // If None, this loop does not return from the function nor iterate to any outer loop.
             let shallowest_iter_or_ret = break_targets
@@ -668,8 +675,8 @@ fn translate_single_node<'a>(
             // Test if the loop can return from the function. If so, we need to
             // forward the return info.
             let loop_ret_info = if ret_info.is_some() && shallowest_iter_or_ret.is_some() {
-                let ret_pc = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
-                let ret_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                let ret_pc = loop_reg_gen.allocate_bytes(PTR_BYTE_SIZE);
+                let ret_fp = loop_reg_gen.allocate_bytes(PTR_BYTE_SIZE);
 
                 // If the function has outputs, we need to save the toplevel frame pointer, too.
                 if let CtrlStackType::TopLevelFunction { output_regs } =
@@ -714,14 +721,13 @@ fn translate_single_node<'a>(
             let loop_outer_fps = saved_fps
                 .into_iter()
                 .map(|depth| {
-                    let outer_fp = loop_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                    let outer_fp = loop_reg_gen.allocate_bytes(PTR_BYTE_SIZE);
                     (depth + 1, outer_fp)
                 })
                 .collect();
 
             // Finally allocate all the registers for the loop instructions, including the inputs.
-            let loop_allocation =
-                optimistic_allocation(&sub_dag, bytes_per_word, &mut loop_reg_gen);
+            let loop_allocation = optimistic_allocation(&sub_dag, &mut loop_reg_gen);
 
             // Sanity check: loops have no outputs:
             assert!(node.output_types.is_empty());
@@ -740,7 +746,6 @@ fn translate_single_node<'a>(
 
             // Emit all the instructions to enter the loop.
             let enter_loop_directives = jump_into_loop(
-                bytes_per_word,
                 &loop_entry,
                 &mut reg_gen,
                 -1,
@@ -757,7 +762,6 @@ fn translate_single_node<'a>(
             let (loop_directives, loop_frame_size) = flatten_frame_tree(
                 ctx,
                 sub_dag,
-                bytes_per_word,
                 loop_reg_gen,
                 label_gen,
                 ctrl_stack,
@@ -779,7 +783,6 @@ fn translate_single_node<'a>(
             ])
         }
         Operation::Br(target) => emit_jump(
-            bytes_per_word,
             &mut reg_gen,
             ret_info.as_ref(),
             &node.inputs,
@@ -794,7 +797,7 @@ fn translate_single_node<'a>(
             let mut inputs = node.inputs;
             let cond_origin = inputs.pop().unwrap();
             let cond_reg = curr_entry.allocation.get(&cond_origin)?;
-            assert_reg(&cond_reg, bytes_per_word, ValType::I32);
+            assert_reg::<S>(&cond_reg, ValType::I32);
 
             let cont_label = format_label(label_gen.next().unwrap(), LabelType::Local);
 
@@ -807,7 +810,6 @@ fn translate_single_node<'a>(
                 .into(),
                 // Emit the jump to the target label.
                 emit_jump(
-                    bytes_per_word,
                     &mut reg_gen,
                     ret_info.as_ref(),
                     &inputs,
@@ -830,11 +832,10 @@ fn translate_single_node<'a>(
             let mut inputs = node.inputs;
             let cond_origin = inputs.pop().unwrap();
             let cond_reg = curr_entry.allocation.get(&cond_origin)?;
-            assert_reg(&cond_reg, bytes_per_word, ValType::I32);
+            assert_reg::<S>(&cond_reg, ValType::I32);
 
             // Generate the jump instructions
             let jump_directives = DirectiveTree::Node(emit_jump(
-                bytes_per_word,
                 &mut reg_gen,
                 ret_info.as_ref(),
                 &inputs,
@@ -906,7 +907,6 @@ fn translate_single_node<'a>(
 
                     // Emit the jump to the target label.
                     emit_jump(
-                        bytes_per_word,
                         &mut reg_gen,
                         ret_info.as_ref(),
                         &inputs,
@@ -922,7 +922,7 @@ fn translate_single_node<'a>(
             // We need to handle the default target separately first, because it will be
             // the target in case the selector is out of bounds.
 
-            let num_choices = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+            let num_choices = reg_gen.allocate_type(ValType::I32);
             let mut directives: Vec<DirectiveTree<'a>> = vec![
                 Directive::WASMOp {
                     op: Op::I32Const {
@@ -941,7 +941,7 @@ fn translate_single_node<'a>(
                     unreachable!()
                 };
 
-                let is_default_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                let is_default_taken = reg_gen.allocate_type(ValType::I32);
                 directives.push(
                     Directive::WASMOp {
                         op: Op::I32GeU,
@@ -962,7 +962,7 @@ fn translate_single_node<'a>(
             } else {
                 // The default target is a complicated jump, so it is the fallthrough,
                 // and the JumpIf will target the table.
-                let is_default_not_taken = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+                let is_default_not_taken = reg_gen.allocate_type(ValType::I32);
                 directives.push(
                     Directive::WASMOp {
                         op: Op::I32LtU,
@@ -1093,15 +1093,14 @@ fn translate_single_node<'a>(
                 // Normal function calls requires a frame allocation and copying of the
                 // inputs and outputs into the frame (the outputs are provided by the
                 // prover "from the future").
-                let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+                let func_frame_ptr = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
 
                 let inputs = node
                     .inputs
                     .into_iter()
                     .map(|origin| curr_entry.allocation.get(&origin))
                     .collect::<Result<Vec<_>, _>>()?;
-                let (call_directives, this_ret_info) = prepare_function_call(
-                    bytes_per_word,
+                let (call_directives, this_ret_info) = prepare_function_call::<S>(
                     inputs,
                     node_idx,
                     node.output_types.len(),
@@ -1139,21 +1138,20 @@ fn translate_single_node<'a>(
             let mut inputs = map_input_into_regs(node.inputs, curr_entry)?;
             let table_get_inputs = vec![inputs.pop().unwrap()];
 
-            let func_ref_reg = reg_gen.allocate_type(bytes_per_word, ValType::FUNCREF);
+            let func_ref_reg = reg_gen.allocate_type(ValType::FUNCREF);
 
             // Split the components of the function reference:
-            let func_ref_regs = split_func_ref_regs(bytes_per_word, func_ref_reg.clone());
+            let func_ref_regs = split_func_ref_regs::<S>(func_ref_reg.clone());
 
             // We need two new registers to compare the expected function type with the loaded one.
-            let expected_func_type = reg_gen.allocate_type(bytes_per_word, ValType::I32);
-            let eq_result = reg_gen.allocate_type(bytes_per_word, ValType::I32);
+            let expected_func_type = reg_gen.allocate_type(ValType::I32);
+            let eq_result = reg_gen.allocate_type(ValType::I32);
 
             let ok_label = format_label(label_gen.next().unwrap(), LabelType::Local);
-            let func_frame_ptr = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+            let func_frame_ptr = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
 
             // Perform the function call
-            let (call_directives, this_ret_info) = prepare_function_call(
-                bytes_per_word,
+            let (call_directives, this_ret_info) = prepare_function_call::<S>(
                 inputs,
                 node_idx,
                 node.output_types.len(),
@@ -1242,12 +1240,9 @@ fn translate_single_node<'a>(
     })
 }
 
-fn assert_reg(reg: &Range<u32>, bytes_per_word: u32, ty: ValType) {
-    let expected_size = byte_size(bytes_per_word, ty);
-    assert_eq!(
-        reg.len(),
-        word_count(expected_size, bytes_per_word) as usize
-    );
+fn assert_reg<S: Settings>(reg: &Range<u32>, ty: ValType) {
+    let expected_size = byte_size::<S>(ty);
+    assert_eq!(reg.len(), word_count::<S>(expected_size) as usize);
 }
 
 fn map_input_into_regs(
@@ -1277,8 +1272,7 @@ fn copy_into_frame<'a>(
         .collect()
 }
 
-fn prepare_function_call<'a>(
-    bytes_per_word: u32,
+fn prepare_function_call<'a, S: Settings>(
     inputs: Vec<Range<u32>>,
     node_idx: usize,
     num_outputs: usize,
@@ -1288,10 +1282,10 @@ fn prepare_function_call<'a>(
     let mut directives = Vec::new();
 
     // Generate the registers in the order expected by the calling convention.
-    let mut fn_reg_gen = RegisterGenerator::new();
+    let mut fn_reg_gen = RegisterGenerator::<S>::new();
     let ret_info = ReturnInfo {
-        ret_pc: fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE),
-        ret_fp: fn_reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE),
+        ret_pc: fn_reg_gen.allocate_bytes(PTR_BYTE_SIZE),
+        ret_fp: fn_reg_gen.allocate_bytes(PTR_BYTE_SIZE),
     };
 
     for src_reg in inputs {
@@ -1310,9 +1304,8 @@ fn prepare_function_call<'a>(
     Ok((directives, ret_info))
 }
 
-fn emit_jump<'a>(
-    bytes_per_word: u32,
-    reg_gen: &mut RegisterGenerator,
+fn emit_jump<'a, S: Settings>(
+    reg_gen: &mut RegisterGenerator<S>,
     ret_info: Option<&ReturnInfo>,
     node_inputs: &[ValueOrigin],
     target: &BreakTarget,
@@ -1351,7 +1344,7 @@ fn emit_jump<'a>(
             kind: TargetType::Label(label),
         } => {
             // This is a jump out of loop, into a previous frame of the same function.
-            jump_out_of_loop(bytes_per_word, *depth, *label, ctrl_stack, node_inputs)
+            jump_out_of_loop::<S>(*depth, *label, ctrl_stack, node_inputs)
         }
         BreakTarget {
             depth,
@@ -1364,8 +1357,7 @@ fn emit_jump<'a>(
                     match &curr_entry.entry_type {
                         CtrlStackType::TopLevelFunction { output_regs } => {
                             // This is a return from the toplevel frame.
-                            top_level_return(
-                                bytes_per_word,
+                            top_level_return::<S>(
                                 ret_info.as_ref().unwrap(),
                                 &curr_entry.allocation,
                                 node_inputs,
@@ -1375,8 +1367,7 @@ fn emit_jump<'a>(
                         CtrlStackType::Loop(loop_entry) => {
                             // This is a return from a loop.
                             assert_eq!(loop_entry.ret_info.as_ref(), ret_info);
-                            return_from_loop(
-                                bytes_per_word,
+                            return_from_loop::<S>(
                                 ctrl_stack.len(),
                                 output_regs,
                                 node_inputs,
@@ -1389,7 +1380,6 @@ fn emit_jump<'a>(
                 CtrlStackType::Loop(loop_entry) => {
                     // This is a loop iteration.
                     jump_into_loop(
-                        bytes_per_word,
                         loop_entry,
                         reg_gen,
                         *depth as i64,
@@ -1447,8 +1437,7 @@ fn local_jump<'a>(
     Ok(directives)
 }
 
-fn top_level_return<'a>(
-    bytes_per_word: u32,
+fn top_level_return<'a, S: Settings>(
     ret_info: &ReturnInfo,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
@@ -1458,8 +1447,8 @@ fn top_level_return<'a>(
     let mut directives = copy_local_jump_args(allocation, node_inputs, output_regs)?;
 
     // Emit the return directive.
-    assert_ptr_size(bytes_per_word, &ret_info.ret_pc);
-    assert_ptr_size(bytes_per_word, &ret_info.ret_fp);
+    assert_ptr_size::<S>(&ret_info.ret_pc);
+    assert_ptr_size::<S>(&ret_info.ret_fp);
     directives.push(
         Directive::Return {
             ret_pc: ret_info.ret_pc.start,
@@ -1471,8 +1460,7 @@ fn top_level_return<'a>(
     Ok(directives)
 }
 
-fn return_from_loop<'a>(
-    bytes_per_word: u32,
+fn return_from_loop<'a, S: Settings>(
     ctrl_stack_len: usize,
     output_regs: &[Range<u32>],
     node_inputs: &[ValueOrigin],
@@ -1485,12 +1473,7 @@ fn return_from_loop<'a>(
         let outer_fps = &curr_entry.saved_fps[..];
         let toplevel_depth = ctrl_stack_len - 1;
         let toplevel_idx = outer_fps.len() - 1;
-        let toplevel_fp = get_fp_from_sorted(
-            bytes_per_word,
-            outer_fps,
-            toplevel_depth as u32,
-            toplevel_idx,
-        );
+        let toplevel_fp = get_fp_from_sorted::<S>(outer_fps, toplevel_depth as u32, toplevel_idx);
 
         // Issue the copy directives.
         for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
@@ -1501,8 +1484,8 @@ fn return_from_loop<'a>(
 
     // Issue the return directive.
     let ret_info = curr_entry.ret_info.as_ref().unwrap();
-    assert_ptr_size(bytes_per_word, &ret_info.ret_pc);
-    assert_ptr_size(bytes_per_word, &ret_info.ret_fp);
+    assert_ptr_size::<S>(&ret_info.ret_pc);
+    assert_ptr_size::<S>(&ret_info.ret_fp);
 
     directives.push(
         Directive::Return {
@@ -1515,8 +1498,7 @@ fn return_from_loop<'a>(
     Ok(directives)
 }
 
-fn jump_out_of_loop<'a>(
-    bytes_per_word: u32,
+fn jump_out_of_loop<'a, S: Settings>(
     depth: u32,
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
@@ -1530,7 +1512,7 @@ fn jump_out_of_loop<'a>(
         panic!()
     };
     let dest_fp_idx = outer_fps.partition_point(|(d, _)| *d < depth);
-    let dest_fp = get_fp_from_sorted(bytes_per_word, outer_fps, depth, dest_fp_idx);
+    let dest_fp = get_fp_from_sorted::<S>(outer_fps, depth, dest_fp_idx);
 
     let target_entry = &ctrl_stack[depth as usize];
     let target_inputs = &target_entry.allocation.labels[&label_id];
@@ -1554,15 +1536,14 @@ fn jump_out_of_loop<'a>(
     Ok(directives)
 }
 
-fn get_fp_from_sorted(
-    bytes_per_word: u32,
+fn get_fp_from_sorted<S: Settings>(
     sorted_fps: &[(u32, Range<u32>)],
     expected_depth: u32,
     idx: usize,
 ) -> u32 {
     let dest_fp = &sorted_fps[idx];
     assert_eq!(dest_fp.0, expected_depth);
-    assert_ptr_size(bytes_per_word, &dest_fp.1);
+    assert_ptr_size::<S>(&dest_fp.1);
     dest_fp.1.start
 }
 
@@ -1571,10 +1552,9 @@ fn get_fp_from_sorted(
 /// and when jumping into the loop for the first time.
 ///
 /// depth_offset is the difference between the caller frame depth and the loop frame depth.
-fn jump_into_loop<'a>(
-    bytes_per_word: u32,
+fn jump_into_loop<'a, S: Settings>(
     loop_entry: &LoopStackEntry,
-    reg_gen: &mut RegisterGenerator,
+    reg_gen: &mut RegisterGenerator<S>,
     depth_offset: i64,
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
@@ -1583,7 +1563,7 @@ fn jump_into_loop<'a>(
     let mut directives: Vec<DirectiveTree<'a>> = Vec::new();
 
     // We start by allocating the frame.
-    let loop_fp = reg_gen.allocate_bytes(bytes_per_word, PTR_BYTE_SIZE);
+    let loop_fp = reg_gen.allocate_bytes(PTR_BYTE_SIZE);
     directives.push(
         Directive::AllocateFrameI {
             target_frame: loop_entry.label.clone(),
@@ -1630,7 +1610,7 @@ fn jump_into_loop<'a>(
     // Handle the special case where outer_fps[0] is required.
     let saved_caller_fp = if let Some((0, _)) = depth_adjusted_loop_fps.peek() {
         let fp = depth_adjusted_loop_fps.next().unwrap().1;
-        assert_ptr_size(bytes_per_word, &fp);
+        assert_ptr_size::<S>(&fp);
         Some(fp.start)
     } else {
         None
@@ -1704,7 +1684,7 @@ pub fn func_idx_to_label(func_idx: u32) -> String {
     format_label(func_idx, LabelType::Function)
 }
 
-fn byte_size(bytes_per_word: u32, ty: ValType) -> u32 {
+fn byte_size<S: Settings>(ty: ValType) -> u32 {
     match ty {
         ValType::I32 | ValType::F32 => 4,
         ValType::I64 | ValType::F64 => 8,
@@ -1713,15 +1693,15 @@ fn byte_size(bytes_per_word: u32, ty: ValType) -> u32 {
             // Since this is a struct of multiple memory words (u32) that we will need to
             // unpack into registers, so we need to provision enough registers for each memory
             // word independently.
-            FunctionRef::NUM_WORDS * word_count(4, bytes_per_word) * bytes_per_word
+            FunctionRef::NUM_WORDS * word_count::<S>(4) * S::bytes_per_word()
         }
     }
 }
 
-fn split_func_ref_regs(bytes_per_word: u32, func_ref_reg: Range<u32>) -> Vec<Range<u32>> {
+fn split_func_ref_regs<S: Settings>(func_ref_reg: Range<u32>) -> Vec<Range<u32>> {
     let comp_size = func_ref_reg.len() as u32 / FunctionRef::NUM_WORDS;
     // Each component must have the same word-size as a I32,
-    assert_eq!(comp_size, word_count_type(ValType::I32, bytes_per_word));
+    assert_eq!(comp_size, word_count_type::<S>(ValType::I32));
     let func_ref_regs = (0..FunctionRef::NUM_WORDS)
         .map(|i| func_ref_reg.start + i * comp_size..func_ref_reg.start + (i + 1) * comp_size)
         .collect_vec();
@@ -1730,17 +1710,14 @@ fn split_func_ref_regs(bytes_per_word: u32, func_ref_reg: Range<u32>) -> Vec<Ran
     func_ref_regs
 }
 
-fn word_count(byte_size: u32, bytes_per_word: u32) -> u32 {
-    (byte_size + bytes_per_word - 1) / bytes_per_word
+fn word_count<S: Settings>(byte_size: u32) -> u32 {
+    (byte_size + S::bytes_per_word() - 1) / S::bytes_per_word()
 }
 
-fn assert_ptr_size(bytes_per_word: u32, ptr: &Range<u32>) {
-    assert_eq!(
-        ptr.len(),
-        word_count(PTR_BYTE_SIZE, bytes_per_word) as usize
-    );
+fn assert_ptr_size<S: Settings>(ptr: &Range<u32>) {
+    assert_eq!(ptr.len(), word_count::<S>(PTR_BYTE_SIZE) as usize);
 }
 
-pub fn word_count_type(ty: ValType, bytes_per_word: u32) -> u32 {
-    word_count(byte_size(bytes_per_word, ty), bytes_per_word)
+pub fn word_count_type<S: Settings>(ty: ValType) -> u32 {
+    word_count::<S>(byte_size::<S>(ty))
 }

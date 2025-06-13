@@ -1,7 +1,11 @@
 use itertools::Itertools;
 
-use crate::interpreter::{ExternalFunctions, Interpreter};
+use crate::{
+    generic_ir::GenericIrSetting,
+    interpreter::{ExternalFunctions, Interpreter},
+};
 
+mod generic_ir;
 mod interpreter;
 mod linker;
 mod loader;
@@ -60,7 +64,7 @@ fn main() -> wasmparser::Result<()> {
 
     let wasm_file = std::fs::read(&wasm_file_path).unwrap();
 
-    let program = loader::load_wasm(&wasm_file)?;
+    let program = loader::load_wasm::<GenericIrSetting>(&wasm_file)?;
 
     if let Some(func_name) = func_name {
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
@@ -79,7 +83,7 @@ mod tests {
 
     fn test_interpreter(path: &str, main_function: &str, inputs: &[u32], outputs: &[u32]) {
         let wasm_file = std::fs::read(path).unwrap();
-        let program = loader::load_wasm(&wasm_file).unwrap();
+        let program = loader::load_wasm::<GenericIrSetting>(&wasm_file).unwrap();
         let mut interpreter = interpreter::Interpreter::new(program, DataInput::new(Vec::new()));
         let got_output = interpreter.run(main_function, inputs);
         assert_eq!(got_output, outputs);
@@ -148,7 +152,7 @@ mod tests {
                     println!("Module: {}", mod_name.display());
 
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = loader::load_wasm(&wasm_file).unwrap();
+                    let program = loader::load_wasm::<GenericIrSetting>(&wasm_file).unwrap();
                     let mut interpreter =
                         interpreter::Interpreter::new(program, DataInput::new(Vec::new()));
 
@@ -175,11 +179,10 @@ mod tests {
     }
 
     use serde::Deserialize;
-    use std::fs::{self, File};
-    use std::path::{Path, PathBuf};
+    use std::fs::{self};
+    use std::path::PathBuf;
     use std::process::Command;
     use tempfile::NamedTempFile;
-    use tempfile::tempdir;
 
     #[derive(Debug, Deserialize)]
     struct TestFile {

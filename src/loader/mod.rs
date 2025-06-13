@@ -24,6 +24,7 @@ use wasmparser::{
 use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget},
     dag::ValueOrigin,
+    flattening::Settings,
 };
 
 pub use flattening::{func_idx_to_label, word_count_type};
@@ -359,7 +360,7 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
     words
 }
 
-pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
+pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
     let parser = Parser::new(0);
 
     let mut ctx = Program {
@@ -462,7 +463,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                         let func_idx = ctx.imported_functions.len() as u32;
                         ctx.func_types.push(type_idx);
                         ctx.imported_functions.push((import.module, import.name));
-                        ctx.functions.push(generate_imported_func_wrapper(
+                        ctx.functions.push(generate_imported_func_wrapper::<S>(
                             &ctx,
                             &mut label_gen,
                             func_idx,
@@ -726,7 +727,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
                 let definition =
-                    flattening::flatten_dag(&ctx, 4, &mut label_gen, blockless_dag, func_idx);
+                    flattening::flatten_dag::<S>(&ctx, &mut label_gen, blockless_dag, func_idx);
 
                 /*println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
@@ -855,7 +856,7 @@ pub fn load_wasm(wasm_file: &[u8]) -> wasmparser::Result<Program> {
 }
 
 /// Generates a wrapper function for an imported function.
-fn generate_imported_func_wrapper<'a>(
+fn generate_imported_func_wrapper<'a, S: Settings>(
     ctx: &Program<'a>,
     label_gen: &mut RangeFrom<u32>,
     function_idx: u32,
@@ -901,13 +902,7 @@ fn generate_imported_func_wrapper<'a>(
     // Flatten the DAG into an assembly-like definition.
     // This will not turn into an infinite recursion because a Call
     // to an imported function if flattened into an ImportedCall.
-    flattening::flatten_dag(
-        ctx,
-        4, // 4 bytes per word
-        label_gen,
-        dag,
-        function_idx,
-    )
+    flattening::flatten_dag::<S>(ctx, label_gen, dag, function_idx)
 }
 
 /// Reads the function arguments and the explicit locals declaration.

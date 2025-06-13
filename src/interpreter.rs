@@ -5,6 +5,7 @@ use std::ops::Range;
 use itertools::Itertools;
 use wasmparser::Operator as Op;
 
+use crate::generic_ir::GenericIrSetting as S;
 use crate::linker;
 use crate::loader::flattening::Directive;
 use crate::loader::{Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
@@ -101,14 +102,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let n_inputs: u32 = func_type
             .params()
             .iter()
-            .map(|ty| word_count_type(*ty, 4))
+            .map(|ty| word_count_type::<S>(*ty))
             .sum();
         assert_eq!(inputs.len(), n_inputs as usize);
 
         let n_outputs: u32 = func_type
             .results()
             .iter()
-            .map(|ty| word_count_type(*ty, 4))
+            .map(|ty| word_count_type::<S>(*ty))
             .sum();
 
         self.pc = func_label.pc;
@@ -745,7 +746,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let global_info = self.program.globals[global_index as usize];
                         let output = output.unwrap();
 
-                        let size = word_count_type(global_info.val_type, 4);
+                        let size = word_count_type::<S>(global_info.val_type);
                         assert_eq!(size, output.len() as u32);
 
                         let value = (0..size)
@@ -762,7 +763,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             "GlobalSet should have no additional inputs"
                         );
 
-                        let size = word_count_type(global_info.val_type, 4);
+                        let size = word_count_type::<S>(global_info.val_type);
                         assert_eq!(origin.len(), size as usize);
 
                         let value = self.get_vrom_relative_range(origin).collect_vec();
