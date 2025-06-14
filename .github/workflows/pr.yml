@@ -1,0 +1,76 @@
+name: PR Check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Rust toolchain 1.85.1 (stable)
+        run: |
+          rustup install 1.85.1
+          rustup +1.85.1 component add clippy
+          rustup +1.85.1 component add rustfmt
+          rustup +1.85.1 component add rust-src
+
+      - name: Build project
+        run: cargo build --release
+
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y wabt
+
+      - name: Install WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Run tests
+        run: cargo test --release
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain 1.85.1 (stable)
+        run: |
+          rustup install 1.85.1
+          rustup +1.85.1 component add clippy
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain 1.85.1 (stable)
+        run: |
+          rustup install 1.85.1
+          rustup +1.85.1 component add rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
