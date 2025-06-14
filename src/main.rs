@@ -62,7 +62,7 @@ fn main() -> wasmparser::Result<()> {
         .filter_map(|s| s.parse::<u32>().ok())
         .collect_vec();
 
-    let wasm_file = std::fs::read(&wasm_file_path).unwrap();
+    let wasm_file = std::fs::read(wasm_file_path).unwrap();
 
     let program = loader::load_wasm::<GenericIrSetting>(&wasm_file)?;
 
@@ -70,7 +70,7 @@ fn main() -> wasmparser::Result<()> {
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         log::info!("Executing function: {func_name}");
         let outputs = interpreter.run(func_name, &func_inputs);
-        println!("Outputs: {:?}", outputs);
+        log::info!("Outputs: {:?}", outputs);
     }
 
     Ok(())
@@ -79,35 +79,110 @@ fn main() -> wasmparser::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use tempfile::NamedTempFile;
     use test_log::test;
 
-    fn test_interpreter(path: &str, main_function: &str, inputs: &[u32], outputs: &[u32]) {
+    fn test_interpreter(
+        path: &str,
+        main_function: &str,
+        func_inputs: &[u32],
+        data_inputs: Vec<u32>,
+        outputs: &[u32],
+    ) {
         let wasm_file = std::fs::read(path).unwrap();
         let program = loader::load_wasm::<GenericIrSetting>(&wasm_file).unwrap();
-        let mut interpreter = interpreter::Interpreter::new(program, DataInput::new(Vec::new()));
-        let got_output = interpreter.run(main_function, inputs);
+        let mut interpreter = interpreter::Interpreter::new(program, DataInput::new(data_inputs));
+        let got_output = interpreter.run(main_function, func_inputs);
         assert_eq!(got_output, outputs);
     }
 
     fn test_interpreter_from_sample_programs(
         path: &str,
         main_function: &str,
-        inputs: &[u32],
+        func_inputs: &[u32],
+        data_inputs: Vec<u32>,
         outputs: &[u32],
     ) {
         let path = format!("{}/sample-programs/{path}", env!("CARGO_MANIFEST_DIR"));
-        test_interpreter(&path, main_function, inputs, outputs);
+        test_interpreter(&path, main_function, func_inputs, data_inputs, outputs);
+    }
+
+    /// This test requires the directory and the package name to be the same in `case`.
+    fn test_interpreter_rust(
+        case: &str,
+        main_function: &str,
+        func_inputs: &[u32],
+        data_inputs: Vec<u32>,
+        outputs: &[u32],
+    ) {
+        let path = format!("{}/sample-programs/{case}", env!("CARGO_MANIFEST_DIR"));
+        build_wasm(&PathBuf::from(&path));
+        let wasm_path = format!("{path}/target/wasm32-unknown-unknown/release/{case}.wasm",);
+        test_interpreter(&wasm_path, main_function, func_inputs, data_inputs, outputs);
+    }
+
+    fn build_wasm(path: &PathBuf) {
+        assert!(path.exists(), "Target directory does not exist: {path:?}",);
+
+        let output = Command::new("cargo")
+            .arg("build")
+            .arg("--release")
+            .arg("--target")
+            .arg("wasm32-unknown-unknown")
+            .current_dir(path)
+            .output()
+            .expect("Failed to run cargo build");
+
+        if !output.status.success() {
+            eprintln!("stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+            eprintln!("stdout:\n{}", String::from_utf8_lossy(&output.stdout));
+        }
+
+        assert!(output.status.success(), "cargo build failed for {path:?}",);
+    }
+
+    #[test]
+    fn test_sqrt() {
+        test_interpreter_rust("sqrt", "main", &[0, 0], vec![9, 3], &[0]);
+    }
+
+    #[test]
+    fn test_vec_median() {
+        test_interpreter_rust(
+            "vec_median",
+            "main",
+            &[0, 0],
+            vec![5, 11, 15, 75, 6, 5, 1, 4, 7, 3, 2, 9, 2],
+            &[0],
+        );
+    }
+
+    #[test]
+    fn test_keccak() {
+        test_interpreter_rust("keccak", "main", &[0, 0], vec![], &[0]);
+    }
+
+    #[test]
+    fn test_keccak_with_inputs() {
+        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![1, 0x29], &[0]);
+        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![2, 0x51], &[0]);
+        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![5, 0xf2], &[0]);
+        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![10, 0x9b], &[0]);
     }
 
     #[test]
     fn test_fib() {
-        test_interpreter_from_sample_programs("fib_loop.wasm", "fib", &[10], &[55]);
+        test_interpreter_from_sample_programs("fib_loop.wasm", "fib", &[10], vec![], &[55]);
     }
 
     #[test]
     fn test_collatz() {
-        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[1 << 22], &[22]);
-        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[310], &[86]);
+        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[1 << 22], vec![], &[22]);
+        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[310], vec![], &[86]);
     }
 
     #[test]
@@ -149,8 +224,6 @@ mod tests {
         match extract_wast_test_info(case) {
             Ok(modules) => {
                 for (mod_name, asserts) in modules {
-                    println!("Module: {}", mod_name.display());
-
                     let wasm_file = std::fs::read(mod_name).unwrap();
                     let program = loader::load_wasm::<GenericIrSetting>(&wasm_file).unwrap();
                     let mut interpreter =
@@ -177,12 +250,6 @@ mod tests {
             Err(e) => panic!("Error extracting wast test info: {e}"),
         }
     }
-
-    use serde::Deserialize;
-    use std::fs::{self};
-    use std::path::PathBuf;
-    use std::process::Command;
-    use tempfile::NamedTempFile;
 
     #[derive(Debug, Deserialize)]
     struct TestFile {
