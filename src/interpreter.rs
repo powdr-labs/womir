@@ -132,6 +132,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     fn run_loop(&mut self) {
+        let mut cycles = 0usize;
         let final_fp = loop {
             let instr = self.flat_program[self.pc as usize].clone();
             log::trace!("PC: {}, FP: {}, Instr: {instr}", self.pc, self.fp);
@@ -1170,12 +1171,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             if should_inc_pc {
                 self.pc += 1;
             }
+
+            cycles += 1;
         };
 
         if final_fp == 0 {
-            log::trace!("Program terminated successfully.");
+            log::info!("Program terminated successfully with cycles: {cycles}.");
         } else {
-            log::trace!("Program terminated with final frame pointer: {final_fp}");
+            log::info!("Program terminated with cycles: {cycles}, final frame pointer: {final_fp}");
         }
     }
 
