@@ -185,8 +185,8 @@ impl Allocation {
 /// The smallest allocation possible is 1 word, and the addresses are given
 /// in words, not bytes. E.g. if `S::bytes_per_word()` is 4, then the first 4 bytes
 /// register will be 0, the second 4 bytes register will be 1, and so on.
-pub fn optimistic_allocation<'a, S: Settings>(
-    dag: &BlocklessDag<'a>,
+pub fn optimistic_allocation<S: Settings>(
+    dag: &BlocklessDag<'_>,
     reg_gen: &mut RegisterGenerator<S>,
 ) -> Allocation {
     let mut number_of_saved_copies = 0;
@@ -213,7 +213,7 @@ pub fn optimistic_allocation<'a, S: Settings>(
     }
 
     let new_path = || PerPathData {
-        reg_gen: reg_gen.clone(),
+        reg_gen: *reg_gen,
         assignments: AssignmentSet::default(),
     };
 
@@ -546,6 +546,8 @@ mod tests {
     }
 
     #[test]
+    // Clippy is trying to be too smart, ignoring the parameter's type.
+    #[allow(clippy::single_range_in_vec_init)]
     fn test_edge_cases() {
         let required_inputs = vec![10..20];
         let current_inputs = vec![0..10].into_iter();

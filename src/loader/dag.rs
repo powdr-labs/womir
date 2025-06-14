@@ -80,7 +80,7 @@ impl<'a> Dag<'a> {
 
         // The rest of the locals starts as unused.
         locals.extend(
-            (&locals_types[func_type.params().len()..])
+            locals_types[func_type.params().len()..]
                 .iter()
                 .copied()
                 .map(|val_type| Value::UnusedLocal { val_type }),
@@ -115,6 +115,10 @@ struct BreakArgs {
 ///
 /// For that we need to keep track of the stack and of which of our hypergraph edges is
 /// currently each local variable. When a local is assigned, it becames a new edge.
+// TODO: refactor "too many arguments"
+#[allow(clippy::too_many_arguments)]
+// TODO: refactor
+#[allow(clippy::type_complexity)]
 fn build_dag<'a>(
     module: &Program<'a>,
     locals_types: &[ValType],
@@ -161,7 +165,7 @@ fn build_dag<'a>(
                 }
                 Ins::WASMOp(Op::LocalTee { local_index }) => {
                     // LocalTee copies the value from the stack to a local.
-                    locals[local_index as usize] = Value::Defined(t.stack.last().unwrap().clone());
+                    locals[local_index as usize] = Value::Defined(*t.stack.last().unwrap());
                 }
                 Ins::WASMOp(Op::Drop) => {
                     // Drop could be a node that consumes a value and produces nothing,
@@ -336,7 +340,7 @@ fn build_dag<'a>(
                 // Block inputs are the concatenation of the stack inputs and the locals inputs.
                 let mut inputs = t
                     .stack
-                    .split_off(t.stack.len() - block.interface_type.params().len() as usize);
+                    .split_off(t.stack.len() - block.interface_type.params().len());
 
                 // Sanity check the types
                 assert!(types_matches(
@@ -406,7 +410,7 @@ fn build_dag_for_block<'a>(
     // We place the locals inputs last:
     let mut local_idx_to_input = HashMap::new();
     for local_idx in input_locals.iter() {
-        local_idx_to_input.insert(*local_idx as u32, input_types.len() as u32);
+        local_idx_to_input.insert(*local_idx, input_types.len() as u32);
         input_types.push(locals_types[*local_idx as usize]);
     }
 
@@ -481,6 +485,11 @@ fn build_dag_for_block<'a>(
     })
 }
 
+// This function is passed as a function pointer argument where the signature needs a &mut Vec<Node>
+// because sometimes the passed function pointer will modify the nodes, even though this is not the
+// case here.
+// TODO: could be refactored.
+#[allow(clippy::ptr_arg)]
 fn get_local_or_panic(
     _nodes: &mut Vec<Node>,
     locals: &mut [Value],
@@ -565,7 +574,7 @@ struct StackTracker<'a, 'b> {
     stack: Vec<ValueOrigin>,
 }
 
-impl<'a, 'b> StackTracker<'a, 'b> {
+impl StackTracker<'_, '_> {
     fn stack_type(&self, idx: usize) -> ValType {
         let val_type = &self.stack[idx];
         let node = &self.nodes[val_type.node];

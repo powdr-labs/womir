@@ -277,7 +277,7 @@ mod tests {
     #[derive(Debug, Deserialize)]
     pub struct Action {
         #[serde(rename = "type")]
-        action_type: String,
+        _action_type: String,
         field: Option<String>,
         args: Option<Vec<Val>>,
     }
@@ -289,6 +289,8 @@ mod tests {
         value: serde_json::Value,
     }
 
+    // TODO: refactor complex type
+    #[allow(clippy::type_complexity)]
     pub fn extract_wast_test_info(
         wast_path: &str,
     ) -> Result<Vec<(PathBuf, Vec<AssertCase>)>, Box<dyn std::error::Error>> {

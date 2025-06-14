@@ -40,7 +40,7 @@ pub fn link<'a>(
                     id.clone(),
                     LabelValue {
                         pc,
-                        frame_size: frame_size.clone(),
+                        frame_size: *frame_size,
                         func_idx: (pc == func_pc).then_some(fun.func_idx),
                     },
                 );

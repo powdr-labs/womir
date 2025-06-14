@@ -272,12 +272,7 @@ fn parse_contents<'a>(
                 false
             }
             Operator::BrIf { relative_depth } => {
-                output_elements.push(
-                    Instruction::WASMOp(Operator::BrIf {
-                        relative_depth: relative_depth,
-                    })
-                    .into(),
-                );
+                output_elements.push(Instruction::WASMOp(Operator::BrIf { relative_depth }).into());
 
                 true
             }
