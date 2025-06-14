@@ -174,7 +174,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     }
                     Op::F64Const { value } => {
                         let value = value.bits();
-                        self.set_vrom_relative_u64(output.unwrap(), value as u64);
+                        self.set_vrom_relative_u64(output.unwrap(), value);
                     }
                     Op::I64ExtendI32U => {
                         let a = inputs[0].clone();
@@ -751,7 +751,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(size, output.len() as u32);
 
                         let value = (0..size)
-                            .map(|i| self.get_ram(global_info.address + 4 * i as u32))
+                            .map(|i| self.get_ram(global_info.address + 4 * i))
                             .collect_vec();
                         self.set_vrom_relative_range(output, &value);
                     }
@@ -862,7 +862,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .expect("Out of bounds read")[0]
                             & 0xff;
 
-                        let value = [byte as u32, 0];
+                        let value = [byte, 0];
                         self.set_vrom_relative_range(output_reg, &value[0..word_len as usize]);
                     }
                     Op::I32Load8S { memarg } | Op::I64Load8S { memarg } => {
@@ -994,7 +994,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         if remaining > 0 {
                             let last_word = data.pop().unwrap();
                             // Zero the bytes that were not to be copied.
-                            let mut mask = !(!0 << remaining * 8);
+                            let mut mask = !(!0 << (remaining * 8));
                             let mut last_word = last_word & mask;
 
                             // We now need to write the remaining bytes in either 1 or 2
@@ -1016,7 +1016,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                                     .expect("Out of bounds write");
 
                                 mask >>= space_in_word * 8;
-                                last_word = last_word & mask;
+                                last_word &= mask;
                                 dst_word_addr += 4;
                                 space_in_word = 4;
                             }
@@ -1165,7 +1165,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 Directive::Trap { reason } => {
                     panic!("Trap encountered: {reason:?}");
                 }
-                _ => todo!("Unsupported directive: {instr:?}"),
             }
 
             if should_inc_pc {
@@ -1279,11 +1278,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             }
             (VRomValue::Future(future), VRomValue::Concrete(value)) => {
                 // Assigning Concrete values to Futures materializes it.
-                self.future_assignments
-                    .insert(future, value)
-                    .map(|old_value| {
-                        assert_eq!(old_value, value, "Attempted to overwrite a value in VRom");
-                    });
+                if let Some(old_value) = self.future_assignments.insert(future, value) {
+                    assert_eq!(old_value, value, "Attempted to overwrite a value in VRom")
+                }
                 log::debug!("Future {future} materialized to value {value}");
             }
             (_, _) => {
@@ -1342,12 +1339,11 @@ struct MemoryAccessor<'a, 'b, E: ExternalFunctions> {
 impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
         let byte_size = interpreter.get_ram(segment.start) * WASM_PAGE_SIZE;
-        let memory_accessor = MemoryAccessor {
+        MemoryAccessor {
             segment,
             interpreter,
             byte_size,
-        };
-        memory_accessor
+        }
     }
 
     fn get_max_num_pages(&self) -> u32 {
@@ -1408,12 +1404,12 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             self.set_word(first_word_addr, new_first_word)?;
 
             // Handle full middle words
-            for i in 1..data.len() {
+            for (i, d) in data.iter().enumerate().skip(1) {
                 let current_addr = first_word_addr + (i as u32 * 4);
 
-                let combined = carry_over | (data[i] << shift);
+                let combined = carry_over | (d << shift);
                 self.set_word(current_addr, combined)?;
-                carry_over = data[i] >> high_shift;
+                carry_over = d >> high_shift;
             }
 
             // Final partial word (or single-word case)
@@ -1503,11 +1499,11 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
     }
 
     /// Returns the size of the table in number of elements.
-    fn get_size(&self) -> u32 {
+    fn _get_size(&self) -> u32 {
         self.size
     }
 
-    fn get_max_size(&self) -> u32 {
+    fn _get_max_size(&self) -> u32 {
         self.interpreter.get_ram(self.segment.start + 4)
     }
 

@@ -48,7 +48,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct WriteOnceASM<'a> {
     pub func_idx: u32,
-    pub frame_size: u32,
+    pub _frame_size: u32,
     pub directives: Vec<Directive<'a>>,
 }
 
@@ -474,7 +474,7 @@ impl<S: Settings> RegisterGenerator<S> {
         start..self.next_available
     }
 
-    fn allocate_bytes(&mut self, byte_size: u32) -> Range<u32> {
+    fn _allocate_bytes(&mut self, byte_size: u32) -> Range<u32> {
         self.allocate_words(word_count::<S>(byte_size))
     }
 
@@ -593,7 +593,7 @@ pub fn flatten_dag<'a, S: Settings>(
 
     WriteOnceASM {
         func_idx,
-        frame_size,
+        _frame_size: frame_size,
         directives,
     }
 }
@@ -637,7 +637,7 @@ fn flatten_frame_tree<'a, S: Settings>(
 
 fn translate_single_node<'a, S: Settings>(
     ctx: &Program<'a>,
-    mut reg_gen: &mut RegisterGenerator<S>,
+    reg_gen: &mut RegisterGenerator<S>,
     label_gen: &mut RangeFrom<u32>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: &Option<ReturnInfo>,
@@ -747,7 +747,7 @@ fn translate_single_node<'a, S: Settings>(
             // Emit all the instructions to enter the loop.
             let enter_loop_directives = jump_into_loop(
                 &loop_entry,
-                &mut reg_gen,
+                reg_gen,
                 -1,
                 ret_info.as_ref(),
                 ctrl_stack.front().unwrap(),
@@ -783,7 +783,7 @@ fn translate_single_node<'a, S: Settings>(
             ])
         }
         Operation::Br(target) => emit_jump(
-            &mut reg_gen,
+            reg_gen,
             ret_info.as_ref(),
             &node.inputs,
             &target,
@@ -809,14 +809,7 @@ fn translate_single_node<'a, S: Settings>(
                 }
                 .into(),
                 // Emit the jump to the target label.
-                emit_jump(
-                    &mut reg_gen,
-                    ret_info.as_ref(),
-                    &inputs,
-                    &target,
-                    ctrl_stack,
-                )?
-                .into(),
+                emit_jump(reg_gen, ret_info.as_ref(), &inputs, &target, ctrl_stack)?.into(),
                 // Emit the continuation label.
                 Directive::Label {
                     id: cont_label,
@@ -836,7 +829,7 @@ fn translate_single_node<'a, S: Settings>(
 
             // Generate the jump instructions
             let jump_directives = DirectiveTree::Node(emit_jump(
-                &mut reg_gen,
+                reg_gen,
                 ret_info.as_ref(),
                 &inputs,
                 &target,
@@ -902,12 +895,12 @@ fn translate_single_node<'a, S: Settings>(
                     let inputs = target
                         .input_permutation
                         .iter()
-                        .map(|&idx| node_inputs[idx as usize].clone())
+                        .map(|&idx| node_inputs[idx as usize])
                         .collect_vec();
 
                     // Emit the jump to the target label.
                     emit_jump(
-                        &mut reg_gen,
+                        reg_gen,
                         ret_info.as_ref(),
                         &inputs,
                         &target.target,
@@ -1706,7 +1699,7 @@ fn split_func_ref_regs<S: Settings>(func_ref_reg: Range<u32>) -> [Range<u32>; 3]
 }
 
 fn word_count<S: Settings>(byte_size: u32) -> u32 {
-    (byte_size + S::bytes_per_word() - 1) / S::bytes_per_word()
+    byte_size.div_ceil(S::bytes_per_word())
 }
 
 fn assert_ptr_size<S: Settings>(ptr: &Range<u32>) {

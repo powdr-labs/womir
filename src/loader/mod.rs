@@ -760,7 +760,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 let func_idx = ctx.functions.len() as u32;
                 log::debug!("Code Section Entry found, function {func_idx}");
                 let func_type = ctx.get_func_type(func_idx);
-                let locals_types = read_locals(&func_type, function.get_locals_reader()?)?;
+                let locals_types = read_locals(func_type, function.get_locals_reader()?)?;
 
                 // Loads the function to memory in the BlockTree format.
                 let block_tree = BlockTree::load_function(&ctx, function.get_operators_reader()?)?;
@@ -960,7 +960,7 @@ fn read_locals<'a>(
     locals_reader: LocalsReader<'a>,
 ) -> wasmparser::Result<Vec<ValType>> {
     // The first locals are the function arguments.
-    let mut local_types = func_type.params().iter().map(|t| *t).collect_vec();
+    let mut local_types = func_type.params().iter().copied().collect_vec();
 
     // The rest of the locals are explicitly defined local variables.
     for local in locals_reader {
@@ -972,7 +972,7 @@ fn read_locals<'a>(
 }
 
 #[derive(Debug)]
-enum Instruction<'a> {
+pub enum Instruction<'a> {
     WASMOp(Operator<'a>),
     /// BrTable needs to be transformed, so we can't use the original
     /// Operator::BrTable.
@@ -988,13 +988,13 @@ enum Instruction<'a> {
 }
 
 #[derive(Debug)]
-enum BlockKind {
+pub enum BlockKind {
     Block,
     Loop,
 }
 
 #[derive(Debug)]
-struct Block<'a> {
+pub struct Block<'a> {
     block_kind: BlockKind,
     interface_type: Rc<FuncType>,
     elements: Vec<Element<'a>>,
@@ -1009,7 +1009,7 @@ struct Block<'a> {
 }
 
 #[derive(Debug)]
-enum Element<'a> {
+pub enum Element<'a> {
     Ins(Instruction<'a>),
     Block(Block<'a>),
 }

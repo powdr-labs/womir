@@ -17,7 +17,7 @@ pub struct LiftedBlockTree<'a> {
     pub elements: Vec<Element<'a>>,
 }
 
-pub fn lift_data_flow<'a>(block_tree: BlockTree<'a>) -> wasmparser::Result<LiftedBlockTree<'a>> {
+pub fn lift_data_flow(block_tree: BlockTree<'_>) -> wasmparser::Result<LiftedBlockTree<'_>> {
     let mut elements = Vec::new();
 
     // The top of the control stack is the function itself
