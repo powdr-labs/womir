@@ -24,6 +24,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install Rust toolchain 1.85.1 (stable)
+        run: rustup toolchain install 1.85.1 --component clippy,rustfmt,rust-src
+
       - name: Build project
         run: cargo build --release
 
