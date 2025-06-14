@@ -1,6 +1,6 @@
 [workspace]
 [package]
-name = "keccak"
+name = "keccak_with_inputs"
 version = "0.0.0"
 edition = "2021"
 
