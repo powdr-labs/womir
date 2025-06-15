@@ -225,6 +225,11 @@ mod tests {
         test_wasm("wasm_testsuite/loop.wast", None);
     }
 
+    #[test]
+    fn test_wasm_stack() {
+        test_wasm("wasm_testsuite/stack.wast", None);
+    }
+
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
             Ok(modules) => {
