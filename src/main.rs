@@ -216,6 +216,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_i64() {
+        test_wasm("wasm_testsuite/i64.wast", None);
+    }
+
+    #[test]
     fn test_wasm_loop() {
         test_wasm("wasm_testsuite/loop.wast", None);
     }

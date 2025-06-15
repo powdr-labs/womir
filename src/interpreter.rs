@@ -275,7 +275,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let b = self.get_vrom_relative_u32(b) as i32;
 
                         if b == 0 {
-                            panic!("integer divide by zero in I32DivU");
+                            panic!("integer divide by zero in I32DivS");
                         }
                         if a == i32::MIN && b == -1 {
                             panic!("integer overflow in I32DivS");
@@ -284,6 +284,41 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let r = a.wrapping_div(b) as u32;
 
                         self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64DivU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I64DivU");
+                        }
+
+                        let r = a / b;
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
+                    Op::I64DivS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a) as i64;
+                        let b = self.get_vrom_relative_u64(b) as i64;
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I64DivS");
+                        }
+                        if a == i64::MIN && b == -1 {
+                            panic!("integer overflow in I64DivS");
+                        }
+
+                        let r = a.wrapping_div(b) as u64;
+
+                        self.set_vrom_relative_u64(c, r);
                     }
                     Op::I32RemU => {
                         let a = inputs[0].clone();
@@ -317,6 +352,38 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r as u32);
                     }
+                    Op::I64RemU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I64RemU");
+                        }
+
+                        let r = a % b;
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
+                    Op::I64RemS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a) as i64;
+                        let b = self.get_vrom_relative_u64(b) as i64;
+
+                        if b == 0 {
+                            panic!("integer divide by zero in I64RemS");
+                        }
+
+                        let r = a.wrapping_rem(b);
+
+                        self.set_vrom_relative_u64(c, r as u64);
+                    }
                     Op::I32LtU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -325,6 +392,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
 
+                        let r = if a < b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64LtU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
                         let r = if a < b { 1 } else { 0 };
 
                         self.set_vrom_relative_u32(c, r);
@@ -341,6 +419,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64LtS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a) as i64;
+                        let b = self.get_vrom_relative_u64(b) as i64;
+                        let r = if a < b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::I32LeS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -353,6 +442,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64LeS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a) as i64;
+                        let b = self.get_vrom_relative_u64(b) as i64;
+                        let r = if a <= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::I32LeU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -361,6 +461,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
 
+                        let r = if a <= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64LeU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
                         let r = if a <= b { 1 } else { 0 };
 
                         self.set_vrom_relative_u32(c, r);
@@ -399,6 +510,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64GtS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a) as i64;
+                        let b = self.get_vrom_relative_u64(b) as i64;
+                        let r = if a > b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::I32GeS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -411,6 +533,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64GeS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a) as i64;
+                        let b = self.get_vrom_relative_u64(b) as i64;
+                        let r = if a >= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::I32GeU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -419,6 +552,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let a = self.get_vrom_relative_u32(a);
                         let b = self.get_vrom_relative_u32(b);
 
+                        let r = if a >= b { 1 } else { 0 };
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64GeU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b);
                         let r = if a >= b { 1 } else { 0 };
 
                         self.set_vrom_relative_u32(c, r);
@@ -537,6 +681,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64ShrU => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b) as u32;
+
+                        let r = a.wrapping_shr(b);
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
                     Op::I32ShrS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -548,6 +704,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let r = a.wrapping_shr(b);
 
                         self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I64ShrS => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a) as i64;
+                        let b = self.get_vrom_relative_u64(b) as u32;
+
+                        let r = a.wrapping_shr(b);
+
+                        self.set_vrom_relative_u64(c, r as u64);
                     }
                     Op::I32Rotl => {
                         let a = inputs[0].clone();
@@ -573,6 +741,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64Rotr => {
+                        let a = inputs[0].clone();
+                        let b = inputs[1].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let b = self.get_vrom_relative_u64(b) as u32;
+
+                        let r = a.rotate_right(b);
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
                     Op::I32Clz => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
@@ -582,6 +762,16 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let r = a.leading_zeros();
 
                         self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::I64Clz => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+
+                        let r = a.leading_zeros() as u64;
+
+                        self.set_vrom_relative_u64(c, r);
                     }
                     Op::I32Ctz => {
                         let a = inputs[0].clone();
@@ -593,6 +783,16 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64Ctz => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+
+                        let r = a.trailing_zeros() as u64;
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
                     Op::I32Popcnt => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
@@ -603,16 +803,35 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
+                    Op::I64Popcnt => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+
+                        let r = a.count_ones() as u64;
+
+                        self.set_vrom_relative_u64(c, r);
+                    }
                     Op::I32Extend8S => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
                         let a = self.get_vrom_relative_u32(a);
 
-                        // Take the lowest 8 bits and sign-extend to i32
                         let r = (a as u8) as i8 as i32;
 
                         self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I64Extend8S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+
+                        let r = (a as u8) as i8 as i64;
+
+                        self.set_vrom_relative_u64(c, r as u64);
                     }
                     Op::I32Extend16S => {
                         let a = inputs[0].clone();
@@ -620,10 +839,29 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let a = self.get_vrom_relative_u32(a);
 
-                        // Take lower 16 bits and sign-extend to i32
                         let r = (a as u16) as i16 as i32;
 
                         self.set_vrom_relative_u32(c, r as u32);
+                    }
+                    Op::I64Extend16S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+
+                        let r = (a as u16) as i16 as i64;
+
+                        self.set_vrom_relative_u64(c, r as u64);
+                    }
+                    Op::I64Extend32S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+
+                        let r = (a as u32) as i32 as i64;
+
+                        self.set_vrom_relative_u64(c, r as u64);
                     }
                     Op::I32Eq | Op::I64Eq => {
                         let a = self
