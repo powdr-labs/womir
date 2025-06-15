@@ -226,6 +226,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_forward() {
+        test_wasm("wasm_testsuite/forward.wast", None);
+    }
+
+    #[test]
     fn test_wasm_i64() {
         test_wasm("wasm_testsuite/i64.wast", None);
     }
