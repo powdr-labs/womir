@@ -221,6 +221,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_func() {
+        test_wasm("wasm_testsuite/func.wast", None);
+    }
+
+    #[test]
     fn test_wasm_i32() {
         test_wasm("wasm_testsuite/i32.wast", None);
     }
