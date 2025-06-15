@@ -176,14 +176,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let value = value.bits();
                         self.set_vrom_relative_u64(output.unwrap(), value);
                     }
-                    Op::I64ExtendI32U => {
-                        let a = inputs[0].clone();
-                        let c = output.unwrap();
-
-                        let a = self.get_vrom_relative_u32(a);
-
-                        self.set_vrom_relative_u64(c, a as u64);
-                    }
                     Op::I32Add => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
@@ -862,6 +854,22 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let r = (a as u32) as i32 as i64;
 
                         self.set_vrom_relative_u64(c, r as u64);
+                    }
+                    Op::I64ExtendI32U => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a);
+
+                        self.set_vrom_relative_u64(c, a as u64);
+                    }
+                    Op::I64ExtendI32S => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u32(a) as i32;
+
+                        self.set_vrom_relative_u64(c, a as u64);
                     }
                     Op::I32Eq | Op::I64Eq => {
                         let a = self
