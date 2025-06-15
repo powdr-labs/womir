@@ -1065,6 +1065,58 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .write_contiguous(addr, &value)
                             .expect("Out of bounds write");
                     }
+                    Op::I64Store8 { memarg } => {
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let value = self
+                            .get_vrom_relative_range(inputs[1].clone())
+                            .collect_vec();
+                        let shift = (addr & 0x3) * 8; // shift based on address alignment
+                        let addr = addr & !0x3; // align to 4 bytes
+
+                        let byte = value[0] & 0xff;
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = self.get_mem();
+                        let old_value = memory.get_word(addr).expect("Out of bounds read");
+                        let new_value = (old_value & !(0xff << shift)) | (byte << shift);
+                        memory
+                            .set_word(addr, new_value)
+                            .expect("Out of bounds write");
+                    }
+                    Op::I64Store16 { memarg } => {
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = addr & !0x3; // align to 4 bytes
+
+                        let value = self
+                            .get_vrom_relative_range(inputs[1].clone())
+                            .collect_vec();
+                        let bytes = value[0] & 0xffff;
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = self.get_mem();
+                        let old_value = memory.get_word(addr).expect("Out of bounds read");
+                        let new_value = (old_value & 0xffff0000) | bytes;
+                        memory
+                            .set_word(addr, new_value)
+                            .expect("Out of bounds write");
+                    }
+                    Op::I64Store32 { memarg } => {
+                        let addr =
+                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = addr & !0x3; // align to 4 bytes
+
+                        let value = self
+                            .get_vrom_relative_range(inputs[1].clone())
+                            .collect_vec();
+
+                        assert_eq!(memarg.memory, 0);
+                        let mut memory = self.get_mem();
+                        memory
+                            .set_word(addr, value[0])
+                            .expect("Out of bounds write");
+                    }
                     Op::I32Load { memarg }
                     | Op::I64Load { memarg }
                     | Op::F32Load { memarg }

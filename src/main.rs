@@ -191,6 +191,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_align() {
+        test_wasm("wasm_testsuite/align.wast", None);
+    }
+
+    #[test]
     fn test_wasm_block() {
         test_wasm("wasm_testsuite/block.wast", None);
     }
