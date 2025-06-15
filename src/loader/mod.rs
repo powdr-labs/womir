@@ -301,6 +301,14 @@ impl<'a> Program<'a> {
                 assert_eq!(val_type, ValType::F32);
                 vec![MemoryEntry::Value(value.bits())]
             }
+            Operator::F64Const { value } => {
+                assert_eq!(val_type, ValType::F64);
+                let v: u64 = value.bits();
+                vec![
+                    MemoryEntry::Value(v as u32),
+                    MemoryEntry::Value((v >> 32) as u32),
+                ]
+            }
             Operator::RefFunc { function_index } => {
                 assert_eq!(val_type, ValType::Ref(RefType::FUNCREF));
                 FunctionRef {

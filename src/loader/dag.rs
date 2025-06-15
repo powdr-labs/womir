@@ -686,6 +686,9 @@ impl StackTracker<'_, '_> {
             Op::F32Eq | Op::F32Ne | Op::F32Lt | Op::F32Gt | Op::F32Le | Op::F32Ge => {
                 (vec![ValType::F32, ValType::F32], vec![ValType::I32])
             }
+            Op::F64Eq | Op::F64Ne | Op::F64Lt | Op::F64Gt | Op::F64Le | Op::F64Ge => {
+                (vec![ValType::F64, ValType::F64], vec![ValType::I32])
+            }
             // ## cvtop
             Op::I32WrapI64 => (vec![ValType::I64], vec![ValType::I32]),
             Op::I64ExtendI32U | Op::I64ExtendI32S => (vec![ValType::I32], vec![ValType::I64]),
@@ -842,7 +845,7 @@ impl StackTracker<'_, '_> {
             | Op::BrIf { .. }
             | Op::BrTable { .. }
             | Op::Return => return None,
-            _ => todo!(),
+            _ => todo!("{op:?}"),
         };
 
         Some(ty)
