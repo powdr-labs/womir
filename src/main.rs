@@ -221,6 +221,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_conversions() {
+        test_wasm("wasm_testsuite/conversions.wast", None);
+    }
+
+    #[test]
     fn test_wasm_i32() {
         test_wasm("wasm_testsuite/i32.wast", None);
     }
@@ -368,8 +373,14 @@ mod tests {
     fn parse_val(val: &Val) -> Vec<u32> {
         match val.val_type.as_str() {
             "i32" | "f32" => vec![val.value.as_str().unwrap().parse::<u32>().unwrap()],
-            "i64" | "f64" => {
+            "i64" => {
                 let v = val.value.as_str().unwrap().parse::<u64>().unwrap();
+                vec![v as u32, (v >> 32) as u32]
+            }
+            "f64" => {
+                println!("val: {val:?}");
+                let v = val.value.as_str().unwrap().parse::<f64>().unwrap();
+                let v: u64 = v.to_bits();
                 vec![v as u32, (v >> 32) as u32]
             }
             // three bytes to be compatible with our `funcref`
