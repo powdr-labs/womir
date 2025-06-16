@@ -140,8 +140,12 @@ fn parse_contents<'a>(
                         }
 
                         // The inner block has the same inputs as the outer block,
-                        // but it has no proper output.
-                        let inner_type = Rc::new(FuncType::new(params.clone(), []));
+                        // and needs to propagate the inputs as outputs to the true block,
+                        // minus the condition.
+                        let inner_type = Rc::new(FuncType::new(
+                            params.clone(),
+                            params[0..params.len() - 1].to_vec(),
+                        ));
 
                         // The first thing in the outer block is the inner block
                         let inner_block = Block {

@@ -141,8 +141,8 @@ fn build_dag<'a>(
     };
 
     for elem in block_elements {
-        log::trace!("Stack: {:?}", t.stack);
-        log::trace!("Processing element: {elem:?}");
+        log::trace!("Stack: {:#?}", t.stack);
+        log::trace!("Processing element: {elem:#?}");
         match elem {
             // Most instructions creates a new node that consumes some inputs and produces
             // some outputs. We will have special handlers for cases that are no so simple.
