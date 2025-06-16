@@ -342,12 +342,12 @@ fn build_dag<'a>(
                 // Block inputs are the concatenation of the stack inputs and the locals inputs.
                 let mut inputs = t
                     .stack
-                    .split_off(t.stack.len() - block.interface_type.params().len());
+                    .split_off(t.stack.len() - block.interface_type.ty.params().len());
 
                 // Sanity check the types
                 assert!(types_matches(
                     &t.nodes,
-                    block.interface_type.params(),
+                    block.interface_type.ty.params(),
                     &inputs
                 ));
 
@@ -360,7 +360,7 @@ fn build_dag<'a>(
 
                 // Of the outputs, the first ones goes to the stack.
                 let node_idx = t.nodes.len();
-                let stack_results_len = block.interface_type.results().len() as u32;
+                let stack_results_len = block.interface_type.ty.results().len() as u32;
                 t.stack
                     .extend((0..stack_results_len).map(|output_idx| ValueOrigin {
                         node: node_idx,
@@ -407,7 +407,7 @@ fn build_dag_for_block<'a>(
 
     // For a block, the inputs are given in a mix between the stack and the locals.
     // We place the stack inputs first on the new node:
-    let mut input_types = interface_type.params().to_vec();
+    let mut input_types = interface_type.ty.params().to_vec();
 
     // We place the locals inputs last:
     let mut local_idx_to_input = HashMap::new();
@@ -418,6 +418,7 @@ fn build_dag_for_block<'a>(
 
     // The stack inputs are the first elements in the stack.
     let stack = interface_type
+        .ty
         .params()
         .iter()
         .enumerate()
@@ -445,7 +446,7 @@ fn build_dag_for_block<'a>(
         .collect_vec();
 
     // Output types are the concatenation of the stack outputs and the locals outputs.
-    let mut output_types = interface_type.results().to_vec();
+    let mut output_types = interface_type.ty.results().to_vec();
     output_types.extend(
         output_locals
             .iter()
@@ -455,11 +456,11 @@ fn build_dag_for_block<'a>(
     // What types are expected at a break depends wether this is a block or a loop.
     block_stack.push_front(match block_kind {
         BlockKind::Block => BreakArgs {
-            stack: interface_type.results().to_vec(),
+            stack: interface_type.ty.results().to_vec(),
             locals: output_locals,
         },
         BlockKind::Loop => BreakArgs {
-            stack: interface_type.params().to_vec(),
+            stack: interface_type.ty.params().to_vec(),
             locals: input_locals,
         },
     });
@@ -813,13 +814,13 @@ impl StackTracker<'_, '_> {
             // # Control instructions
             Op::Nop | Op::Unreachable => (vec![], vec![]),
             Op::Call { function_index } => {
-                let ty = self.module.get_func_type(*function_index);
+                let ty = &self.module.get_func_type(*function_index).ty;
                 let inputs = ty.params().to_vec();
                 let outputs = ty.results().to_vec();
                 return Some((inputs, outputs));
             }
             Op::CallIndirect { type_index, .. } => {
-                let ty = self.module.get_type(*type_index);
+                let ty = &self.module.get_type(*type_index).ty;
                 let inputs = ty
                     .params()
                     .iter()
