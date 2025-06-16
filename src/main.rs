@@ -191,6 +191,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_align() {
+        test_wasm("wasm_testsuite/align.wast", None);
+    }
+
+    #[test]
     fn test_wasm_block() {
         test_wasm("wasm_testsuite/block.wast", None);
     }
@@ -211,13 +216,28 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_call() {
+        test_wasm("wasm_testsuite/call.wast", None);
+    }
+
+    #[test]
     fn test_wasm_i32() {
         test_wasm("wasm_testsuite/i32.wast", None);
     }
 
     #[test]
+    fn test_wasm_forward() {
+        test_wasm("wasm_testsuite/forward.wast", None);
+    }
+
+    #[test]
     fn test_wasm_i64() {
         test_wasm("wasm_testsuite/i64.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_if() {
+        test_wasm("wasm_testsuite/if.wast", None);
     }
 
     #[test]

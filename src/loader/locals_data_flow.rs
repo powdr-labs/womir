@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
+use itertools::Itertools;
 use wasmparser::Operator;
 
 use super::{Block, BlockKind, Element, Instruction as Ins, block_tree::BlockTree};
@@ -68,13 +69,14 @@ fn process_block<'a>(
     let (old_input_locals, old_output_locals) = match block_kind {
         BlockKind::Block => {
             // In a Block, breaks to it are outputs.
+            assert!(old_carried_locals.is_empty());
             control_stack.push_front(BlockStackEntry {
                 old_break_locals: old_output_locals,
                 new_break_locals: BTreeSet::new(),
+                carried_locals: BTreeSet::new(),
             });
 
-            (new_elements, new_input_locals, has_changed) =
-                process_elems(control_stack, BTreeSet::new(), elements);
+            (new_elements, new_input_locals, has_changed) = process_elems(control_stack, elements);
 
             let this_entry = control_stack.pop_front().unwrap();
 
@@ -83,7 +85,6 @@ fn process_block<'a>(
             new_output_locals = this_entry.new_break_locals;
             let old_output_locals = this_entry.old_break_locals;
 
-            assert!(old_carried_locals.is_empty());
             new_carried_locals = BTreeSet::new();
 
             (old_input_locals, old_output_locals)
@@ -93,10 +94,10 @@ fn process_block<'a>(
             control_stack.push_front(BlockStackEntry {
                 old_break_locals: old_input_locals,
                 new_break_locals: BTreeSet::new(),
+                carried_locals: old_carried_locals,
             });
 
-            (new_elements, new_input_locals, has_changed) =
-                process_elems(control_stack, old_carried_locals, elements);
+            (new_elements, new_input_locals, has_changed) = process_elems(control_stack, elements);
 
             // Due to previous pass transformation, loops never fall through, thus
             // they never have direct outputs.
@@ -133,10 +134,10 @@ fn process_block<'a>(
 
 fn process_elems<'a>(
     control_stack: &mut VecDeque<BlockStackEntry>,
-    mut local_outputs: BTreeSet<u32>,
     elements: Vec<Element<'a>>,
 ) -> (Vec<Element<'a>>, BTreeSet<u32>, bool) {
     let mut local_inputs = BTreeSet::new();
+    let mut local_outputs = BTreeSet::new();
 
     let mut has_changed = false;
 
@@ -204,7 +205,15 @@ fn process_break_target(
     local_outputs: &BTreeSet<u32>,
     relative_depth: u32,
 ) {
+    // Every carried local up to the break depth must be given to this break.
+    let carried_locals = control_stack
+        .iter()
+        .take(relative_depth as usize + 1)
+        .flat_map(|entry| entry.carried_locals.iter().cloned())
+        .collect_vec();
+
     let entry = &mut control_stack[relative_depth as usize];
+    entry.new_break_locals.extend(carried_locals);
 
     // Every local that have been marked as output must be given to this break.
     entry.new_break_locals.extend(local_outputs.iter());
@@ -218,6 +227,7 @@ fn process_break_target(
 struct BlockStackEntry {
     old_break_locals: BTreeSet<u32>,
     new_break_locals: BTreeSet<u32>,
+    carried_locals: BTreeSet<u32>,
 }
 
 impl BlockStackEntry {
@@ -225,6 +235,7 @@ impl BlockStackEntry {
         Self {
             old_break_locals: BTreeSet::new(),
             new_break_locals: BTreeSet::new(),
+            carried_locals: BTreeSet::new(),
         }
     }
 }

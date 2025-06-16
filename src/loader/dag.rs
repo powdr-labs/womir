@@ -141,8 +141,8 @@ fn build_dag<'a>(
     };
 
     for elem in block_elements {
-        log::trace!("Stack: {:?}", t.stack);
-        log::trace!("Processing element: {elem:?}");
+        log::trace!("Stack: {:#?}", t.stack);
+        log::trace!("Processing element: {elem:#?}");
         match elem {
             // Most instructions creates a new node that consumes some inputs and produces
             // some outputs. We will have special handlers for cases that are no so simple.
@@ -313,6 +313,8 @@ fn build_dag<'a>(
                 // The rest of the instructions are normal operations that creates a new node
                 // that consumes some inputs and produces some outputs.
                 Ins::WASMOp(op) => {
+                    println!("op: {op:?}");
+                    println!("stack: {:?}", t.stack);
                     let (inputs_types, output_types) = t.get_operator_type(&op).unwrap();
                     let inputs = t.stack.split_off(t.stack.len() - inputs_types.len());
                     assert!(types_matches(&t.nodes, &inputs_types, &inputs));
@@ -686,6 +688,9 @@ impl StackTracker<'_, '_> {
             Op::F32Eq | Op::F32Ne | Op::F32Lt | Op::F32Gt | Op::F32Le | Op::F32Ge => {
                 (vec![ValType::F32, ValType::F32], vec![ValType::I32])
             }
+            Op::F64Eq | Op::F64Ne | Op::F64Lt | Op::F64Gt | Op::F64Le | Op::F64Ge => {
+                (vec![ValType::F64, ValType::F64], vec![ValType::I32])
+            }
             // ## cvtop
             Op::I32WrapI64 => (vec![ValType::I64], vec![ValType::I32]),
             Op::I64ExtendI32U | Op::I64ExtendI32S => (vec![ValType::I32], vec![ValType::I64]),
@@ -842,7 +847,7 @@ impl StackTracker<'_, '_> {
             | Op::BrIf { .. }
             | Op::BrTable { .. }
             | Op::Return => return None,
-            _ => todo!(),
+            _ => todo!("{op:?}"),
         };
 
         Some(ty)

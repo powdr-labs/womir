@@ -1,4 +1,95 @@
 # WebAssembly testsuite
 
 The tests here are copied from the [WebAssembly testsuite](https://github.com/WebAssembly/testsuite).
-We copy the tests individually as opposed to using the entire repository because we incrementally add tests as they becomed supported, and not all tests are supposed to be supported.
+We copy the tests individually as opposed to using the entire repository because we incrementally add tests as they become supported, and not all tests are supposed to be supported.
+
+## Full list
+
+- [X] address
+- [ ] align
+- [ ] binary-leb128 (not relevant)
+- [ ] binary (not relevant)
+- [X] block
+- [X] br
+- [X] br_if
+- [X] br_table
+- [ ] bulk
+- [ ] call
+- [ ] call_indirect
+- [ ] comments
+- [ ] const
+- [ ] conversions
+- [ ] custom
+- [ ] data
+- [ ] elem
+- [ ] endianness
+- [ ] exports
+- [ ] extract_parts
+- [ ] f32 (not relevant)
+- [ ] f32_bitwise (not relevant)
+- [ ] f32_cmp (not relevant)
+- [ ] f64 (not relevant)
+- [ ] f64_bitwise (not relevant)
+- [ ] f64_cmp (not relevant)
+- [ ] fac
+- [ ] float_exprs (not relevant)
+- [ ] float_literals (not relevant)
+- [ ] float_memory (not relevant)
+- [ ] float_misc (not relevant)
+- [ ] forward
+- [ ] func
+- [ ] func_ptrs
+- [ ] global
+- [X] i32
+- [X] i64
+- [ ] if
+- [ ] imports
+- [ ] inline-module
+- [ ] int_exprs
+- [ ] int_literals
+- [ ] labels
+- [ ] left-to-right
+- [ ] linking
+- [ ] load
+- [ ] local_get
+- [ ] local_set
+- [ ] local_tee
+- [X] loop
+- [ ] memory
+- [ ] memory_copy
+- [ ] memory_fill
+- [ ] memory_grow
+- [ ] memory_init
+- [ ] memory_redundancy
+- [ ] memory_size
+- [ ] memory_trap
+- [ ] names
+- [ ] nop
+- [ ] obsolete-keywords
+- [ ] ref_func
+- [ ] ref_is_null
+- [ ] ref_null
+- [ ] return
+- [ ] select
+- [ ] simd* (not relevant atm)
+- [ ] skip-stack-guard-page
+- [ ] stack
+- [ ] start
+- [ ] store
+- [ ] switch
+- [ ] table-sub
+- [ ] table
+- [ ] table_copy
+- [ ] table_fill
+- [ ] table_get
+- [ ] table_grow
+- [ ] table_init
+- [ ] table_set
+- [ ] token
+- [ ] traps
+- [ ] type
+- [ ] unreachable
+- [ ] unreachable-invalid
+- [ ] unreachable-valid
+- [ ] unwind
+- [ ] utf8* (not relevant)
