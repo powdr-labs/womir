@@ -146,8 +146,7 @@ impl InitialMemory {
                 let MemoryEntry::Value(old_value) = entry.get() else {
                     panic!("Memory entry is not a value");
                 };
-                assert!(old_value & mask == 0);
-                let new_value = old_value | word;
+                let new_value = (old_value & !mask) | word;
                 if new_value == 0 {
                     entry.remove();
                 } else {
