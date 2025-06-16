@@ -18,8 +18,8 @@ use dag::Dag;
 use flattening::WriteOnceASM;
 use itertools::Itertools;
 use wasmparser::{
-    CompositeInnerType, ElementItems, FuncType, LocalsReader, MemoryType, Operator,
-    OperatorsReader, Parser, Payload, RefType, TableInit, TypeRef, ValType,
+    CompositeInnerType, ElementItems, LocalsReader, MemoryType, Operator, OperatorsReader, Parser,
+    Payload, RefType, TableInit, TypeRef, ValType,
 };
 
 use crate::loader::{
@@ -160,15 +160,15 @@ impl InitialMemory {
 
 /// The table entry high level layout.
 struct FunctionRef<S: Settings> {
-    /// The type index of the function type.
-    type_index: u32,
+    /// The unique type ID of the function type.
+    type_id: u32,
     /// The function index.
     func_index: u32,
     settings: PhantomData<S>,
 }
 
 /// A function reference in the table is a 3-tuple of u32 values:
-/// - The type index of the function type.
+/// - The type ID of the function type.
 /// - The function frame size, in words.
 /// - The function address, which is a pointer to the function code.
 ///
@@ -177,7 +177,7 @@ struct FunctionRef<S: Settings> {
 ///
 /// This struct is used to tell where, inside an entry, each of the values is stored.
 impl<S: Settings> FunctionRef<S> {
-    const TYPE_INDEX: usize = 0;
+    const TYPE_ID: usize = 0;
     const FUNC_FRAME_SIZE: usize = 1;
     const FUNC_ADDR: usize = 2;
 
@@ -187,7 +187,7 @@ impl<S: Settings> FunctionRef<S> {
         assert!(S::bytes_per_word().is_power_of_two());
 
         let mut entries = Vec::with_capacity(Self::total_byte_size() as usize / 4);
-        entries.push(MemoryEntry::Value(self.type_index));
+        entries.push(MemoryEntry::Value(self.type_id));
         entries.extend(itertools::repeat_n(
             MemoryEntry::Value(0),
             Self::u32_padding(),
@@ -222,10 +222,21 @@ const fn align(value: u32, power_of_two_alignment: u32) -> u32 {
 }
 
 #[derive(Debug, Clone)]
+pub struct FuncType {
+    /// Unique type identifier, used by indirect calls.
+    ///
+    /// We can't use type index directly, because there might be
+    /// duplicated compatible types with different indices.
+    pub unique_id: u32,
+    pub ty: wasmparser::FuncType,
+}
+
+#[derive(Debug, Clone)]
 pub struct Program<'a> {
     types: Vec<Rc<FuncType>>,
     func_types: Vec<u32>,
     table_types: Vec<RefType>,
+
     /// The module and name of the imported functions.
     ///
     /// Function idices overlaps with `functions` up to `imported_functions` length.
@@ -312,7 +323,7 @@ impl<'a> Program<'a> {
             Operator::RefFunc { function_index } => {
                 assert_eq!(val_type, ValType::Ref(RefType::FUNCREF));
                 FunctionRef {
-                    type_index: self.func_types[function_index as usize],
+                    type_id: self.get_func_type(function_index).unique_id,
                     func_index: function_index,
                     settings: PhantomData::<S>,
                 }
@@ -467,6 +478,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
             }
             Payload::TypeSection(section) => {
                 log::debug!("Type Section found");
+                let mut types = Vec::new();
                 for rec_group in section {
                     let mut iter = rec_group?.into_types();
                     let ty = match (iter.next(), iter.next()) {
@@ -490,9 +502,41 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             continue;
                         }
                     };
-                    let type_idx = ctx.types.len() as u32;
-                    ctx.types.push(Rc::new(ty));
+                    let type_idx = types.len() as u32;
+                    types.push((type_idx, ty));
                     log::debug!("Type read: {:?}", ctx.get_type(type_idx));
+                }
+
+                // Deduplicate the types
+                let num_types = types.len();
+                if num_types > 0 {
+                    types.sort_by(|a, b| a.1.cmp(&b.1));
+                    let mut types = types.into_iter();
+
+                    let mut initial = Vec::with_capacity(num_types);
+                    let (unique_id, ty) = types.next().unwrap();
+                    initial.push((unique_id, Rc::new(FuncType { unique_id, ty })));
+
+                    // I tried doing this with itertools' `chunk_by()`, but lifetimes didn't let me.
+                    let mut unique_types = types.fold(initial, |mut acc, (type_idx, ty)| {
+                        let (_, last_ty) = acc.last().unwrap();
+                        if ty == last_ty.ty {
+                            acc.push((type_idx, last_ty.clone()));
+                        } else {
+                            acc.push((
+                                type_idx,
+                                Rc::new(FuncType {
+                                    unique_id: type_idx,
+                                    ty,
+                                }),
+                            ));
+                        }
+                        acc
+                    });
+                    // There is an unsafe + MaybeUninit version of this that doesn't require sorting...
+                    unique_types.sort_unstable_by_key(|(type_idx, _)| *type_idx);
+                    ctx.types = unique_types.into_iter().map(|(_, ty)| ty).collect();
+                    assert_eq!(ctx.types.len(), num_types);
                 }
             }
             Payload::ImportSection(section) => {
@@ -661,7 +705,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                                 let idx = idx?;
                                 values.extend(
                                     FunctionRef {
-                                        type_index: ctx.func_types[idx as usize],
+                                        type_id: ctx.get_func_type(idx).unique_id,
                                         func_index: idx,
                                         settings: PhantomData::<S>,
                                     }
@@ -776,7 +820,7 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
                 let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
-                let dag = Dag::new(&ctx, func_type, &locals_types, lifted_blocks)?;
+                let dag = Dag::new(&ctx, &func_type.ty, &locals_types, lifted_blocks)?;
 
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
@@ -918,7 +962,7 @@ fn generate_imported_func_wrapper<'a, S: Settings>(
     label_gen: &mut RangeFrom<u32>,
     function_idx: u32,
 ) -> WriteOnceASM<'a> {
-    let func_type = ctx.get_func_type(function_idx);
+    let func_type = &ctx.get_func_type(function_idx).ty;
 
     // A very simple DAG that just calls the imported function.
     let dag = BlocklessDag {
@@ -968,7 +1012,7 @@ fn read_locals<'a>(
     locals_reader: LocalsReader<'a>,
 ) -> wasmparser::Result<Vec<ValType>> {
     // The first locals are the function arguments.
-    let mut local_types = func_type.params().iter().copied().collect_vec();
+    let mut local_types = func_type.ty.params().iter().copied().collect_vec();
 
     // The rest of the locals are explicitly defined local variables.
     for local in locals_reader {

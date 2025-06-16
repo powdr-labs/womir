@@ -1,6 +1,8 @@
 use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
 
-use wasmparser::{BlockType, FuncType, Operator, OperatorsIterator, OperatorsReader, ValType};
+use wasmparser::{BlockType, Operator, OperatorsIterator, OperatorsReader, ValType};
+
+use crate::loader::FuncType;
 
 use super::{Block, BlockKind, Element, Instruction, Program};
 
@@ -100,7 +102,7 @@ fn parse_contents<'a>(
                 // The newly generated if block has the same type as the original if block, plus one extra
                 // parameter for the condition.
                 let params = {
-                    let mut params = interface_type.params().to_vec();
+                    let mut params = interface_type.ty.params().to_vec();
                     // The condition:
                     params.push(ValType::I32);
                     params
@@ -140,8 +142,10 @@ fn parse_contents<'a>(
                         }
 
                         // The inner block has the same inputs as the outer block,
-                        // but it has no proper output.
-                        let inner_type = Rc::new(FuncType::new(params.clone(), []));
+                        // and needs to propagate the inputs as outputs to the true block,
+                        // minus the condition.
+                        let inner_type =
+                            new_func_type(params.clone(), params[0..params.len() - 1].to_vec());
 
                         // The first thing in the outer block is the inner block
                         let inner_block = Block {
@@ -160,10 +164,7 @@ fn parse_contents<'a>(
                 output_elements.push(
                     Block {
                         block_kind: BlockKind::Block,
-                        interface_type: Rc::new(FuncType::new(
-                            params,
-                            interface_type.results().to_vec(),
-                        )),
+                        interface_type: new_func_type(params, interface_type.ty.results().to_vec()),
                         elements,
                         input_locals: BTreeSet::new(),
                         output_locals: BTreeSet::new(),
@@ -218,8 +219,7 @@ fn parse_contents<'a>(
                 assert_eq!(ending, Ending::End);
 
                 let interface_type = get_type(ctx, blockty);
-                let input_type =
-                    Rc::new(FuncType::new(interface_type.params().iter().cloned(), []));
+                let input_type = new_func_type(interface_type.ty.params().iter().cloned(), []);
 
                 let mut loop_block = Block {
                     block_kind: BlockKind::Loop,
@@ -345,9 +345,9 @@ fn increment_outer_br_references(element: &mut Element, minimum_depth: u32) {
 
 fn get_type(ctx: &Program, blockty: BlockType) -> Rc<FuncType> {
     match blockty {
-        BlockType::Empty => Rc::new(FuncType::new([], [])),
+        BlockType::Empty => new_func_type([], []),
         BlockType::FuncType(idx) => ctx.get_type_rc(idx),
-        BlockType::Type(t) => Rc::new(FuncType::new([], [t])),
+        BlockType::Type(t) => new_func_type([], [t]),
     }
 }
 
@@ -386,4 +386,14 @@ fn discard_dead_code(op_reader: &mut Peekable<OperatorsIterator<'_>>) -> wasmpar
     }
 
     Ok(())
+}
+
+fn new_func_type(
+    params: impl IntoIterator<Item = ValType>,
+    results: impl IntoIterator<Item = ValType>,
+) -> Rc<FuncType> {
+    Rc::new(FuncType {
+        unique_id: u32::MAX, // Placeholder, not used in BlockTree
+        ty: wasmparser::FuncType::new(params, results),
+    })
 }
