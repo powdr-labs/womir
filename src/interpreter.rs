@@ -98,7 +98,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
         let func_label = &self.labels[func_name];
 
-        let func_type = self.program.get_func_type(func_label.func_idx.unwrap());
+        let func_type = &self.program.get_func_type(func_label.func_idx.unwrap()).ty;
         let n_inputs: u32 = func_type
             .params()
             .iter()
@@ -941,6 +941,27 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let r = r.to_bits();
 
                         self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::F32Neg => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = f32::from_bits(self.get_vrom_relative_u32(a));
+
+                        let r = -a;
+                        let r = r.to_bits();
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
+                    Op::F64Neg => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+                        let r = -f64::from_bits(a);
+                        let r = r.to_bits();
+
+                        self.set_vrom_relative_u64(c, r);
                     }
                     Op::F32Eq => {
                         let a = inputs[0].clone();

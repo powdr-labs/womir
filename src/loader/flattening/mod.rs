@@ -528,7 +528,7 @@ pub fn flatten_dag<'a, S: Settings>(
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
     // the outputs are filled by the caller, value preemptively provided by the prover.
-    let func_type = module.get_func_type(func_idx);
+    let func_type = &module.get_func_type(func_idx).ty;
     let input_regs = func_type
         .params()
         .iter()
@@ -1161,7 +1161,7 @@ fn translate_single_node<'a, S: Settings>(
                 .into(),
                 Directive::WASMOp {
                     op: Op::I32Const {
-                        value: type_index as i32,
+                        value: ctx.get_type(type_index).unique_id as i32,
                     },
                     inputs: vec![],
                     output: Some(expected_func_type.clone()),
@@ -1171,7 +1171,7 @@ fn translate_single_node<'a, S: Settings>(
                     op: Op::I32Eq,
                     inputs: vec![
                         expected_func_type.clone(),
-                        func_ref_regs[FunctionRef::<S>::TYPE_INDEX].clone(),
+                        func_ref_regs[FunctionRef::<S>::TYPE_ID].clone(),
                     ],
                     output: Some(eq_result.clone()),
                 }
