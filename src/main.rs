@@ -221,6 +221,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_call_indirect() {
+        test_wasm("wasm_testsuite/call_indirect.wast", None);
+    }
+
+    #[test]
     fn test_wasm_func() {
         test_wasm("wasm_testsuite/func.wast", None);
     }
