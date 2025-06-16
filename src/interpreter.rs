@@ -1081,7 +1081,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .set_word(addr, new_value)
                             .expect("Out of bounds write");
                     }
-                    Op::I64Store { memarg } => {
+                    Op::I64Store { memarg } | Op::F64Store { memarg } => {
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
                         let value = self
