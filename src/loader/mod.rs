@@ -560,6 +560,39 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                             &mut label_gen,
                             func_idx,
                         ));
+                    } else if import.module == "spectest" {
+                        // To run the tests, the runtime must provide a few basic imports
+                        // of the `spectest` module.
+                        //
+                        // The definition is here:
+                        // https://github.com/WebAssembly/spec/blob/main/interpreter/README.md#spectest-host-module
+                        match import.name {
+                            "memory" => {
+                                let TypeRef::Memory(mut mtype) = import.ty else {
+                                    panic!()
+                                };
+                                mtype.maximum = Some(2);
+                                log::debug!("spectest.memory imported: {mtype:?}");
+                                mem_type = Some(mtype);
+                            }
+                            _ => {
+                                log::error!(
+                                    "Unsupported spectest import: {}.{} ({:?})",
+                                    import.module,
+                                    import.name,
+                                    import.ty
+                                );
+                                unsupported_feature_found = true;
+                            }
+                        }
+                    } else {
+                        log::error!(
+                            "Unsupported import: {}.{} ({:?})",
+                            import.module,
+                            import.name,
+                            import.ty
+                        );
+                        unsupported_feature_found = true;
                     }
                 }
             }
@@ -905,7 +938,8 @@ pub fn load_wasm<S: Settings>(wasm_file: &[u8]) -> wasmparser::Result<Program> {
                                 byte_offset -= alignment;
 
                                 let first_word;
-                                (first_word, data) = data.split_at(4 - alignment as usize);
+                                (first_word, data) =
+                                    data.split_at(data.len().min(4 - alignment as usize));
                                 initial_memory.insert_bytes(byte_offset, alignment, first_word);
                                 byte_offset += 4;
                             }
