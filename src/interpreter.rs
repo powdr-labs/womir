@@ -98,7 +98,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
         let func_label = &self.labels[func_name];
 
-        let func_type = self.program.get_func_type(func_label.func_idx.unwrap());
+        let func_type = &self.program.get_func_type(func_label.func_idx.unwrap()).ty;
         let n_inputs: u32 = func_type
             .params()
             .iter()

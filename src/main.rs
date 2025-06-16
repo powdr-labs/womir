@@ -231,13 +231,28 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_forward() {
+        test_wasm("wasm_testsuite/forward.wast", None);
+    }
+
+    #[test]
     fn test_wasm_i64() {
         test_wasm("wasm_testsuite/i64.wast", None);
     }
 
     #[test]
+    fn test_wasm_if() {
+        test_wasm("wasm_testsuite/if.wast", None);
+    }
+
+    #[test]
     fn test_wasm_loop() {
         test_wasm("wasm_testsuite/loop.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_stack() {
+        test_wasm("wasm_testsuite/stack.wast", None);
     }
 
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
