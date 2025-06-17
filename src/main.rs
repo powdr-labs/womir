@@ -251,6 +251,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_labels() {
+        test_wasm("wasm_testsuite/labels.wast", None);
+    }
+
+    #[test]
     fn test_wasm_loop() {
         test_wasm("wasm_testsuite/loop.wast", None);
     }

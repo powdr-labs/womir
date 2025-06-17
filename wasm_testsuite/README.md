@@ -6,7 +6,7 @@ We copy the tests individually as opposed to using the entire repository because
 ## Full list
 
 - [X] address
-- [ ] align
+- [X] align
 - [ ] binary-leb128 (not relevant)
 - [ ] binary (not relevant)
 - [X] block
@@ -14,8 +14,8 @@ We copy the tests individually as opposed to using the entire repository because
 - [X] br_if
 - [X] br_table
 - [ ] bulk
-- [ ] call
-- [ ] call_indirect
+- [X] call
+- [X] call_indirect
 - [ ] comments
 - [ ] const
 - [ ] conversions
@@ -36,18 +36,18 @@ We copy the tests individually as opposed to using the entire repository because
 - [ ] float_literals (not relevant)
 - [ ] float_memory (not relevant)
 - [ ] float_misc (not relevant)
-- [ ] forward
-- [ ] func
+- [X] forward
+- [X] func
 - [ ] func_ptrs
 - [ ] global
 - [X] i32
 - [X] i64
-- [ ] if
+- [X] if
 - [ ] imports
 - [ ] inline-module
 - [ ] int_exprs
 - [ ] int_literals
-- [ ] labels
+- [X] labels
 - [ ] left-to-right
 - [ ] linking
 - [ ] load
@@ -73,7 +73,7 @@ We copy the tests individually as opposed to using the entire repository because
 - [ ] select
 - [ ] simd* (not relevant atm)
 - [ ] skip-stack-guard-page
-- [ ] stack
+- [X] stack
 - [ ] start
 - [ ] store
 - [ ] switch
