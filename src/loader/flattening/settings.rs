@@ -3,7 +3,7 @@ use wasmparser::Operator as Op;
 use crate::loader::flattening::{Generators, TrapReason, Tree};
 use std::{fmt::Debug, ops::Range};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpCondition {
     IfZero,
     IfNotZero,

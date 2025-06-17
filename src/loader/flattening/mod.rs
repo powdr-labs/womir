@@ -424,7 +424,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // Emit all the instructions to enter the loop.
             let enter_loop_directives = jump_into_loop(
                 ctx,
-                &mut gens,
+                gens,
                 &loop_entry,
                 -1,
                 ret_info.as_ref(),
@@ -467,8 +467,8 @@ fn translate_single_node<'a, S: Settings<'a>>(
         .into(),
         Operation::BrIf(target) | Operation::BrIfZero(target) => {
             let (cond, inverse_cond) = match node.operation {
-                Operation::BrIf(target) => (JumpCondition::IfNotZero, JumpCondition::IfZero),
-                Operation::BrIfZero(target) => (JumpCondition::IfZero, JumpCondition::IfNotZero),
+                Operation::BrIf(..) => (JumpCondition::IfNotZero, JumpCondition::IfZero),
+                Operation::BrIfZero(..) => (JumpCondition::IfZero, JumpCondition::IfNotZero),
                 _ => unreachable!(),
             };
 
@@ -481,16 +481,19 @@ fn translate_single_node<'a, S: Settings<'a>>(
             assert_reg::<S>(&cond_reg, ValType::I32);
 
             // Emit the jump to the target label.
-            let jump_directives =
+            let mut jump_directives =
                 emit_jump(ctx, gens, ret_info.as_ref(), &inputs, &target, ctrl_stack)?.into();
 
             // If the jump is single plain jump to a local label, we can optimize this jump by
             // emitting a single conditional jump. This is the best case.
             let optimized = if S::is_jump_condition_available(cond) {
-                match is_single_plain_jump(jump_directives) {
+                match is_single_plain_jump::<S>(std::mem::replace(
+                    &mut jump_directives,
+                    Tree::Empty,
+                )) {
                     Ok(target) => Some(
                         ctx.s
-                            .emit_conditional_jump(gens, cond, target, cond_reg)
+                            .emit_conditional_jump(gens, cond, target, cond_reg.clone())
                             .into(),
                     ),
                     Err(directives) => {
@@ -580,7 +583,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // We need to handle the default target separately first, because it will be
             // the target in case the selector is out of bounds.
             let mut directives = Vec::new();
-            match is_single_plain_jump(default_target) {
+            match is_single_plain_jump::<S>(default_target) {
                 Ok(target) => {
                     // If the default target is a plain jump to a local label.
                     directives.push(
@@ -588,7 +591,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                             .emit_conditional_jump_cmp_immediate(
                                 gens,
                                 ComparisonFunction::GreaterThanOrEqualUnsigned,
-                                selector,
+                                selector.clone(),
                                 jump_instructions.len() as u32,
                                 target,
                             )
@@ -653,8 +656,8 @@ fn translate_single_node<'a, S: Settings<'a>>(
 
             let jump_instructions = jump_instructions
                 .into_iter()
-                .filter_map(
-                    |jump_directives| match is_single_plain_jump(jump_directives.into()) {
+                .filter_map(|jump_directives| {
+                    match is_single_plain_jump::<S>(jump_directives.into()) {
                         Ok(target) => {
                             directives.push(ctx.s.emit_jump(target).into());
                             None
@@ -664,8 +667,8 @@ fn translate_single_node<'a, S: Settings<'a>>(
                             directives.push(ctx.s.emit_jump(jump_label.clone()).into());
                             Some((jump_label, jump_directives))
                         }
-                    },
-                )
+                    }
+                })
                 // Collecting here is essential, because of side effects of pushing
                 // into `directives`.
                 .collect_vec();
@@ -723,7 +726,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                         .emit_allocate_label_frame(
                             gens,
                             format_label(function_index, LabelType::Function),
-                            func_frame_ptr,
+                            func_frame_ptr.clone(),
                         )
                         .into(),
                     call_directives.into(),
@@ -771,7 +774,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 node_idx,
                 node.output_types.len(),
                 curr_entry,
-                func_frame_ptr,
+                func_frame_ptr.clone(),
             )?;
 
             vec![
@@ -794,14 +797,15 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 ctx.s
                     .emit_allocate_value_frame(
                         gens,
-                        func_ref_regs[FunctionRef::<S>::FUNC_FRAME_SIZE],
-                        func_frame_ptr,
+                        func_ref_regs[FunctionRef::<S>::FUNC_FRAME_SIZE].clone(),
+                        func_frame_ptr.clone(),
                     )
                     .into(),
+                call_directives.into(),
                 ctx.s
                     .emit_indirect_call(
                         gens,
-                        func_ref_regs[FunctionRef::<S>::FUNC_ADDR],
+                        func_ref_regs[FunctionRef::<S>::FUNC_ADDR].clone(),
                         func_frame_ptr,
                         this_ret_info.ret_pc,
                         this_ret_info.ret_fp,
@@ -833,7 +837,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
     })
 }
 
-fn assert_reg<S: Settings>(reg: &Range<u32>, ty: ValType) {
+fn assert_reg<'a, S: Settings<'a>>(reg: &Range<u32>, ty: ValType) {
     let expected_size = byte_size::<S>(ty);
     assert_eq!(reg.len(), word_count::<S>(expected_size) as usize);
 }
@@ -848,9 +852,9 @@ fn map_input_into_regs(
         .collect()
 }
 
-fn copy_into_frame<S: Settings>(
-    ctx: &Program<'_, S>,
-    gens: &mut Generators<'_, S>,
+fn copy_into_frame<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     src: Range<u32>,
     dest_frame: Range<u32>,
     dest: Range<u32>,
@@ -861,7 +865,7 @@ fn copy_into_frame<S: Settings>(
                 .emit_copy_into_frame(
                     gens,
                     src_word..src_word + 1,
-                    dest_frame,
+                    dest_frame.clone(),
                     dest_word..dest_word + 1,
                 )
                 .into()
@@ -869,9 +873,9 @@ fn copy_into_frame<S: Settings>(
         .collect()
 }
 
-fn prepare_function_call<S: Settings>(
-    ctx: &Program<S>,
-    gens: &mut Generators<S>,
+fn prepare_function_call<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     inputs: Vec<Range<u32>>,
     node_idx: usize,
     num_outputs: usize,
@@ -889,7 +893,7 @@ fn prepare_function_call<S: Settings>(
 
     for src_reg in inputs {
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        directives.push(copy_into_frame(ctx, gens, src_reg, frame_ptr, dest_reg).into());
+        directives.push(copy_into_frame(ctx, gens, src_reg, frame_ptr.clone(), dest_reg).into());
     }
     for output_idx in 0..num_outputs {
         let src_reg = curr_entry.allocation.get(&ValueOrigin {
@@ -897,15 +901,15 @@ fn prepare_function_call<S: Settings>(
             output_idx: output_idx as u32,
         })?;
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        directives.push(copy_into_frame(ctx, gens, src_reg, frame_ptr, dest_reg).into());
+        directives.push(copy_into_frame(ctx, gens, src_reg, frame_ptr.clone(), dest_reg).into());
     }
 
     Ok((directives, ret_info))
 }
 
-fn emit_jump<'a, S: Settings>(
+fn emit_jump<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     ret_info: Option<&ReturnInfo>,
     node_inputs: &[ValueOrigin],
     target: &BreakTarget,
@@ -998,9 +1002,9 @@ fn emit_jump<'a, S: Settings>(
     }
 }
 
-fn copy_local_jump_args<S: Settings>(
-    ctx: &Program<S>,
-    gens: &mut Generators<S>,
+fn copy_local_jump_args<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     output_regs: &[Range<u32>],
@@ -1010,6 +1014,8 @@ fn copy_local_jump_args<S: Settings>(
     for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
         let src_reg = &allocation.get(origin)?;
         if src_reg != dest_reg {
+            // Explicit rebind to avoid lifetime issues when moving `gens` into the closure.
+            let gens = &mut *gens;
             directives.extend(src_reg.clone().zip_eq(dest_reg.clone()).map(
                 move |(src_word, dest_word)| {
                     ctx.s
@@ -1022,9 +1028,9 @@ fn copy_local_jump_args<S: Settings>(
     Ok(directives)
 }
 
-fn local_jump<S: Settings>(
-    ctx: &Program<'_, S>,
-    gens: &mut Generators<'_, S>,
+fn local_jump<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     label_id: u32,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
@@ -1043,9 +1049,9 @@ fn local_jump<S: Settings>(
     Ok(directives)
 }
 
-fn top_level_return<S: Settings>(
-    ctx: &Program<'_, S>,
-    gens: &mut Generators<'_, S>,
+fn top_level_return<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     ret_info: &ReturnInfo,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
@@ -1059,16 +1065,16 @@ fn top_level_return<S: Settings>(
     assert_ptr_size::<S>(&ret_info.ret_fp);
     directives.push(
         ctx.s
-            .emit_return(gens, ret_info.ret_pc, ret_info.ret_fp)
+            .emit_return(gens, ret_info.ret_pc.clone(), ret_info.ret_fp.clone())
             .into(),
     );
 
     Ok(directives)
 }
 
-fn return_from_loop<S: Settings>(
-    ctx: &Program<'_, S>,
-    gens: &mut Generators<'_, S>,
+fn return_from_loop<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     ctrl_stack_len: usize,
     output_regs: &[Range<u32>],
     node_inputs: &[ValueOrigin],
@@ -1090,7 +1096,7 @@ fn return_from_loop<S: Settings>(
                 ctx,
                 gens,
                 src_reg,
-                toplevel_fp,
+                toplevel_fp..toplevel_fp + 1,
                 dest_reg.clone(),
             ));
         }
@@ -1103,16 +1109,16 @@ fn return_from_loop<S: Settings>(
 
     directives.push(
         ctx.s
-            .emit_return(gens, ret_info.ret_pc, ret_info.ret_fp)
+            .emit_return(gens, ret_info.ret_pc.clone(), ret_info.ret_fp.clone())
             .into(),
     );
 
     Ok(directives)
 }
 
-fn jump_out_of_loop<S: Settings>(
-    ctx: &Program<S>,
-    gens: &mut Generators<S>,
+fn jump_out_of_loop<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     depth: u32,
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
@@ -1127,6 +1133,7 @@ fn jump_out_of_loop<S: Settings>(
     };
     let dest_fp_idx = outer_fps.partition_point(|(d, _)| *d < depth);
     let dest_fp = get_fp_from_sorted::<S>(outer_fps, depth, dest_fp_idx);
+    let dest_fp = dest_fp..dest_fp + 1;
 
     let target_entry = &ctrl_stack[depth as usize];
     let target_inputs = &target_entry.allocation.labels[&label_id];
@@ -1134,7 +1141,8 @@ fn jump_out_of_loop<S: Settings>(
     let mut directives = Vec::new();
     for (origin, dest_reg) in node_inputs.iter().zip_eq(target_inputs.iter()) {
         let src_reg = caller_entry.allocation.get(origin)?;
-        directives.push(copy_into_frame(ctx, gens, src_reg, dest_fp, dest_reg.clone()).into());
+        directives
+            .push(copy_into_frame(ctx, gens, src_reg, dest_fp.clone(), dest_reg.clone()).into());
     }
 
     directives.push(
@@ -1146,7 +1154,7 @@ fn jump_out_of_loop<S: Settings>(
     Ok(directives)
 }
 
-fn get_fp_from_sorted<S: Settings>(
+fn get_fp_from_sorted<'a, S: Settings<'a>>(
     sorted_fps: &[(u32, Range<u32>)],
     expected_depth: u32,
     idx: usize,
@@ -1162,9 +1170,9 @@ fn get_fp_from_sorted<S: Settings>(
 /// and when jumping into the loop for the first time.
 ///
 /// depth_offset is the difference between the caller frame depth and the loop frame depth.
-fn jump_into_loop<'a, S: Settings>(
+fn jump_into_loop<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, S>,
+    gens: &mut Generators<'a, '_, S>,
     loop_entry: &LoopStackEntry,
     depth_offset: i64,
     ret_info: Option<&ReturnInfo>,
@@ -1177,7 +1185,7 @@ fn jump_into_loop<'a, S: Settings>(
     let loop_fp = gens.r.allocate_words(S::words_per_ptr());
     directives.push(
         ctx.s
-            .emit_allocate_label_frame(gens, loop_entry.label.clone(), loop_fp)
+            .emit_allocate_label_frame(gens, loop_entry.label.clone(), loop_fp.clone())
             .into(),
     );
 
@@ -1190,7 +1198,7 @@ fn jump_into_loop<'a, S: Settings>(
                 ctx,
                 gens,
                 ret_info.ret_pc.clone(),
-                loop_fp.start,
+                loop_fp.clone(),
                 loop_ret_info.ret_pc.clone(),
             )
             .into(),
@@ -1200,7 +1208,7 @@ fn jump_into_loop<'a, S: Settings>(
                 ctx,
                 gens,
                 ret_info.ret_fp.clone(),
-                loop_fp.start,
+                loop_fp.clone(),
                 loop_ret_info.ret_fp.clone(),
             )
             .into(),
@@ -1245,7 +1253,7 @@ fn jump_into_loop<'a, S: Settings>(
         use itertools::EitherOrBoth::{Both, Left, Right};
         match outer_fp {
             Both((_, dest_fp), (_, src_fp)) => {
-                directives.extend(copy_into_frame(ctx, gens, src_fp, loop_fp.start, dest_fp));
+                directives.extend(copy_into_frame(ctx, gens, src_fp, loop_fp.clone(), dest_fp));
             }
             Right(_) => {
                 // An outer frame pointer is available, but not required. This is fine.
@@ -1264,7 +1272,7 @@ fn jump_into_loop<'a, S: Settings>(
             ctx,
             gens,
             src_reg,
-            loop_fp.start,
+            loop_fp.clone(),
             input_reg.clone(),
         ));
     }
@@ -1321,14 +1329,14 @@ fn split_func_ref_regs<'a, S: Settings<'a>>(func_ref_reg: Range<u32>) -> [Range<
     [type_index, func_addr, func_frame_size]
 }
 
-fn word_count<S: Settings>(byte_size: u32) -> u32 {
+fn word_count<'a, S: Settings<'a>>(byte_size: u32) -> u32 {
     byte_size.div_ceil(S::bytes_per_word())
 }
 
-fn assert_ptr_size<S: Settings>(ptr: &Range<u32>) {
+fn assert_ptr_size<'a, S: Settings<'a>>(ptr: &Range<u32>) {
     assert_eq!(ptr.len(), S::words_per_ptr() as usize);
 }
 
-pub fn word_count_type<S: Settings>(ty: ValType) -> u32 {
+pub fn word_count_type<'a, S: Settings<'a>>(ty: ValType) -> u32 {
     word_count::<S>(byte_size::<S>(ty))
 }
