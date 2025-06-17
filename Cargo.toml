@@ -1,6 +1,6 @@
 [package]
-name = "zkwasm"
-description = "ZK friendly WebAssembly frontend"
+name = "womir"
+description = "Compiles WebAssembly into a ZK friendly IR with infinite-registers and write-once memory."
 edition = "2024"
 
 [dependencies]
