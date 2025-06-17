@@ -899,6 +899,16 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         drop(a);
                         self.set_vrom_relative_u32(c, val);
                     }
+                    Op::I32WrapI64 => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+
+                        let a = self.get_vrom_relative_u64(a);
+
+                        let r = a as u32;
+
+                        self.set_vrom_relative_u32(c, r);
+                    }
                     Op::F32Add => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();

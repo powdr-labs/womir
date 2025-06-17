@@ -280,6 +280,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_switch() {
+        test_wasm("wasm_testsuite/switch.wast", None);
+    }
+
+    #[test]
     fn test_wasm_stack() {
         test_wasm("wasm_testsuite/stack.wast", None);
     }
