@@ -259,6 +259,10 @@ mod tests {
     fn test_wasm_loop() {
         test_wasm("wasm_testsuite/loop.wast", None);
     }
+    #[test]
+    fn test_wasm_return() {
+        test_wasm("wasm_testsuite/return.wast", None);
+    }
 
     #[test]
     fn test_wasm_stack() {
