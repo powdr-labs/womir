@@ -5,9 +5,8 @@ use std::ops::Range;
 use itertools::Itertools;
 use wasmparser::Operator as Op;
 
-use crate::generic_ir::GenericIrSetting as S;
+use crate::generic_ir::{Directive, GenericIrSetting as S};
 use crate::linker;
-use crate::loader::flattening::Directive;
 use crate::loader::{Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +30,7 @@ pub struct Interpreter<'a, E: ExternalFunctions> {
     future_assignments: HashMap<u32, u32>,
     vrom: Vec<VRomValue>,
     ram: HashMap<u32, u32>,
-    program: Program<'a>,
+    program: Program<'a, S>,
     external_functions: E,
     flat_program: Vec<Directive<'a>>,
     labels: HashMap<String, linker::LabelValue>,
@@ -42,10 +41,11 @@ pub trait ExternalFunctions {
 }
 
 impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
-    pub fn new(program: Program<'a>, external_functions: E) -> Self {
+    pub fn new(program: Program<'a, S>, external_functions: E) -> Self {
         let (flat_program, labels) = linker::link(&program.functions, 0x1);
 
         let ram = program
+            .c
             .initial_memory
             .iter()
             .filter_map(|(addr, value)| {
@@ -83,7 +83,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             labels,
         };
 
-        if let Some(start_function) = interpreter.program.start_function {
+        if let Some(start_function) = interpreter.program.c.start_function {
             let label = func_idx_to_label(start_function);
             interpreter.run(&label, &[]);
         }
@@ -92,13 +92,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b, 'a, E> {
-        MemoryAccessor::new(self.program.memory.unwrap(), self)
+        MemoryAccessor::new(self.program.c.memory.unwrap(), self)
     }
 
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
         let func_label = &self.labels[func_name];
 
-        let func_type = &self.program.get_func_type(func_label.func_idx.unwrap()).ty;
+        let func_type = &self
+            .program
+            .c
+            .get_func_type(func_label.func_idx.unwrap())
+            .ty;
         let n_inputs: u32 = func_type
             .params()
             .iter()
@@ -1021,7 +1025,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         }
                     }
                     Op::GlobalGet { global_index } => {
-                        let global_info = self.program.globals[global_index as usize];
+                        let global_info = self.program.c.globals[global_index as usize];
                         let output = output.unwrap();
 
                         let size = word_count_type::<S>(global_info.val_type);
@@ -1033,7 +1037,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.set_vrom_relative_range(output, &value);
                     }
                     Op::GlobalSet { global_index } => {
-                        let global_info = self.program.globals[global_index as usize];
+                        let global_info = self.program.c.globals[global_index as usize];
 
                         let origin = inputs.pop().unwrap();
                         assert!(
@@ -1367,7 +1371,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(inputs[0].len(), 1);
                         let index = self.get_vrom_relative_u32(inputs[0].clone());
 
-                        let table = TableAccessor::new(self.program.tables[table as usize], self);
+                        let table = TableAccessor::new(self.program.c.tables[table as usize], self);
                         let entry = table
                             .get_entry(index)
                             .expect("TableGet: index out of bounds");
