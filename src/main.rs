@@ -256,6 +256,21 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_local_get() {
+        test_wasm("wasm_testsuite/local_get.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_local_set() {
+        test_wasm("wasm_testsuite/local_set.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_local_tee() {
+        test_wasm("wasm_testsuite/local_tee.wast", None);
+    }
+
+    #[test]
     fn test_wasm_loop() {
         test_wasm("wasm_testsuite/loop.wast", None);
     }
