@@ -290,6 +290,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_start() {
+        test_wasm("wasm_testsuite/start.wast", None);
+    }
+
+    #[test]
     fn test_wasm_unwind() {
         test_wasm("wasm_testsuite/unwind.wast", None);
     }
