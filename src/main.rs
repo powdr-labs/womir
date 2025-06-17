@@ -289,6 +289,11 @@ mod tests {
         test_wasm("wasm_testsuite/stack.wast", None);
     }
 
+    #[test]
+    fn test_wasm_unwind() {
+        test_wasm("wasm_testsuite/unwind.wast", None);
+    }
+
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
         match extract_wast_test_info(case) {
             Ok(modules) => {
