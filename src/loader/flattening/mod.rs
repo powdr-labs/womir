@@ -711,10 +711,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     .into_iter()
                     .map(|origin| curr_entry.allocation.get(&origin))
                     .collect::<Result<Vec<_>, _>>()?;
-                let FunctionCall {
-                    copy_directives,
-                    ret_info: this_ret_info,
-                } = prepare_function_call(
+                let call = prepare_function_call(
                     ctx,
                     gens,
                     inputs,
@@ -732,14 +729,14 @@ fn translate_single_node<'a, S: Settings<'a>>(
                             func_frame_ptr.clone(),
                         )
                         .into(),
-                    copy_directives.into(),
+                    call.copy_directives.into(),
                     ctx.s
                         .emit_function_call(
                             gens,
                             format_label(function_index, LabelType::Function),
                             func_frame_ptr,
-                            this_ret_info.ret_pc,
-                            this_ret_info.ret_fp,
+                            call.ret_info.ret_pc,
+                            call.ret_info.ret_fp,
                         )
                         .into(),
                 ])
@@ -767,10 +764,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let func_frame_ptr = gens.r.allocate_words(S::words_per_ptr());
 
             // Perform the function call
-            let FunctionCall {
-                copy_directives,
-                ret_info: this_ret_info,
-            } = prepare_function_call(
+            let call = prepare_function_call(
                 ctx,
                 gens,
                 inputs,
@@ -804,14 +798,14 @@ fn translate_single_node<'a, S: Settings<'a>>(
                         func_frame_ptr.clone(),
                     )
                     .into(),
-                copy_directives.into(),
+                call.copy_directives.into(),
                 ctx.s
                     .emit_indirect_call(
                         gens,
                         func_ref_regs[FunctionRef::<S>::FUNC_ADDR].clone(),
                         func_frame_ptr,
-                        this_ret_info.ret_pc,
-                        this_ret_info.ret_fp,
+                        call.ret_info.ret_pc,
+                        call.ret_info.ret_fp,
                     )
                     .into(),
             ]
