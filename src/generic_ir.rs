@@ -1,8 +1,8 @@
 use crate::loader::flattening::{
-    Generators, TrapReason,
-    settings::{ComparisonFunction, JumpCondition, Settings},
+    Generators, RegisterGenerator, ReturnInfo, TrapReason,
+    settings::{ComparisonFunction, JumpCondition, LoopFrameLayout, Settings},
 };
-use std::{fmt::Display, ops::Range};
+use std::{collections::BTreeSet, fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
 type Gen<'a, 'b> = Generators<'a, 'b, GenericIrSetting>;
@@ -30,6 +30,38 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn is_relative_jump_available() -> bool {
         true
+    }
+
+    fn allocate_loop_frame_slots(
+        &self,
+        need_ret_info: bool,
+        saved_fps: BTreeSet<u32>,
+    ) -> (RegisterGenerator<'a, Self>, LoopFrameLayout) {
+        let mut rgen = RegisterGenerator::new();
+
+        let ret_info = need_ret_info.then(|| {
+            // Allocate the return PC and frame pointer for the loop.
+            let ret_pc = rgen.allocate_words(Self::words_per_ptr());
+            let ret_fp = rgen.allocate_words(Self::words_per_ptr());
+            ReturnInfo { ret_pc, ret_fp }
+        });
+
+        // Allocate the slots for the saved frame pointers.
+        let saved_fps = saved_fps
+            .into_iter()
+            .map(|depth| {
+                let outer_fp = rgen.allocate_words(Self::words_per_ptr());
+                (depth, outer_fp)
+            })
+            .collect();
+
+        (
+            rgen,
+            LoopFrameLayout {
+                saved_fps,
+                ret_info,
+            },
+        )
     }
 
     fn emit_label(&self, _g: &mut Gen, name: String, frame_size: Option<u32>) -> Directive<'a> {
