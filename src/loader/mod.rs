@@ -848,10 +848,10 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 let definition =
                     flattening::flatten_dag::<S>(&ctx, &mut label_gen, blockless_dag, func_idx);
 
-                /*println!("Function: {func_idx}");
+                println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
                     println!("{d}");
-                }*/
+                }
 
                 ctx.functions.push(definition);
             }

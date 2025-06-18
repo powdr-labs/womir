@@ -1,7 +1,10 @@
 use wasmparser::Operator as Op;
 
 use crate::loader::flattening::{Generators, TrapReason, Tree};
-use std::{fmt::Debug, ops::Range};
+use std::{
+    fmt::{Debug, Display},
+    ops::Range,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpCondition {
@@ -20,7 +23,7 @@ pub enum ComparisonFunction {
 /// TODO: find a way to make calling conventions and interface registers allocation
 /// part of this trait.
 pub trait Settings<'a> {
-    type Directive: Debug + Clone;
+    type Directive: Debug + Clone + Display;
 
     fn bytes_per_word() -> u32;
 
