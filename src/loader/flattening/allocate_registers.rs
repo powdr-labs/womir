@@ -185,27 +185,27 @@ impl Allocation {
 /// The smallest allocation possible is 1 word, and the addresses are given
 /// in words, not bytes. E.g. if `S::bytes_per_word()` is 4, then the first 4 bytes
 /// register will be 0, the second 4 bytes register will be 1, and so on.
-pub fn optimistic_allocation<S: Settings>(
+pub fn optimistic_allocation<'a, S: Settings<'a>>(
     dag: &BlocklessDag<'_>,
-    reg_gen: &mut RegisterGenerator<S>,
+    reg_gen: &mut RegisterGenerator<'a, S>,
 ) -> Allocation {
     let mut number_of_saved_copies = 0;
 
     #[derive_where(Debug, Clone)]
-    struct PerPathData<S: Settings> {
-        reg_gen: RegisterGenerator<S>,
+    struct PerPathData<'a, S: Settings<'a>> {
+        reg_gen: RegisterGenerator<'a, S>,
         assignments: AssignmentSet,
     }
 
-    struct LabelAllocation<S: Settings> {
+    struct LabelAllocation<'a, S: Settings<'a>> {
         node_idx: usize,
         regs: Vec<Range<u32>>,
-        path_below_it: PerPathData<S>,
+        path_below_it: PerPathData<'a, S>,
     }
 
     let mut labels: HashMap<u32, LabelAllocation<S>> = HashMap::new();
 
-    impl<S: Settings> PerPathData<S> {
+    impl<'a, S: Settings<'a>> PerPathData<'a, S> {
         fn merge(&mut self, other: &Self, current_node_idx: usize) {
             self.reg_gen.merge(other.reg_gen);
             self.assignments.merge(&other.assignments, current_node_idx);
@@ -217,12 +217,12 @@ pub fn optimistic_allocation<S: Settings>(
         assignments: AssignmentSet::default(),
     };
 
-    fn merge_path_from_target<'a, S: Settings>(
-        active_path: &mut PerPathData<S>,
+    fn merge_path_from_target<'a, 'b, S: Settings<'a>>(
+        active_path: &mut PerPathData<'a, S>,
         target: &BreakTarget,
-        labels: &'a mut HashMap<u32, LabelAllocation<S>>,
+        labels: &'b mut HashMap<u32, LabelAllocation<'a, S>>,
         current_node_idx: usize,
-    ) -> Option<&'a LabelAllocation<S>> {
+    ) -> Option<&'b LabelAllocation<'a, S>> {
         let target_label: &LabelAllocation<S> = match target {
             BreakTarget {
                 depth: 0,
@@ -239,9 +239,9 @@ pub fn optimistic_allocation<S: Settings>(
         Some(target_label)
     }
 
-    let handle_break = |active_path: &mut PerPathData<S>,
+    let handle_break = |active_path: &mut PerPathData<'a, S>,
                         target: &BreakTarget,
-                        labels: &mut HashMap<u32, LabelAllocation<S>>,
+                        labels: &mut HashMap<u32, LabelAllocation<'a, S>>,
                         inputs: Option<&[ValueOrigin]>,
                         current_node_idx: usize| {
         // First, we merge the path from the target label
@@ -476,11 +476,11 @@ impl InputPermutation {
 
 /// Permutes the allocation so that the input registers are the given ones,
 /// and all the others begin at a given address.
-pub fn permute_allocation<S: Settings>(
+pub fn permute_allocation<'a, S: Settings<'a>>(
     allocation: &mut Allocation,
     inputs: Vec<Range<u32>>,
     first_non_reserved_addr: u32,
-) -> RegisterGenerator<S> {
+) -> RegisterGenerator<'a, S> {
     let mut last_used_addr = first_non_reserved_addr;
 
     let map = InputPermutation::new(

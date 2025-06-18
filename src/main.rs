@@ -64,7 +64,7 @@ fn main() -> wasmparser::Result<()> {
 
     let wasm_file = std::fs::read(wasm_file_path).unwrap();
 
-    let program = loader::load_wasm::<GenericIrSetting>(&wasm_file)?;
+    let program = loader::load_wasm(GenericIrSetting, &wasm_file)?;
 
     if let Some(func_name) = func_name {
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
@@ -94,7 +94,7 @@ mod tests {
         outputs: &[u32],
     ) {
         let wasm_file = std::fs::read(path).unwrap();
-        let program = loader::load_wasm::<GenericIrSetting>(&wasm_file).unwrap();
+        let program = loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
         let mut interpreter = interpreter::Interpreter::new(program, DataInput::new(data_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
         assert_eq!(got_output, outputs);
@@ -299,7 +299,7 @@ mod tests {
             Ok(modules) => {
                 for (mod_name, asserts) in modules {
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = loader::load_wasm::<GenericIrSetting>(&wasm_file).unwrap();
+                    let program = loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
                     let mut interpreter =
                         interpreter::Interpreter::new(program, DataInput::new(Vec::new()));
 
