@@ -122,7 +122,7 @@ pub struct Generators<'a, 'b, S: Settings<'a> + ?Sized> {
     pub r: RegisterGenerator<'a, S>,
 }
 
-impl<'a, 'b, S: Settings<'a> + ?Sized> Generators<'a, 'b, S> {
+impl<'a, S: Settings<'a> + ?Sized> Generators<'a, '_, S> {
     pub fn new_label(&mut self, label_type: LabelType) -> String {
         format_label(self.label_gen.next().unwrap(), label_type)
     }
@@ -676,7 +676,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // Finally emit the jump directives for each target.
             for (jump_label, jump_directives) in jump_instructions {
                 directives.push(ctx.s.emit_label(gens, jump_label, None).into());
-                directives.push(jump_directives.into());
+                directives.push(jump_directives);
             }
             directives.into()
         }
@@ -711,7 +711,10 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     .into_iter()
                     .map(|origin| curr_entry.allocation.get(&origin))
                     .collect::<Result<Vec<_>, _>>()?;
-                let (call_directives, this_ret_info) = prepare_function_call(
+                let FunctionCall {
+                    copy_directives,
+                    ret_info: this_ret_info,
+                } = prepare_function_call(
                     ctx,
                     gens,
                     inputs,
@@ -729,7 +732,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                             func_frame_ptr.clone(),
                         )
                         .into(),
-                    call_directives.into(),
+                    copy_directives.into(),
                     ctx.s
                         .emit_function_call(
                             gens,
@@ -764,7 +767,10 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let func_frame_ptr = gens.r.allocate_words(S::words_per_ptr());
 
             // Perform the function call
-            let (call_directives, this_ret_info) = prepare_function_call(
+            let FunctionCall {
+                copy_directives,
+                ret_info: this_ret_info,
+            } = prepare_function_call(
                 ctx,
                 gens,
                 inputs,
@@ -798,7 +804,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                         func_frame_ptr.clone(),
                     )
                     .into(),
-                call_directives.into(),
+                copy_directives.into(),
                 ctx.s
                     .emit_indirect_call(
                         gens,
@@ -870,6 +876,11 @@ fn copy_into_frame<'a, S: Settings<'a>>(
         .collect()
 }
 
+struct FunctionCall<D> {
+    copy_directives: Vec<Tree<D>>,
+    ret_info: ReturnInfo,
+}
+
 fn prepare_function_call<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
     gens: &mut Generators<'a, '_, S>,
@@ -878,8 +889,8 @@ fn prepare_function_call<'a, S: Settings<'a>>(
     num_outputs: usize,
     curr_entry: &CtrlStackEntry,
     frame_ptr: Range<u32>,
-) -> Result<(Vec<Tree<S::Directive>>, ReturnInfo), NotAllocatedError> {
-    let mut directives = Vec::new();
+) -> Result<FunctionCall<S::Directive>, NotAllocatedError> {
+    let mut copy_directives = Vec::new();
 
     // Generate the registers in the order expected by the calling convention.
     let mut fn_reg_gen = RegisterGenerator::<S>::new();
@@ -890,7 +901,8 @@ fn prepare_function_call<'a, S: Settings<'a>>(
 
     for src_reg in inputs {
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        directives.push(copy_into_frame(ctx, gens, src_reg, frame_ptr.clone(), dest_reg).into());
+        copy_directives
+            .push(copy_into_frame(ctx, gens, src_reg, frame_ptr.clone(), dest_reg).into());
     }
     for output_idx in 0..num_outputs {
         let src_reg = curr_entry.allocation.get(&ValueOrigin {
@@ -898,10 +910,14 @@ fn prepare_function_call<'a, S: Settings<'a>>(
             output_idx: output_idx as u32,
         })?;
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        directives.push(copy_into_frame(ctx, gens, src_reg, frame_ptr.clone(), dest_reg).into());
+        copy_directives
+            .push(copy_into_frame(ctx, gens, src_reg, frame_ptr.clone(), dest_reg).into());
     }
 
-    Ok((directives, ret_info))
+    Ok(FunctionCall {
+        copy_directives,
+        ret_info,
+    })
 }
 
 fn emit_jump<'a, S: Settings<'a>>(
