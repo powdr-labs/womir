@@ -1,6 +1,6 @@
 use crate::loader::flattening::{
     Generators, RegisterGenerator, ReturnInfo, TrapReason,
-    settings::{ComparisonFunction, JumpCondition, LoopFrameLayout, Settings},
+    settings::{ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings},
 };
 use std::{collections::BTreeSet, fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
@@ -125,13 +125,34 @@ impl<'a> Settings<'a> for GenericIrSetting {
         _g: &mut Gen,
         loop_label: String,
         loop_frame_ptr: Range<u32>,
+        ret_info_to_copy: Option<ReturnInfosToCopy>,
         saved_curr_fp_ptr: Option<Range<u32>>,
-    ) -> Directive<'a> {
-        Directive::JumpAndActivateFrame {
+    ) -> Vec<Directive<'a>> {
+        let mut directives = if let Some(to_copy) = ret_info_to_copy {
+            assert_eq!(Self::words_per_ptr(), 1);
+            vec![
+                Directive::CopyIntoFrame {
+                    src_word: to_copy.src.ret_pc.start,
+                    dest_frame: loop_frame_ptr.start,
+                    dest_word: to_copy.dest.ret_pc.start,
+                },
+                Directive::CopyIntoFrame {
+                    src_word: to_copy.src.ret_fp.start,
+                    dest_frame: loop_frame_ptr.start,
+                    dest_word: to_copy.dest.ret_fp.start,
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+
+        directives.push(Directive::JumpAndActivateFrame {
             target: loop_label,
             new_frame_ptr: loop_frame_ptr.start,
             saved_caller_fp: saved_curr_fp_ptr.map(|r| r.start),
-        }
+        });
+
+        directives
     }
 
     fn to_plain_local_jump(directive: Directive) -> Result<String, Directive> {
