@@ -608,7 +608,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                                 gens,
                                 ComparisonFunction::LessThanUnsigned,
                                 selector.clone(),
-                                jump_instructions.len() as u32 + 1,
+                                jump_instructions.len() as u32,
                                 table_label.clone(),
                             )
                             .into(),
@@ -760,9 +760,6 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // Split the components of the function reference:
             let func_ref_regs = split_func_ref_regs::<S>(func_ref_reg.clone());
 
-            // We need two new registers to compare the expected function type with the loaded one.
-            let expected_func_type = gens.r.allocate_type(ValType::I32);
-
             let ok_label = gens.new_label(LabelType::Local);
             let func_frame_ptr = gens.r.allocate_words(S::words_per_ptr());
 
@@ -785,7 +782,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     .emit_conditional_jump_cmp_immediate(
                         gens,
                         ComparisonFunction::Equal,
-                        expected_func_type.clone(),
+                        func_ref_regs[FunctionRef::<S>::TYPE_ID].clone(),
                         ctx.c.get_type(type_index).unique_id,
                         ok_label.clone(),
                     )
