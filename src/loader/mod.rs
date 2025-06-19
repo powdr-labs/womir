@@ -847,6 +847,9 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 // Optimization pass: deduplicate const definitions in the DAG.
                 dag::const_dedup::deduplicate_constants(&mut dag);
 
+                // Optimization pass: remove unused const nodes.
+                while dag::dangling_removal::remove_dangling_nodes(&mut dag) > 0 {}
+
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
                 let definition =
