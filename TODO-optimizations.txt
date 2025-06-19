@@ -7,10 +7,6 @@ This files describes all the optimizations ideas we left out for now.
   But there shouldn't be any already, if the WASM is from an optimizing
   compiler.
 
-- [dag]: if a const has been defined previously in the same block or
-  any outer block, not crossing loop boundaries, further consts of the
-  same value can be elided, and the previous one can be used instead.
-
 - [dag]: locals that are written inside a block, but not read
   after that block (in optimized code, this happens inside loops), will
   propagate this superfluous output to all the outer blocks, that might
