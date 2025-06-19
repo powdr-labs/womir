@@ -110,6 +110,7 @@ impl<T> Tree<T> {
 }
 
 #[derive(Clone, Debug)]
+#[repr(u32)]
 pub enum TrapReason {
     UnreachableInstruction,
     /// This trap happens if an instruction that was deemed unreachable

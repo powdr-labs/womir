@@ -9,7 +9,6 @@ mod generic_ir;
 mod interpreter;
 mod linker;
 mod loader;
-mod petravm;
 
 struct DataInput {
     values: Vec<u32>,
