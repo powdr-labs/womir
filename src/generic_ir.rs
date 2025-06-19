@@ -1,8 +1,8 @@
 use crate::loader::flattening::{
-    Generators, TrapReason,
-    settings::{ComparisonFunction, JumpCondition, Settings},
+    Generators, RegisterGenerator, ReturnInfo, TrapReason,
+    settings::{ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings},
 };
-use std::{fmt::Display, ops::Range};
+use std::{collections::BTreeSet, fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
 type Gen<'a, 'b> = Generators<'a, 'b, GenericIrSetting>;
@@ -30,6 +30,38 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn is_relative_jump_available() -> bool {
         true
+    }
+
+    fn allocate_loop_frame_slots(
+        &self,
+        need_ret_info: bool,
+        saved_fps: BTreeSet<u32>,
+    ) -> (RegisterGenerator<'a, Self>, LoopFrameLayout) {
+        let mut rgen = RegisterGenerator::new();
+
+        let ret_info = need_ret_info.then(|| {
+            // Allocate the return PC and frame pointer for the loop.
+            let ret_pc = rgen.allocate_words(Self::words_per_ptr());
+            let ret_fp = rgen.allocate_words(Self::words_per_ptr());
+            ReturnInfo { ret_pc, ret_fp }
+        });
+
+        // Allocate the slots for the saved frame pointers.
+        let saved_fps = saved_fps
+            .into_iter()
+            .map(|depth| {
+                let outer_fp = rgen.allocate_words(Self::words_per_ptr());
+                (depth, outer_fp)
+            })
+            .collect();
+
+        (
+            rgen,
+            LoopFrameLayout {
+                saved_fps,
+                ret_info,
+            },
+        )
     }
 
     fn emit_label(&self, _g: &mut Gen, name: String, frame_size: Option<u32>) -> Directive<'a> {
@@ -93,13 +125,34 @@ impl<'a> Settings<'a> for GenericIrSetting {
         _g: &mut Gen,
         loop_label: String,
         loop_frame_ptr: Range<u32>,
+        ret_info_to_copy: Option<ReturnInfosToCopy>,
         saved_curr_fp_ptr: Option<Range<u32>>,
-    ) -> Directive<'a> {
-        Directive::JumpAndActivateFrame {
+    ) -> Vec<Directive<'a>> {
+        let mut directives = if let Some(to_copy) = ret_info_to_copy {
+            assert_eq!(Self::words_per_ptr(), 1);
+            vec![
+                Directive::CopyIntoFrame {
+                    src_word: to_copy.src.ret_pc.start,
+                    dest_frame: loop_frame_ptr.start,
+                    dest_word: to_copy.dest.ret_pc.start,
+                },
+                Directive::CopyIntoFrame {
+                    src_word: to_copy.src.ret_fp.start,
+                    dest_frame: loop_frame_ptr.start,
+                    dest_word: to_copy.dest.ret_fp.start,
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+
+        directives.push(Directive::JumpAndActivateFrame {
             target: loop_label,
             new_frame_ptr: loop_frame_ptr.start,
             saved_caller_fp: saved_curr_fp_ptr.map(|r| r.start),
-        }
+        });
+
+        directives
     }
 
     fn to_plain_local_jump(directive: Directive) -> Result<String, Directive> {

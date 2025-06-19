@@ -36,7 +36,9 @@ use crate::loader::{
     dag::ValueOrigin,
     flattening::{
         allocate_registers::NotAllocatedError,
-        settings::{ComparisonFunction, JumpCondition, Settings},
+        settings::{
+            ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
+        },
     },
 };
 
@@ -108,6 +110,7 @@ impl<T> Tree<T> {
 }
 
 #[derive(Clone, Debug)]
+#[repr(u32)]
 pub enum TrapReason {
     UnreachableInstruction,
     /// This trap happens if an instruction that was deemed unreachable
@@ -135,7 +138,7 @@ pub struct RegisterGenerator<'a, S: Settings<'a> + ?Sized> {
 }
 
 impl<'a, S: Settings<'a>> RegisterGenerator<'a, S> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             next_available: 0,
             settings: PhantomData,
@@ -160,9 +163,9 @@ impl<'a, S: Settings<'a>> RegisterGenerator<'a, S> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReturnInfo {
-    ret_pc: Range<u32>,
-    ret_fp: Range<u32>,
+pub struct ReturnInfo {
+    pub ret_pc: Range<u32>,
+    pub ret_fp: Range<u32>,
 }
 
 struct CtrlStackEntry {
@@ -179,13 +182,7 @@ enum CtrlStackType {
 #[derive(Debug)]
 struct LoopStackEntry {
     label: String,
-    /// ret_info is only present if the loop can return from the function.
-    ret_info: Option<ReturnInfo>,
-    /// The intermediate frame pointers in the frame stack that this loop
-    /// might need to restore.
-    ///
-    /// (depth, fp_range), sorted by depth
-    saved_fps: Vec<(u32, Range<u32>)>,
+    layout: LoopFrameLayout,
     input_regs: Vec<Range<u32>>,
 }
 
@@ -338,8 +335,6 @@ fn translate_single_node<'a, S: Settings<'a>>(
             sub_dag,
             break_targets,
         } => {
-            let mut loop_reg_gen = RegisterGenerator::<S>::new();
-
             // If None, this loop does not return from the function nor iterate to any outer loop.
             let shallowest_iter_or_ret = break_targets
                 .iter()
@@ -351,23 +346,20 @@ fn translate_single_node<'a, S: Settings<'a>>(
 
             // Test if the loop can return from the function. If so, we need to
             // forward the return info.
-            let loop_ret_info = if ret_info.is_some() && shallowest_iter_or_ret.is_some() {
-                let ret_pc = loop_reg_gen.allocate_words(S::words_per_ptr());
-                let ret_fp = loop_reg_gen.allocate_words(S::words_per_ptr());
+            let needs_ret_info = ret_info.is_some() && shallowest_iter_or_ret.is_some();
 
+            if needs_ret_info {
                 // If the function has outputs, we need to save the toplevel frame pointer, too.
-                if let CtrlStackType::TopLevelFunction { output_regs } =
+                let CtrlStackType::TopLevelFunction { output_regs } =
                     &ctrl_stack.back().unwrap().entry_type
-                {
-                    if !output_regs.is_empty() {
-                        saved_fps.insert(toplevel_frame_idx);
-                    }
-                }
+                else {
+                    unreachable!();
+                };
 
-                Some(ReturnInfo { ret_pc, ret_fp })
-            } else {
-                None
-            };
+                if !output_regs.is_empty() {
+                    saved_fps.insert(toplevel_frame_idx + 1);
+                }
+            }
 
             // Select the outer frame pointers that are saved in the current frame, and
             // the loop will need in order to start iterations of some outer loop.
@@ -379,29 +371,23 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 &ctrl_stack.front().unwrap().entry_type,
                 shallowest_iter_or_ret,
             ) {
-                let s = &this_frame.saved_fps;
-                let start_i = s.partition_point(|(depth, _)| *depth < shallowest);
-                saved_fps.extend(s[start_i..].iter().map(|(depth, _)| *depth));
+                let s = &this_frame.layout.saved_fps;
+                saved_fps.extend(s.range(shallowest..).map(|(depth, _)| *depth + 1));
             };
 
             // Select the frame pointers needed to break into outer frames.
             for (depth, targets) in break_targets.iter() {
                 for target in targets {
                     if let TargetType::Label(_) = target {
-                        saved_fps.insert(*depth);
+                        saved_fps.insert(*depth + 1);
                         break;
                     }
                 }
             }
 
-            // Actually allocate the slots for the saved frame pointers.
-            let loop_outer_fps = saved_fps
-                .into_iter()
-                .map(|depth| {
-                    let outer_fp = loop_reg_gen.allocate_words(S::words_per_ptr());
-                    (depth + 1, outer_fp)
-                })
-                .collect();
+            let (mut loop_reg_gen, layout) =
+                ctx.s.allocate_loop_frame_slots(needs_ret_info, saved_fps);
+            let loop_ret_info = layout.ret_info.clone();
 
             // Finally allocate all the registers for the loop instructions, including the inputs.
             let loop_allocation = optimistic_allocation(&sub_dag, &mut loop_reg_gen);
@@ -412,8 +398,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // This struct contains everything we need to fill in order to jump into the loop.
             let loop_entry = LoopStackEntry {
                 label: gens.new_label(LabelType::Loop),
-                ret_info: loop_ret_info.clone(),
-                saved_fps: loop_outer_fps,
+                layout,
                 input_regs: loop_allocation
                     .iter()
                     .take_while(|(val_origin, _)| val_origin.node == 0)
@@ -979,7 +964,7 @@ fn emit_jump<'a, S: Settings<'a>>(
                         }
                         CtrlStackType::Loop(loop_entry) => {
                             // This is a return from a loop.
-                            assert_eq!(loop_entry.ret_info.as_ref(), ret_info);
+                            assert_eq!(loop_entry.layout.ret_info.as_ref(), ret_info);
                             return_from_loop::<S>(
                                 ctx,
                                 gens,
@@ -1091,10 +1076,8 @@ fn return_from_loop<'a, S: Settings<'a>>(
     let mut directives = Vec::new();
 
     if !output_regs.is_empty() {
-        let outer_fps = &curr_entry.saved_fps[..];
-        let toplevel_depth = ctrl_stack_len - 1;
-        let toplevel_idx = outer_fps.len() - 1;
-        let toplevel_fp = get_fp_from_sorted::<S>(outer_fps, toplevel_depth as u32, toplevel_idx);
+        let outer_fps = &curr_entry.layout.saved_fps;
+        let toplevel_fp = &outer_fps[&((ctrl_stack_len - 1) as u32)];
 
         // Issue the copy directives.
         for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
@@ -1103,14 +1086,14 @@ fn return_from_loop<'a, S: Settings<'a>>(
                 ctx,
                 gens,
                 src_reg,
-                toplevel_fp..toplevel_fp + 1,
+                toplevel_fp.clone(),
                 dest_reg.clone(),
             ));
         }
     }
 
     // Issue the return directive.
-    let ret_info = curr_entry.ret_info.as_ref().unwrap();
+    let ret_info = curr_entry.layout.ret_info.as_ref().unwrap();
     assert_ptr_size::<S>(&ret_info.ret_pc);
     assert_ptr_size::<S>(&ret_info.ret_fp);
 
@@ -1133,14 +1116,12 @@ fn jump_out_of_loop<'a, S: Settings<'a>>(
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
     let caller_entry = ctrl_stack.front().unwrap();
     let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
-        &curr_entry.saved_fps[..]
+        &curr_entry.layout.saved_fps
     } else {
         // You can not jump out of a loop from the toplevel frame.
         panic!()
     };
-    let dest_fp_idx = outer_fps.partition_point(|(d, _)| *d < depth);
-    let dest_fp = get_fp_from_sorted::<S>(outer_fps, depth, dest_fp_idx);
-    let dest_fp = dest_fp..dest_fp + 1;
+    let dest_fp = outer_fps[&depth].clone();
 
     let target_entry = &ctrl_stack[depth as usize];
     let target_inputs = &target_entry.allocation.labels[&label_id];
@@ -1159,17 +1140,6 @@ fn jump_out_of_loop<'a, S: Settings<'a>>(
     );
 
     Ok(directives)
-}
-
-fn get_fp_from_sorted<'a, S: Settings<'a>>(
-    sorted_fps: &[(u32, Range<u32>)],
-    expected_depth: u32,
-    idx: usize,
-) -> u32 {
-    let dest_fp = &sorted_fps[idx];
-    assert_eq!(dest_fp.0, expected_depth);
-    assert_ptr_size::<S>(&dest_fp.1);
-    dest_fp.1.start
 }
 
 /// This function is used to generate the directives for frame creation, copy of
@@ -1196,37 +1166,12 @@ fn jump_into_loop<'a, S: Settings<'a>>(
             .into(),
     );
 
-    // Copy the return info, if needed.
-    if let Some(loop_ret_info) = &loop_entry.ret_info {
-        // If the loop needs a return info, then the caller must have it, too.
-        let ret_info = ret_info.unwrap();
-        directives.push(
-            copy_into_frame(
-                ctx,
-                gens,
-                ret_info.ret_pc.clone(),
-                loop_fp.clone(),
-                loop_ret_info.ret_pc.clone(),
-            )
-            .into(),
-        );
-        directives.push(
-            copy_into_frame(
-                ctx,
-                gens,
-                ret_info.ret_fp.clone(),
-                loop_fp.clone(),
-                loop_ret_info.ret_fp.clone(),
-            )
-            .into(),
-        );
-    }
-
     // Copy the outer frame pointers.
     // outer_fps must be a superset of loop_entry.saved_fps, except for
     // outer_fps[0], which means the caller's own frame pointer, which might
     // be required if we are entering the loop for the first time.
     let mut depth_adjusted_loop_fps = loop_entry
+        .layout
         .saved_fps
         .iter()
         .map(|(depth, fp)| {
@@ -1244,23 +1189,31 @@ fn jump_into_loop<'a, S: Settings<'a>>(
         None
     };
 
-    let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_stack_entry.entry_type {
-        // I resisted the devil's temptation to search the first needed element
-        // with partition_point, which would probably do more harm than good.
-        &curr_entry.saved_fps[..]
+    let outer_fps = if let (CtrlStackType::Loop(curr_entry), Some((first_needed, _))) = (
+        &caller_stack_entry.entry_type,
+        depth_adjusted_loop_fps.peek(),
+    ) {
+        curr_entry.layout.saved_fps.range(*first_needed..)
     } else {
-        // The toplevel frame has no outer frames.
-        &[]
+        // There are no outer frames to be copied.
+        Default::default()
     };
 
-    for outer_fp in depth_adjusted_loop_fps.merge_join_by(
-        outer_fps.iter().cloned(),
-        |(required_depth, _), (available_depth, _)| required_depth.cmp(available_depth),
-    ) {
+    for outer_fp in depth_adjusted_loop_fps
+        .merge_join_by(outer_fps, |(required_depth, _), (available_depth, _)| {
+            required_depth.cmp(available_depth)
+        })
+    {
         use itertools::EitherOrBoth::{Both, Left, Right};
         match outer_fp {
             Both((_, dest_fp), (_, src_fp)) => {
-                directives.extend(copy_into_frame(ctx, gens, src_fp, loop_fp.clone(), dest_fp));
+                directives.extend(copy_into_frame(
+                    ctx,
+                    gens,
+                    src_fp.clone(),
+                    loop_fp.clone(),
+                    dest_fp,
+                ));
             }
             Right(_) => {
                 // An outer frame pointer is available, but not required. This is fine.
@@ -1284,13 +1237,25 @@ fn jump_into_loop<'a, S: Settings<'a>>(
         ));
     }
 
+    // Set the return info to be copied, if needed.
+    let ret_info_copy = loop_entry.layout.ret_info.as_ref().map(|dest| {
+        let src = ret_info.unwrap();
+        ReturnInfosToCopy { src, dest }
+    });
+
     // Then we activate the frame.
     //
     // Jumping doesn't really do anything here, because the loop directives are
     // right ahead, but it is not worth to create a new instruction just for that.
     directives.push(
         ctx.s
-            .emit_jump_into_loop(gens, loop_entry.label.clone(), loop_fp, saved_caller_fp)
+            .emit_jump_into_loop(
+                gens,
+                loop_entry.label.clone(),
+                loop_fp,
+                ret_info_copy,
+                saved_caller_fp,
+            )
             .into(),
     );
 

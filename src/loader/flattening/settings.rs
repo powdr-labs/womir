@@ -1,7 +1,8 @@
 use wasmparser::Operator as Op;
 
-use crate::loader::flattening::{Generators, TrapReason, Tree};
+use crate::loader::flattening::{Generators, RegisterGenerator, ReturnInfo, TrapReason, Tree};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt::{Debug, Display},
     ops::Range,
 };
@@ -16,6 +17,24 @@ pub enum ComparisonFunction {
     Equal,
     GreaterThanOrEqualUnsigned,
     LessThanUnsigned,
+}
+
+#[derive(Debug)]
+pub struct LoopFrameLayout {
+    /// ret_info is only present if the loop can return from the function.
+    pub ret_info: Option<ReturnInfo>,
+    /// The intermediate frame pointers in the frame stack that this loop
+    /// might need to restore.
+    ///
+    /// Maps depth to frame pointer, where depth is relative to the loop frame itself.
+    pub saved_fps: BTreeMap<u32, Range<u32>>,
+}
+
+pub struct ReturnInfosToCopy<'a> {
+    /// Source return info, in the currently active frame.
+    pub src: &'a ReturnInfo,
+    /// Destination return info, in a new frame.
+    pub dest: &'a ReturnInfo,
 }
 
 /// Trait controlling the behavior of the flattening process.
@@ -33,6 +52,17 @@ pub trait Settings<'a> {
 
     fn is_jump_condition_available(cond: JumpCondition) -> bool;
     fn is_relative_jump_available() -> bool;
+
+    /// Allocates the slots in the interface of the loop frame
+    ///
+    /// The `saved_fps` set contains the depths of the frame pointers that
+    /// must be saved for the loop. Relative to the loop frame iself, i.e. 1 is
+    /// the parent frame, 2 is the grandparent frame, etc.
+    fn allocate_loop_frame_slots(
+        &self,
+        need_ret_info: bool,
+        saved_fps: BTreeSet<u32>,
+    ) -> (RegisterGenerator<'a, Self>, LoopFrameLayout);
 
     /// Test if a directive is a plain jump to a local frame label.
     fn to_plain_local_jump(directive: Self::Directive) -> Result<String, Self::Directive>;
@@ -93,12 +123,14 @@ pub trait Settings<'a> {
     fn emit_jump(&self, label: String) -> Self::Directive;
 
     /// Emits the instructions to jump into a new loop iteration in a new frame,
-    /// possibly saving the current frame pointer into the new frame.
+    /// If needed, must save the current frame pointer into the new frame,
+    /// and copy the return info into the loop.
     fn emit_jump_into_loop(
         &self,
         g: &mut Generators<'a, '_, Self>,
         loop_label: String,
         loop_frame_ptr: Range<u32>,
+        ret_info_to_copy: Option<ReturnInfosToCopy>,
         saved_curr_fp_ptr: Option<Range<u32>>,
     ) -> impl Into<Tree<Self::Directive>>;
 
