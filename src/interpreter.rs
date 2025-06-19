@@ -1794,10 +1794,6 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
                 1
             };
 
-            println!(
-                "num_bytes_last_word: {num_bytes_last_word}, num_bytes_carried_over: {num_bytes_carried_over}, extra_reading_iter: {extra_reading_iter}"
-            );
-
             // Do all the full words
             for i in 1..(num_words + extra_reading_iter) {
                 let current_addr = first_word_addr + (i * 4);

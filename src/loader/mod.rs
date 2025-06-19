@@ -841,7 +841,11 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
                 let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
-                let dag = Dag::new(&ctx.c, &func_type.ty, &locals_types, lifted_blocks)?;
+                // Build the DAG
+                let mut dag = Dag::new(&ctx.c, &func_type.ty, &locals_types, lifted_blocks)?;
+
+                // Optimization pass: deduplicate const definitions in the DAG.
+                dag::const_dedup::deduplicate_constants(&mut dag);
 
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
