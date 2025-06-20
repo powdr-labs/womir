@@ -31,11 +31,91 @@ struct StackElement {
     sorted_removed_outputs: Vec<u32>,
 }
 
+struct OffsetMap<K: Ord, V: PartialEq + Eq> {
+    default: V,
+    counter: V,
+    /// Holds the (index, value), sorted by index for binary search.
+    map: Vec<(K, V)>,
+}
+
+impl<K: Ord + PartialEq + Eq, V: Copy + PartialEq + Eq + AddAssign<V> + From<u8>> OffsetMap<K, V> {
+    fn new(default: V) -> Self {
+        Self {
+            default,
+            counter: default,
+            map: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn append(&mut self, index: K) {
+        if let Some((k, _)) = self.map.last() {
+            // The keys must be in ascending order.
+            assert!(index >= *k);
+        }
+
+        self.counter += 1.into();
+        self.map.push((index, self.counter));
+    }
+
+    fn get(&self, index: &K) -> &V {
+        match self.map.binary_search_by(|(i, _)| i.cmp(index)) {
+            Ok(idx) => &self.map[idx].1,
+            Err(idx) => {
+                if idx == 0 {
+                    &self.default
+                } else {
+                    &self.map[idx - 1].1
+                }
+            }
+        }
+    }
+}
+
+fn print_nodes(indent: usize, nodes: &[Node<'_>]) {
+    let spaces = " ".repeat(indent);
+    for (node_idx, node) in nodes.iter().enumerate() {
+        if let Operation::Block { sub_dag, .. } = &node.operation {
+            println!(
+                "{spaces}{node_idx:4}: {} --",
+                node.inputs
+                    .iter()
+                    .map(|o| format!("({}, {})", o.node, o.output_idx))
+                    .format(", "),
+            );
+            print_nodes(indent + 2, &sub_dag.nodes);
+            println!(
+                "{spaces}{node_idx:4}: --> {}",
+                (0..node.output_types.len())
+                    .map(|i| format!("({}, {})", node_idx, i))
+                    .format(", ")
+            );
+        } else {
+            println!(
+                "{spaces}{node_idx:4}: {} -> {}",
+                node.inputs
+                    .iter()
+                    .map(|o| format!("({}, {})", o.node, o.output_idx))
+                    .format(", "),
+                (0..node.output_types.len())
+                    .map(|i| format!("({}, {})", node_idx, i))
+                    .format(", ")
+            );
+        }
+    }
+}
+
 /// This optimization pass detects outputs that are not used, and removes the
 /// nodes that produce them, if they don't have side effects.
 ///
 /// Returns the new DAG and the number of removed nodes.
 pub fn clean_dangling_outputs(dag: &mut Dag) -> Statistics {
+    println!("\nBefore dangling removal:");
+    print_nodes(0, &dag.nodes);
+
     // We don't remove anything from the top-level function output.
     let mut ctrl_stack = VecDeque::from([StackElement {
         sorted_removed_outputs: Vec::new(),
@@ -43,6 +123,13 @@ pub fn clean_dangling_outputs(dag: &mut Dag) -> Statistics {
 
     // We can't change its inputs, either.
     let (_, stats) = recursive_removal(&mut dag.nodes, &mut ctrl_stack, false);
+
+    println!(
+        "\nRemoved {} nodes and {} block outputs.",
+        stats.removed_nodes, stats.removed_block_outputs
+    );
+    println!("\nAfter dangling removal:");
+    print_nodes(0, &dag.nodes);
 
     stats
 }
@@ -102,20 +189,20 @@ fn recursive_removal(
     } else {
         (0..inputs.output_types.len() as u32).collect_vec()
     };
-
     remove_indices_from_vec(&mut inputs.output_types, &removed_inputs);
 
     // The second pass happens top down, and actually removes the nodes.
     let mut offset = 0;
-    let mut offset_map = Vec::with_capacity(nodes.len());
+    let mut offset_map = OffsetMap::new(0);
     let mut to_be_removed = to_be_removed.into_iter().rev().peekable();
     let mut node_idx = 0usize..;
     nodes.retain_mut(|node| {
         let node_idx = node_idx.next();
-        let res = if to_be_removed.peek() == node_idx.as_ref() {
+        if to_be_removed.peek() == node_idx.as_ref() {
             // Remove the node if it is in the to-be-removed list.
             to_be_removed.next();
             offset += 1;
+            offset_map.append(node_idx.unwrap());
             false
         } else {
             // Fix the inputs to breaks, that might have changed.
@@ -123,7 +210,7 @@ fn recursive_removal(
 
             // Fix the node index for all the inputs of a node that is not being removed.
             for input in node.inputs.iter_mut() {
-                input.node -= offset_map[input.node];
+                input.node -= offset_map.get(&input.node);
 
                 // If this refers to the inputs node, we need to remap it.
                 if input.node == 0 {
@@ -131,10 +218,7 @@ fn recursive_removal(
                 }
             }
             true
-        };
-
-        offset_map.push(offset);
-        res
+        }
     });
 
     (removed_inputs, stats)
@@ -205,26 +289,25 @@ fn fix_breaks(node: &mut Node, ctrl_stack: &mut VecDeque<StackElement>) {
             }
 
             // Remove the inputs that are not used in any target.
-            let mut offset = 0;
-            let mut offset_map = Vec::with_capacity(node.inputs.len());
-            let mut is_input_still_used = is_input_still_used.into_iter();
+            let mut offset_map = OffsetMap::new(0);
+            let mut is_input_still_used = (0u32..).zip(is_input_still_used.into_iter());
             node.inputs.retain(|_| {
-                offset_map.push(offset);
-                if is_input_still_used.next().unwrap() {
+                let (input_idx, is_used) = is_input_still_used.next().unwrap();
+                if is_used {
                     // If the input is still used, keep it.
                     true
                 } else {
                     // If the input is not used, remove it.
-                    offset += 1;
+                    offset_map.append(input_idx);
                     false
                 }
             });
 
             // Fix the input indices in the targets' input permutations.
-            if offset > 0 {
+            if offset_map.len() > 0 {
                 for target in targets.iter_mut() {
                     for input_idx in target.input_permutation.iter_mut() {
-                        *input_idx -= offset_map[*input_idx as usize];
+                        *input_idx -= offset_map.get(input_idx);
                     }
                 }
             }

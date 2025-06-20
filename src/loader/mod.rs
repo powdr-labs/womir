@@ -861,16 +861,16 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 // Optimization pass: deduplicate const definitions in the DAG.
                 stats.constants_deduplicated += dag::const_dedup::deduplicate_constants(&mut dag);
 
-                loop {
-                    // Optimization pass: remove unused const nodes.
-                    let pass_stats = dag::dangling_removal::clean_dangling_outputs(&mut dag);
-                    stats.dangling_nodes_removed += pass_stats.removed_nodes;
-                    stats.block_outputs_removed += pass_stats.removed_block_outputs;
-
+                /*loop {*/
+                // Optimization pass: remove unused const nodes.
+                let pass_stats = dag::dangling_removal::clean_dangling_outputs(&mut dag);
+                stats.dangling_nodes_removed += pass_stats.removed_nodes;
+                stats.block_outputs_removed += pass_stats.removed_block_outputs;
+                /*
                     if pass_stats.removed_nodes == 0 && pass_stats.removed_block_outputs == 0 {
                         break;
                     }
-                }
+                }*/
 
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
