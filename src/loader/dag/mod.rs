@@ -1,3 +1,5 @@
+pub mod const_dedup;
+
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     mem::MaybeUninit,
@@ -313,8 +315,6 @@ fn build_dag<'a>(
                 // The rest of the instructions are normal operations that creates a new node
                 // that consumes some inputs and produces some outputs.
                 Ins::WASMOp(op) => {
-                    println!("op: {op:?}");
-                    println!("stack: {:?}", t.stack);
                     let (inputs_types, output_types) = t.get_operator_type(&op).unwrap();
                     let inputs = t.stack.split_off(t.stack.len() - inputs_types.len());
                     assert!(types_matches(&t.nodes, &inputs_types, &inputs));
