@@ -30,7 +30,7 @@ fn recursive_removal<'a>(nodes: &mut Vec<Node<'a>>, remove_inputs: bool) -> (usi
         .filter_map(|(node_idx, node)| {
             removed_count += recurse_into_block(node);
 
-            let to_be_removed = is_pure(node)
+            let to_be_removed = !may_have_side_effect(node)
                 && (0..node.output_types.len()).all(|output_idx| {
                     !used_outputs.contains(&ValueOrigin::new(node_idx, output_idx as u32))
                 });
@@ -104,17 +104,180 @@ fn recursive_removal<'a>(nodes: &mut Vec<Node<'a>>, remove_inputs: bool) -> (usi
     (removed_count, removed_inputs)
 }
 
-/// Checks if a node is pure
-fn is_pure(node: &Node) -> bool {
-    match &node.operation {
-        Operation::WASMOp(Op::I32Const { .. })
-        | Operation::WASMOp(Op::I64Const { .. })
-        | Operation::WASMOp(Op::F32Const { .. })
-        | Operation::WASMOp(Op::F64Const { .. })
-        | Operation::WASMOp(Op::V128Const { .. }) => true,
-        // TODO: there are many more operations that are pure in WASM that could be added here.
-        // But only consts are really important for optimized WASM input.
-        _ => false,
+/// Checks if a node has side effects
+fn may_have_side_effect(node: &Node) -> bool {
+    if let Operation::WASMOp(op) = &node.operation {
+        match op {
+            // Constants are pure.
+            Op::I32Const { .. }
+            | Op::I64Const { .. }
+            | Op::F32Const { .. }
+            | Op::F64Const { .. }
+            | Op::V128Const { .. }
+
+            // Numeric operations are pure.
+            | Op::I32Eqz
+            | Op::I32Eq
+            | Op::I32Ne
+            | Op::I32LtS
+            | Op::I32LtU
+            | Op::I32GtS
+            | Op::I32GtU
+            | Op::I32LeS
+            | Op::I32LeU
+            | Op::I32GeS
+            | Op::I32GeU
+            | Op::I64Eqz
+            | Op::I64Eq
+            | Op::I64Ne
+            | Op::I64LtS
+            | Op::I64LtU
+            | Op::I64GtS
+            | Op::I64GtU
+            | Op::I64LeS
+            | Op::I64LeU
+            | Op::I64GeS
+            | Op::I64GeU
+            | Op::F32Eq
+            | Op::F32Ne
+            | Op::F32Lt
+            | Op::F32Gt
+            | Op::F32Le
+            | Op::F32Ge
+            | Op::F64Eq
+            | Op::F64Ne
+            | Op::F64Lt
+            | Op::F64Gt
+            | Op::F64Le
+            | Op::F64Ge
+            | Op::I32Clz
+            | Op::I32Ctz
+            | Op::I32Popcnt
+            | Op::I32Add
+            | Op::I32Sub
+            | Op::I32Mul
+            | Op::I32DivS
+            | Op::I32DivU
+            | Op::I32RemS
+            | Op::I32RemU
+            | Op::I32And
+            | Op::I32Or
+            | Op::I32Xor
+            | Op::I32Shl
+            | Op::I32ShrS
+            | Op::I32ShrU
+            | Op::I32Rotl
+            | Op::I32Rotr
+            | Op::I64Clz
+            | Op::I64Ctz
+            | Op::I64Popcnt
+            | Op::I64Add
+            | Op::I64Sub
+            | Op::I64Mul
+            | Op::I64DivS
+            | Op::I64DivU
+            | Op::I64RemS
+            | Op::I64RemU
+            | Op::I64And
+            | Op::I64Or
+            | Op::I64Xor
+            | Op::I64Shl
+            | Op::I64ShrS
+            | Op::I64ShrU
+            | Op::I64Rotl
+            | Op::I64Rotr
+            | Op::F32Abs
+            | Op::F32Neg
+            | Op::F32Ceil
+            | Op::F32Floor
+            | Op::F32Trunc
+            | Op::F32Nearest
+            | Op::F32Sqrt
+            | Op::F32Add
+            | Op::F32Sub
+            | Op::F32Mul
+            | Op::F32Div
+            | Op::F32Min
+            | Op::F32Max
+            | Op::F32Copysign
+            | Op::F64Abs
+            | Op::F64Neg
+            | Op::F64Ceil
+            | Op::F64Floor
+            | Op::F64Trunc
+            | Op::F64Nearest
+            | Op::F64Sqrt
+            | Op::F64Add
+            | Op::F64Sub
+            | Op::F64Mul
+            | Op::F64Div
+            | Op::F64Min
+            | Op::F64Max
+            | Op::F64Copysign
+            | Op::I32WrapI64
+            | Op::I32TruncF32S
+            | Op::I32TruncF32U
+            | Op::I32TruncF64S
+            | Op::I32TruncF64U
+            | Op::I64ExtendI32S
+            | Op::I64ExtendI32U
+            | Op::I64TruncF32S
+            | Op::I64TruncF32U
+            | Op::I64TruncF64S
+            | Op::I64TruncF64U
+            | Op::F32ConvertI32S
+            | Op::F32ConvertI32U
+            | Op::F32ConvertI64S
+            | Op::F32ConvertI64U
+            | Op::F32DemoteF64
+            | Op::F64ConvertI32S
+            | Op::F64ConvertI32U
+            | Op::F64ConvertI64S
+            | Op::F64ConvertI64U
+            | Op::F64PromoteF32
+            | Op::I32ReinterpretF32
+            | Op::I64ReinterpretF64
+            | Op::F32ReinterpretI32
+            | Op::F64ReinterpretI64
+            | Op::I32Extend8S
+            | Op::I32Extend16S
+            | Op::I64Extend8S
+            | Op::I64Extend16S
+            | Op::I64Extend32S
+            // Ref operations are pure.
+            | Op::RefNull { .. }
+            | Op::RefIsNull
+            | Op::RefFunc { .. }
+            // Select is pure.
+            | Op::Select { .. }
+            // Global get is pure.
+            | Op::GlobalGet { .. }
+            // Memory and table reads have no side-effects, although I am not sure they are strictly "pure".
+            | Op::TableGet { .. }
+            | Op::TableSize { .. }
+            | Op::I32Load { .. }
+            | Op::I64Load { .. }
+            | Op::F32Load { .. }
+            | Op::F64Load { .. }
+            | Op::I32Load8S { .. }
+            | Op::I32Load8U { .. }
+            | Op::I32Load16S { .. }
+            | Op::I32Load16U { .. }
+            | Op::I64Load8S { .. }
+            | Op::I64Load8U { .. }
+            | Op::I64Load16S { .. }
+            | Op::I64Load16U { .. }
+            | Op::I64Load32S { .. }
+            | Op::I64Load32U { .. }
+            | Op::V128Load { .. }
+            | Op::MemorySize { .. }
+            // TODO: there are more WebAssembly 2.0 operations that are missing here...
+            => false,
+            _ => true,
+        }
+    } else {
+        // For now, we consider all non-WASM operations as having side effects.
+        true
     }
 }
 
