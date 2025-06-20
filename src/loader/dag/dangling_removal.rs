@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::AddAssign,
 };
 
@@ -47,8 +47,8 @@ impl<K: Ord + PartialEq + Eq, V: Copy + PartialEq + Eq + AddAssign<V> + From<u8>
         }
     }
 
-    fn len(&self) -> usize {
-        self.map.len()
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 
     fn append(&mut self, index: K) {
@@ -75,7 +75,7 @@ impl<K: Ord + PartialEq + Eq, V: Copy + PartialEq + Eq + AddAssign<V> + From<u8>
     }
 }
 
-fn print_nodes(indent: usize, nodes: &[Node<'_>]) {
+fn _print_nodes(indent: usize, nodes: &[Node<'_>]) {
     let spaces = " ".repeat(indent);
     for (node_idx, node) in nodes.iter().enumerate() {
         if let Operation::Block { sub_dag, .. } = &node.operation {
@@ -86,7 +86,7 @@ fn print_nodes(indent: usize, nodes: &[Node<'_>]) {
                     .map(|o| format!("({}, {})", o.node, o.output_idx))
                     .format(", "),
             );
-            print_nodes(indent + 2, &sub_dag.nodes);
+            _print_nodes(indent + 2, &sub_dag.nodes);
             println!(
                 "{spaces}{node_idx:4}: --> {}",
                 (0..node.output_types.len())
@@ -113,8 +113,8 @@ fn print_nodes(indent: usize, nodes: &[Node<'_>]) {
 ///
 /// Returns the new DAG and the number of removed nodes.
 pub fn clean_dangling_outputs(dag: &mut Dag) -> Statistics {
-    println!("\nBefore dangling removal:");
-    print_nodes(0, &dag.nodes);
+    //println!("\nBefore dangling removal:");
+    //_print_nodes(0, &dag.nodes);
 
     // We don't remove anything from the top-level function output.
     let mut ctrl_stack = VecDeque::from([StackElement {
@@ -124,12 +124,8 @@ pub fn clean_dangling_outputs(dag: &mut Dag) -> Statistics {
     // We can't change its inputs, either.
     let (_, stats) = recursive_removal(&mut dag.nodes, &mut ctrl_stack, false);
 
-    println!(
-        "\nRemoved {} nodes and {} block outputs.",
-        stats.removed_nodes, stats.removed_block_outputs
-    );
-    println!("\nAfter dangling removal:");
-    print_nodes(0, &dag.nodes);
+    //println!("\nAfter dangling removal:");
+    //print_nodes(0, &dag.nodes);
 
     stats
 }
@@ -141,6 +137,11 @@ fn recursive_removal(
 ) -> (Vec<u32>, Statistics) {
     let mut stats = Statistics::default();
 
+    // Some nodes outputs may be removed (in case of blocks or the inputs node).
+    // This keeps track of what nodes had their outputs removed, so we can adjust
+    // the inputs of subsequent nodes.
+    let mut nodes_outputs_offsets = HashMap::new();
+
     // The first pass happens bottom up, and just detects which nodes can be removed.
     let mut used_outputs = HashSet::new();
     let to_be_removed = nodes
@@ -148,7 +149,12 @@ fn recursive_removal(
         .enumerate()
         .rev()
         .filter_map(|(node_idx, node)| {
-            stats += recurse_into_block(node_idx, node, ctrl_stack, &used_outputs);
+            let (bl_stats, outputs_offset) =
+                recurse_into_block(node_idx, node, ctrl_stack, &used_outputs);
+            stats += bl_stats;
+            if !outputs_offset.is_empty() {
+                nodes_outputs_offsets.insert(node_idx, outputs_offset);
+            }
 
             let to_be_removed = !may_have_side_effect(node)
                 && (0..node.output_types.len()).all(|output_idx| {
@@ -169,30 +175,28 @@ fn recursive_removal(
     stats.removed_nodes += to_be_removed.len();
 
     // If requested, use the used_outputs to remove inputs that are no longer needed.
-    let inputs = &mut nodes[0];
-    assert!(matches!(inputs.operation, Operation::Inputs { .. }));
-
     let mut removed_inputs = Vec::new();
-    let input_map = if remove_inputs {
-        let mut input_map = vec![u32::MAX; inputs.output_types.len()];
-        let mut new_idx = 0;
-        for output_idx in 0..inputs.output_types.len() as u32 {
-            let origin = ValueOrigin::new(0, output_idx);
+    if remove_inputs {
+        let inputs = &mut nodes[0];
+        assert!(matches!(inputs.operation, Operation::Inputs { .. }));
+
+        let mut output_idx = 0u32..;
+        let mut offset_map = OffsetMap::new(0);
+        inputs.output_types.retain(|_| {
+            let origin = ValueOrigin::new(0, output_idx.next().unwrap());
             if used_outputs.contains(&origin) {
-                input_map[output_idx as usize] = new_idx;
-                new_idx += 1;
+                true
             } else {
-                removed_inputs.push(output_idx);
+                removed_inputs.push(origin.output_idx);
+                offset_map.append(origin.output_idx);
+                false
             }
-        }
-        input_map
-    } else {
-        (0..inputs.output_types.len() as u32).collect_vec()
-    };
-    remove_indices_from_vec(&mut inputs.output_types, &removed_inputs);
+        });
+
+        nodes_outputs_offsets.insert(0, offset_map);
+    }
 
     // The second pass happens top down, and actually removes the nodes.
-    let mut offset = 0;
     let mut offset_map = OffsetMap::new(0);
     let mut to_be_removed = to_be_removed.into_iter().rev().peekable();
     let mut node_idx = 0usize..;
@@ -201,7 +205,6 @@ fn recursive_removal(
         if to_be_removed.peek() == node_idx.as_ref() {
             // Remove the node if it is in the to-be-removed list.
             to_be_removed.next();
-            offset += 1;
             offset_map.append(node_idx.unwrap());
             false
         } else {
@@ -210,12 +213,12 @@ fn recursive_removal(
 
             // Fix the node index for all the inputs of a node that is not being removed.
             for input in node.inputs.iter_mut() {
-                input.node -= offset_map.get(&input.node);
-
-                // If this refers to the inputs node, we need to remap it.
-                if input.node == 0 {
-                    input.output_idx = input_map[input.output_idx as usize];
+                // If this refers to a node whose output has been removed, we need to remap it.
+                if let Some(offset_map) = nodes_outputs_offsets.get(&input.node) {
+                    input.output_idx -= offset_map.get(&input.output_idx);
                 }
+
+                input.node -= offset_map.get(&input.node);
             }
             true
         }
@@ -230,7 +233,7 @@ fn recurse_into_block(
     node: &mut Node,
     ctrl_stack: &mut VecDeque<StackElement>,
     used_outputs: &HashSet<ValueOrigin>,
-) -> Statistics {
+) -> (Statistics, OffsetMap<u32, u32>) {
     if let Operation::Block { kind, sub_dag } = &mut node.operation {
         // We need to figure out which outputs of the block are not used, and remove them.
         let sorted_removed_outputs = (0..node.output_types.len() as u32)
@@ -255,9 +258,14 @@ fn recurse_into_block(
         remove_indices_from_vec(&mut node.output_types, &stack_elem.sorted_removed_outputs);
         stats.removed_block_outputs += stack_elem.sorted_removed_outputs.len();
 
-        stats
+        let mut offset_map = OffsetMap::new(0);
+        for removed in stack_elem.sorted_removed_outputs {
+            offset_map.append(removed);
+        }
+
+        (stats, offset_map)
     } else {
-        Statistics::default()
+        (Statistics::default(), OffsetMap::new(0))
     }
 }
 
@@ -304,7 +312,7 @@ fn fix_breaks(node: &mut Node, ctrl_stack: &mut VecDeque<StackElement>) {
             });
 
             // Fix the input indices in the targets' input permutations.
-            if offset_map.len() > 0 {
+            if !offset_map.is_empty() {
                 for target in targets.iter_mut() {
                     for input_idx in target.input_permutation.iter_mut() {
                         *input_idx -= offset_map.get(input_idx);
