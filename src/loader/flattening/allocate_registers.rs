@@ -188,7 +188,7 @@ impl Allocation {
 pub fn optimistic_allocation<'a, S: Settings<'a>>(
     dag: &BlocklessDag<'_>,
     reg_gen: &mut RegisterGenerator<'a, S>,
-) -> Allocation {
+) -> (Allocation, usize) {
     let mut number_of_saved_copies = 0;
 
     #[derive_where(Debug, Clone)]
@@ -381,11 +381,6 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
         }
     }
 
-    log::info!(
-        "Optimistic allocation: {number_of_saved_copies} copies saved, {} registers used",
-        active_path.reg_gen.next_available
-    );
-
     let mut nodes_outputs = active_path.assignments.writer_to_regs;
 
     let labels = labels
@@ -409,10 +404,13 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
 
     *reg_gen = active_path.reg_gen;
 
-    Allocation {
-        nodes_outputs,
-        labels,
-    }
+    (
+        Allocation {
+            nodes_outputs,
+            labels,
+        },
+        number_of_saved_copies,
+    )
 }
 
 /// A permutation of a given allocation, so that the input registers are the given ones, and all the others

@@ -441,6 +441,15 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
     words
 }
 
+struct Statistics {
+    /// Number of register copies saved by the "smart" register allocation.
+    register_copies_saved: usize,
+    /// Number of constants deduplicated in the DAG.
+    constants_deduplicated: usize,
+    /// Number of dangling nodes removed from the DAG.
+    dangling_nodes_removed: usize,
+}
+
 pub fn load_wasm<'a, S: Settings<'a>>(
     settings: S,
     wasm_file: &'a [u8],
@@ -494,6 +503,12 @@ pub fn load_wasm<'a, S: Settings<'a>>(
     let mut label_gen = 0..;
 
     // TODO: validate while parsing
+
+    let mut stats = Statistics {
+        register_copies_saved: 0,
+        constants_deduplicated: 0,
+        dangling_nodes_removed: 0,
+    };
 
     // The payloads are processed in the order they appear in the file, so each variable written
     // in one step is available in the next steps.
@@ -584,11 +599,11 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                         let func_idx = ctx.c.imported_functions.len() as u32;
                         ctx.c.func_types.push(type_idx);
                         ctx.c.imported_functions.push((import.module, import.name));
-                        ctx.functions.push(generate_imported_func_wrapper::<S>(
-                            &ctx,
-                            &mut label_gen,
-                            func_idx,
-                        ));
+
+                        let (wrapper_dag, copies_saved) =
+                            generate_imported_func_wrapper::<S>(&ctx, &mut label_gen, func_idx);
+                        stats.register_copies_saved += copies_saved;
+                        ctx.functions.push(wrapper_dag);
                     }
                 }
             }
@@ -845,15 +860,22 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 let mut dag = Dag::new(&ctx.c, &func_type.ty, &locals_types, lifted_blocks)?;
 
                 // Optimization pass: deduplicate const definitions in the DAG.
-                dag::const_dedup::deduplicate_constants(&mut dag);
+                stats.constants_deduplicated += dag::const_dedup::deduplicate_constants(&mut dag);
 
-                // Optimization pass: remove unused const nodes.
-                while dag::dangling_removal::remove_dangling_nodes(&mut dag) > 0 {}
+                loop {
+                    // Optimization pass: remove unused const nodes.
+                    let removed = dag::dangling_removal::remove_dangling_nodes(&mut dag);
+                    stats.dangling_nodes_removed += removed;
+                    if removed == 0 {
+                        break;
+                    }
+                }
 
                 let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
 
-                let definition =
+                let (definition, copies_saved) =
                     flattening::flatten_dag::<S>(&ctx, &mut label_gen, blockless_dag, func_idx);
+                stats.register_copies_saved += copies_saved;
 
                 /*println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
@@ -982,6 +1004,14 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
     ctx.c.initial_memory = initial_memory.0;
 
+    log::info!(
+        "WASM module loaded successfully loaded with {} functions, {} register copies saved, {} constants deduplicated, and {} dangling nodes removed.",
+        ctx.functions.len(),
+        stats.register_copies_saved,
+        stats.constants_deduplicated,
+        stats.dangling_nodes_removed
+    );
+
     Ok(ctx)
 }
 
@@ -990,7 +1020,7 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
     label_gen: &mut RangeFrom<u32>,
     function_idx: u32,
-) -> WriteOnceASM<'a, S> {
+) -> (WriteOnceASM<'a, S>, usize) {
     let func_type = &ctx.c.get_func_type(function_idx).ty;
 
     // A very simple DAG that just calls the imported function.

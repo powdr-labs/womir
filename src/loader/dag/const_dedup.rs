@@ -15,12 +15,12 @@ use crate::loader::{
 ///
 /// To be complete, this pass requires a follow-up to remove orphaned
 /// constants that are no longer referenced in the DAG.
-pub fn deduplicate_constants(dag: &mut Dag) {
+pub fn deduplicate_constants(dag: &mut Dag) -> usize {
     let (num_removed_consts, requested_inputs) =
         recursive_deduplication(&mut dag.nodes, HashMap::new(), HashMap::new());
     assert!(requested_inputs.is_empty());
 
-    log::info!("Deduplicated {} constants in the DAG", num_removed_consts);
+    num_removed_consts
 }
 
 #[derive(Clone, PartialEq, Eq)]
