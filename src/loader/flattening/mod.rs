@@ -191,7 +191,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     label_gen: &mut RangeFrom<u32>,
     dag: BlocklessDag<'a>,
     func_idx: u32,
-) -> WriteOnceASM<'a, S> {
+) -> (WriteOnceASM<'a, S>, usize) {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::<S>::new();
 
@@ -216,7 +216,8 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let ret_info = ReturnInfo { ret_pc, ret_fp };
 
     // Perform the register allocation for the function's top-level frame.
-    let mut allocation = optimistic_allocation(&dag, &mut RegisterGenerator::<S>::new());
+    let (mut allocation, mut number_of_saved_copies) =
+        optimistic_allocation(&dag, &mut RegisterGenerator::<S>::new());
 
     // Since this is the top-level frame, the allocation can
     // not be arbitrary. It must conform to the calling convention,
@@ -237,8 +238,9 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
         allocation,
     }]);
 
-    let (directives, frame_size) =
+    let (flat_result, frame_size) =
         flatten_frame_tree(ctx, &mut gens, dag, &mut ctrl_stack, Some(ret_info));
+    number_of_saved_copies += flat_result.saved_copies;
 
     // Add the function label with the frame size.
     let mut directives_with_labels = vec![
@@ -259,15 +261,23 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
                 .into(),
         );
     }
-    directives_with_labels.push(Tree::Node(directives));
+    directives_with_labels.push(flat_result.tree);
 
     let directives = Tree::Node(directives_with_labels).flatten();
 
-    WriteOnceASM {
-        func_idx,
-        _frame_size: frame_size,
-        directives,
-    }
+    (
+        WriteOnceASM {
+            func_idx,
+            _frame_size: frame_size,
+            directives,
+        },
+        number_of_saved_copies,
+    )
+}
+
+struct FlatteningResult<T> {
+    tree: Tree<T>,
+    saved_copies: usize,
 }
 
 fn flatten_frame_tree<'a, S: Settings<'a>>(
@@ -276,14 +286,16 @@ fn flatten_frame_tree<'a, S: Settings<'a>>(
     dag: BlocklessDag<'a>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: Option<ReturnInfo>,
-) -> (Vec<Tree<S::Directive>>, u32) {
+) -> (FlatteningResult<S::Directive>, u32) {
     let mut directives = Vec::new();
+    let mut number_of_saved_copies = 0;
 
     for (node_idx, node) in dag.nodes.into_iter().enumerate() {
         let result = translate_single_node(ctx, gens, ctrl_stack, &ret_info, node_idx, node);
         match result {
-            Ok(directive_tree) => {
-                directives.push(directive_tree);
+            Ok(flat_result) => {
+                directives.push(flat_result.tree);
+                number_of_saved_copies += flat_result.saved_copies;
             }
             Err(NotAllocatedError) => {
                 // Some required input for this node was not found in the allocation.
@@ -297,7 +309,13 @@ fn flatten_frame_tree<'a, S: Settings<'a>>(
         }
     }
 
-    (directives, gens.r.next_available)
+    (
+        FlatteningResult {
+            tree: directives.into(),
+            saved_copies: number_of_saved_copies,
+        },
+        gens.r.next_available,
+    )
 }
 
 fn is_single_plain_jump<'a, S: Settings<'a>>(
@@ -319,8 +337,9 @@ fn translate_single_node<'a, S: Settings<'a>>(
     ret_info: &Option<ReturnInfo>,
     node_idx: usize,
     node: Node<'a>,
-) -> Result<Tree<S::Directive>, NotAllocatedError> {
-    Ok(match node.operation {
+) -> Result<FlatteningResult<S::Directive>, NotAllocatedError> {
+    let mut number_of_saved_copies = 0;
+    let res = Ok(match node.operation {
         Operation::Inputs => {
             // Inputs does not translate to any assembly directive. It is used on the node tree for its outputs.
             Tree::Empty
@@ -390,7 +409,9 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let loop_ret_info = layout.ret_info.clone();
 
             // Finally allocate all the registers for the loop instructions, including the inputs.
-            let loop_allocation = optimistic_allocation(&sub_dag, &mut loop_reg_gen);
+            let (loop_allocation, saved_copies) =
+                optimistic_allocation(&sub_dag, &mut loop_reg_gen);
+            number_of_saved_copies += saved_copies;
 
             // Sanity check: loops have no outputs:
             assert!(node.output_types.is_empty());
@@ -426,11 +447,12 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 entry_type: CtrlStackType::Loop(loop_entry),
                 allocation: loop_allocation,
             });
-            let (loop_directives, loop_frame_size) =
+            let (loop_flat_result, loop_frame_size) =
                 flatten_frame_tree(ctx, &mut loop_gens, sub_dag, ctrl_stack, loop_ret_info);
             let CtrlStackType::Loop(loop_entry) = ctrl_stack.pop_front().unwrap().entry_type else {
                 unreachable!()
             };
+            number_of_saved_copies += loop_flat_result.saved_copies;
 
             // Assemble the complete listing for this loop.
             Tree::Node(vec![
@@ -438,7 +460,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 ctx.s
                     .emit_label(gens, loop_entry.label, Some(loop_frame_size))
                     .into(),
-                loop_directives.into(),
+                loop_flat_result.tree,
             ])
         }
         Operation::Br(target) => emit_jump(
@@ -816,6 +838,11 @@ fn translate_single_node<'a, S: Settings<'a>>(
             };
             ctx.s.emit_wasm_op(gens, op, inputs, output).into()
         }
+    });
+
+    res.map(|tree| FlatteningResult {
+        tree,
+        saved_copies: number_of_saved_copies,
     })
 }
 

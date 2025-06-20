@@ -1,4 +1,5 @@
 pub mod const_dedup;
+pub mod dangling_removal;
 
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
