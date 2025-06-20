@@ -298,7 +298,7 @@ fn fix_breaks(node: &mut Node, ctrl_stack: &mut VecDeque<StackElement>) {
 
             // Remove the inputs that are not used in any target.
             let mut offset_map = OffsetMap::new(0);
-            let mut is_input_still_used = (0u32..).zip(is_input_still_used.into_iter());
+            let mut is_input_still_used = (0u32..).zip(is_input_still_used);
             node.inputs.retain(|_| {
                 let (input_idx, is_used) = is_input_still_used.next().unwrap();
                 if is_used {
