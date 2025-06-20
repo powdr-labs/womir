@@ -39,7 +39,7 @@ impl HashableConst<'_> {
     }
 }
 
-impl<'a> Hash for HashableConst<'a> {
+impl Hash for HashableConst<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::mem::discriminant(&self.0).hash(state);
         match self.0 {
@@ -135,8 +135,8 @@ fn recursive_deduplication<'a>(
                 // For blocks, we need to assemble the input hash maps based on which of the block
                 // inputs are constants.
                 let mut block_const_to_origin = const_to_origin
-                    .iter()
-                    .map(|(k, _)| (k.clone(), None))
+                    .keys()
+                    .map(|k| (k.clone(), None))
                     .collect::<HashMap<_, _>>();
 
                 let block_origin_to_const = node
