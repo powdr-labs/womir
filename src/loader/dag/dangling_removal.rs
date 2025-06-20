@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::AddAssign};
 
 use itertools::Itertools;
 use wasmparser::Operator as Op;
@@ -8,18 +8,34 @@ use crate::loader::{
     dag::{Dag, Node, Operation, ValueOrigin},
 };
 
+#[derive(Default, Debug)]
+pub struct Statistics {
+    pub removed_nodes: usize,
+    pub removed_block_outputs: usize,
+    // We don't track removed block inputs because they have no visible effect
+    // on the generated code. Instead, they may help remove more nodes, which
+    // is already counted in `removed_nodes`.
+}
+
+impl AddAssign for Statistics {
+    fn add_assign(&mut self, other: Self) {
+        self.removed_nodes += other.removed_nodes;
+        self.removed_block_outputs += other.removed_block_outputs;
+    }
+}
+
 /// This optimization pass removes nodes that have no side effects, and whose outputs are never used.
 ///
 /// Returns the new DAG and the number of removed nodes.
-pub fn remove_dangling_nodes(dag: &mut Dag) -> usize {
+pub fn remove_dangling_nodes(dag: &mut Dag) -> Statistics {
     // This is the top-level function, so we can't change its inputs.
-    let (removed_count, _) = recursive_removal(&mut dag.nodes, false);
+    let (_, stats) = recursive_removal(&mut dag.nodes, false);
 
-    removed_count
+    stats
 }
 
-fn recursive_removal(nodes: &mut Vec<Node<'_>>, remove_inputs: bool) -> (usize, Vec<u32>) {
-    let mut removed_count = 0;
+fn recursive_removal(nodes: &mut Vec<Node<'_>>, remove_inputs: bool) -> (Vec<u32>, Statistics) {
+    let mut stats = Statistics::default();
 
     // The first pass happens bottom up, and just detects which nodes can be removed.
     let mut used_outputs = HashSet::new();
@@ -28,7 +44,7 @@ fn recursive_removal(nodes: &mut Vec<Node<'_>>, remove_inputs: bool) -> (usize, 
         .enumerate()
         .rev()
         .filter_map(|(node_idx, node)| {
-            removed_count += recurse_into_block(node);
+            stats += recurse_into_block(node);
 
             let to_be_removed = !may_have_side_effect(node)
                 && (0..node.output_types.len()).all(|output_idx| {
@@ -46,7 +62,7 @@ fn recursive_removal(nodes: &mut Vec<Node<'_>>, remove_inputs: bool) -> (usize, 
             }
         })
         .collect_vec();
-    removed_count += to_be_removed.len();
+    stats.removed_nodes += to_be_removed.len();
 
     // If requested, use the used_outputs to remove inputs that are no longer needed.
     let inputs = &mut nodes[0];
@@ -101,7 +117,7 @@ fn recursive_removal(nodes: &mut Vec<Node<'_>>, remove_inputs: bool) -> (usize, 
         res
     });
 
-    (removed_count, removed_inputs)
+    (removed_inputs, stats)
 }
 
 /// Checks if a node has side effects
@@ -280,7 +296,7 @@ fn may_have_side_effect(node: &Node) -> bool {
 }
 
 /// Apply the dangling removal recursivelly to a block node.
-fn recurse_into_block(node: &mut Node) -> usize {
+fn recurse_into_block(node: &mut Node) -> Statistics {
     if let Operation::Block { kind, sub_dag } = &mut node.operation {
         // It is too complicated to mess with loops inputs, so we keep them as is.
         // TODO: handle loop inputs properly. Probably useless if the WASM is already optimized.
@@ -289,12 +305,12 @@ fn recurse_into_block(node: &mut Node) -> usize {
             BlockKind::Block => true,
         };
 
-        let (count, removed_inputs) = recursive_removal(&mut sub_dag.nodes, remove_inputs);
+        let (removed_inputs, stats) = recursive_removal(&mut sub_dag.nodes, remove_inputs);
         remove_indices_from_vec(&mut node.inputs, &removed_inputs);
 
-        count
+        stats
     } else {
-        0
+        Statistics::default()
     }
 }
 

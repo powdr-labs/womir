@@ -441,6 +441,7 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
     words
 }
 
+#[derive(Debug, Default)]
 struct Statistics {
     /// Number of register copies saved by the "smart" register allocation.
     register_copies_saved: usize,
@@ -448,6 +449,8 @@ struct Statistics {
     constants_deduplicated: usize,
     /// Number of dangling nodes removed from the DAG.
     dangling_nodes_removed: usize,
+    /// Number of block outputs removed from the DAG.
+    block_outputs_removed: usize,
 }
 
 pub fn load_wasm<'a, S: Settings<'a>>(
@@ -504,11 +507,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
     // TODO: validate while parsing
 
-    let mut stats = Statistics {
-        register_copies_saved: 0,
-        constants_deduplicated: 0,
-        dangling_nodes_removed: 0,
-    };
+    let mut stats = Statistics::default();
 
     // The payloads are processed in the order they appear in the file, so each variable written
     // in one step is available in the next steps.
@@ -864,9 +863,11 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
                 loop {
                     // Optimization pass: remove unused const nodes.
-                    let removed = dag::dangling_removal::remove_dangling_nodes(&mut dag);
-                    stats.dangling_nodes_removed += removed;
-                    if removed == 0 {
+                    let pass_stats = dag::dangling_removal::remove_dangling_nodes(&mut dag);
+                    stats.dangling_nodes_removed += pass_stats.removed_nodes;
+                    stats.block_outputs_removed += pass_stats.removed_block_outputs;
+
+                    if pass_stats.removed_nodes == 0 && pass_stats.removed_block_outputs == 0 {
                         break;
                     }
                 }
