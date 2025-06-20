@@ -863,7 +863,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
                 loop {
                     // Optimization pass: remove unused const nodes.
-                    let pass_stats = dag::dangling_removal::remove_dangling_nodes(&mut dag);
+                    let pass_stats = dag::dangling_removal::clean_dangling_outputs(&mut dag);
                     stats.dangling_nodes_removed += pass_stats.removed_nodes;
                     stats.block_outputs_removed += pass_stats.removed_block_outputs;
 
