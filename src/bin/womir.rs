@@ -1,14 +1,8 @@
 use itertools::Itertools;
-
-use crate::{
+use womir::{
     generic_ir::GenericIrSetting,
     interpreter::{ExternalFunctions, Interpreter},
 };
-
-mod generic_ir;
-mod interpreter;
-mod linker;
-mod loader;
 
 struct DataInput {
     values: Vec<u32>,
@@ -64,7 +58,7 @@ fn main() -> wasmparser::Result<()> {
 
     let wasm_file = std::fs::read(wasm_file_path).unwrap();
 
-    let program = loader::load_wasm(GenericIrSetting, &wasm_file)?;
+    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?;
 
     if let Some(func_name) = func_name {
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
@@ -94,8 +88,8 @@ mod tests {
         outputs: &[u32],
     ) {
         let wasm_file = std::fs::read(path).unwrap();
-        let program = loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
-        let mut interpreter = interpreter::Interpreter::new(program, DataInput::new(data_inputs));
+        let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
+        let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
         assert_eq!(got_output, outputs);
     }
@@ -290,8 +284,55 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_start() {
+        test_wasm("wasm_testsuite/start.wast", None);
+    }
+
+    #[test]
     fn test_wasm_unwind() {
         test_wasm("wasm_testsuite/unwind.wast", None);
+    }
+
+    struct SpectestExternalFunctions;
+
+    impl ExternalFunctions for SpectestExternalFunctions {
+        fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
+            /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
+            (func (export "print"))
+            (func (export "print_i32") (param i32))
+            (func (export "print_i64") (param i64))
+            (func (export "print_f32") (param f32))
+            (func (export "print_f64") (param f64))
+            (func (export "print_i32_f32") (param i32 f32))
+            (func (export "print_f64_f64") (param f64 f64))
+            */
+            assert_eq!(module, "spectest", "Unexpected module: {module}");
+            match function {
+                "print" => println!(),
+                "print_i32" => println!("{}", args[0] as i32),
+                "print_i64" => println!("{}", (args[0] as u64 & ((args[1] as u64) << 32)) as i64),
+                "print_f32" => println!("{}", f32::from_bits(args[0])),
+                "print_f64" => println!(
+                    "{}",
+                    f64::from_bits((args[0] as u64) | ((args[1] as u64) << 32))
+                ),
+                "print_i32_f32" => {
+                    println!("{} {}", args[0] as i32, f32::from_bits(args[1]))
+                }
+                "print_f64_f64" => {
+                    println!(
+                        "{} {}",
+                        f64::from_bits(args[0] as u64 | ((args[1] as u64) << 32)),
+                        f64::from_bits(args[2] as u64 | ((args[3] as u64) << 32))
+                    )
+                }
+                _ => panic!(
+                    "Unexpected function: {function} in module {module} with args: {:?}",
+                    args
+                ),
+            }
+            Vec::new()
+        }
     }
 
     fn test_wasm(case: &str, functions: Option<&[&str]>) {
@@ -299,9 +340,8 @@ mod tests {
             Ok(modules) => {
                 for (mod_name, asserts) in modules {
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
-                    let mut interpreter =
-                        interpreter::Interpreter::new(program, DataInput::new(Vec::new()));
+                    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
+                    let mut interpreter = Interpreter::new(program, SpectestExternalFunctions);
 
                     // println!("assert cases: {asserts:#?}");
                     asserts
@@ -337,6 +377,8 @@ mod tests {
         Module { filename: String },
         #[serde(rename = "assert_return")]
         AssertReturn { action: Action, expected: Vec<Val> },
+        #[serde(rename = "action")]
+        Action { action: Action, expected: Vec<Val> },
         #[serde(other)]
         Other,
     }
@@ -399,7 +441,8 @@ mod tests {
                 CommandEntry::Module { filename } => {
                     assert_returns_per_module.push((parent_dir.join(filename), Vec::new()));
                 }
-                CommandEntry::AssertReturn { action, expected } => {
+                CommandEntry::AssertReturn { action, expected }
+                | CommandEntry::Action { action, expected } => {
                     if let Some(function_name) = action.field {
                         let args = action.args.unwrap_or_default();
 

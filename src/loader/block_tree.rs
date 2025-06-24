@@ -11,7 +11,7 @@ use super::{Block, BlockKind, CommonProgram, Element, Instruction};
 /// It is a tree of blocks, whose root is the Function block.
 ///
 /// There are only two kinds of blocks: "Block" and "Loop". The if-else sequence:
-/// ```
+/// ```text
 /// if
 ///     <if_block>
 /// else
@@ -20,7 +20,7 @@ use super::{Block, BlockKind, CommonProgram, Element, Instruction};
 /// ```
 ///
 /// is turned into:
-/// ```
+/// ```text
 /// block
 ///     block
 ///         br_if 0
@@ -32,7 +32,7 @@ use super::{Block, BlockKind, CommonProgram, Element, Instruction};
 /// ```
 ///
 /// or, in the case else is empty:
-/// ```
+/// ```text
 /// block
 ///     br_if_zero 0
 ///     <if_block>
