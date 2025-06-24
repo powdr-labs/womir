@@ -7,12 +7,6 @@ This files describes all the optimizations ideas we left out for now.
   But there shouldn't be any already, if the WASM is from an optimizing
   compiler.
 
-- [dag]: locals that are written inside a block, but not read
-  after that block (in optimized code, this happens inside loops), will
-  propagate this superfluous output to all the outer blocks, that might
-  generate a lot of useless copies. Remove unused outputs from blocks.
-  Judging by vec_median compilation, this is very important!
-
 - [dag]: if the final ISA supports instructions that
   operate on constants, like `addi $result, $input, 42`, then the DAG
   could be optimized to take advantage of this by folding constant
@@ -50,11 +44,11 @@ This files describes all the optimizations ideas we left out for now.
   targets a label that follows immediately. These Jumps can be eliminated.
   This is important even when compiling an optimized WASM, because
   the Br nodes are added explicitly during the DAG processing, even
-  on blocks that falls through. This is needed to properly handle
-  the data flow from breaks to labels. And these Br nodes may generate
+  on blocks that falls through (which is needed to properly handle
+  the data flow from breaks to labels). And these Br nodes may generate
   these superfluous Jumps.
 
 - [tail call]: a call immediately followed by a return can be optimized
   to a tail call. We can even do this for calls where its outputs
-  are not related to the return values, because we can determine the
+  are not related to the return values, because we can set the
   return registers before the tail call.
