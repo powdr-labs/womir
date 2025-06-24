@@ -322,8 +322,8 @@ mod tests {
                 "print_f64_f64" => {
                     println!(
                         "{} {}",
-                        f64::from_bits(args[0] as u64 | (args[1] as u64) << 32),
-                        f64::from_bits(args[2] as u64 | (args[3] as u64) << 32)
+                        f64::from_bits(args[0] as u64 | ((args[1] as u64) << 32)),
+                        f64::from_bits(args[2] as u64 | ((args[3] as u64) << 32))
                     )
                 }
                 _ => panic!(
