@@ -310,7 +310,7 @@ mod tests {
             match function {
                 "print" => println!(),
                 "print_i32" => println!("{}", args[0] as i32),
-                "print_i64" => println!("{}", (args[0] as u64 & (args[1] as u64) << 32) as i64),
+                "print_i64" => println!("{}", (args[0] as u64 & ((args[1] as u64) << 32)) as i64),
                 "print_f32" => println!("{}", f32::from_bits(args[0])),
                 "print_f64" => println!(
                     "{}",
