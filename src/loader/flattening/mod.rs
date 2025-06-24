@@ -131,7 +131,7 @@ impl<'a, S: Settings<'a> + ?Sized> Generators<'a, '_, S> {
     }
 }
 
-#[derive_where(Debug, Clone, Copy)]
+#[derive_where(Default, Debug, Clone, Copy)]
 pub struct RegisterGenerator<'a, S: Settings<'a> + ?Sized> {
     next_available: u32,
     settings: PhantomData<(&'a (), S)>,
