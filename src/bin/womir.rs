@@ -479,7 +479,7 @@ mod tests {
                                 function_name,
                                 args,
                                 expected,
-                                line,
+                                _line: line,
                             });
                     }
                 }
