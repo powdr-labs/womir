@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use wasmparser::Operator as Op;
 
-use crate::loader::flattening::{Directive, WriteOnceASM};
+use crate::{
+    generic_ir::{Directive, GenericIrSetting},
+    loader::flattening::WriteOnceASM,
+};
 
 #[derive(Debug)]
 pub struct LabelValue {
@@ -12,7 +15,7 @@ pub struct LabelValue {
 }
 
 pub fn link<'a>(
-    program: &[WriteOnceASM<'a>],
+    program: &[WriteOnceASM<'a, GenericIrSetting>],
     init_pc: u32,
 ) -> (Vec<Directive<'a>>, HashMap<String, LabelValue>) {
     let mut pc: u32 = init_pc;

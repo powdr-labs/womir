@@ -1,3 +1,6 @@
+pub mod const_dedup;
+pub mod dangling_removal;
+
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     mem::MaybeUninit,
@@ -7,7 +10,7 @@ use itertools::Itertools;
 use wasmparser::{FuncType, Operator as Op, RefType, ValType};
 
 use super::{
-    Block, BlockKind, Element, Instruction as Ins, Program, locals_data_flow::LiftedBlockTree,
+    Block, BlockKind, CommonProgram, Element, Instruction as Ins, locals_data_flow::LiftedBlockTree,
 };
 
 #[derive(Debug)]
@@ -53,7 +56,7 @@ pub struct Dag<'a> {
 
 impl<'a> Dag<'a> {
     pub fn new(
-        module: &Program<'a>,
+        module: &CommonProgram<'a>,
         func_type: &FuncType,
         locals_types: &[ValType],
         block_tree: LiftedBlockTree<'a>,
@@ -120,7 +123,7 @@ struct BreakArgs {
 // TODO: refactor
 #[allow(clippy::type_complexity)]
 fn build_dag<'a>(
-    module: &Program<'a>,
+    module: &CommonProgram<'a>,
     locals_types: &[ValType],
     input_types: Vec<ValType>,
     block_stack: &mut VecDeque<BreakArgs>,
@@ -313,8 +316,6 @@ fn build_dag<'a>(
                 // The rest of the instructions are normal operations that creates a new node
                 // that consumes some inputs and produces some outputs.
                 Ins::WASMOp(op) => {
-                    println!("op: {op:?}");
-                    println!("stack: {:?}", t.stack);
                     let (inputs_types, output_types) = t.get_operator_type(&op).unwrap();
                     let inputs = t.stack.split_off(t.stack.len() - inputs_types.len());
                     assert!(types_matches(&t.nodes, &inputs_types, &inputs));
@@ -389,7 +390,7 @@ fn build_dag<'a>(
 }
 
 fn build_dag_for_block<'a>(
-    module: &Program<'a>,
+    module: &CommonProgram<'a>,
     locals_types: &[ValType],
     inputs: Vec<ValueOrigin>,
     block_stack: &mut VecDeque<BreakArgs>,
@@ -572,7 +573,7 @@ fn default_const_for_type(value_type: ValType) -> Operation<'static> {
 }
 
 struct StackTracker<'a, 'b> {
-    module: &'b Program<'a>,
+    module: &'b CommonProgram<'a>,
     nodes: Vec<Node<'a>>,
     stack: Vec<ValueOrigin>,
 }
