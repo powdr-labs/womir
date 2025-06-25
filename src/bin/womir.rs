@@ -401,7 +401,7 @@ mod tests {
         pub function_name: String,
         pub args: Vec<u32>,
         pub expected: Vec<u32>,
-        pub line: usize,
+        pub _line: usize,
     }
 
     #[derive(Debug, Deserialize)]
