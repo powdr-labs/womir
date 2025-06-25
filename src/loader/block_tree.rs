@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
 
 use wasmparser::{BlockType, Operator, OperatorsIterator, OperatorsReader, ValType};
 
-use crate::loader::FuncType;
+use crate::loader::{FuncType, Global};
 
 use super::{Block, BlockKind, CommonProgram, Element, Instruction};
 
@@ -45,6 +45,8 @@ use super::{Block, BlockKind, CommonProgram, Element, Instruction};
 ///  - a consequence of the previous, loops are only exited through breaks. An outer block is added to the loop if
 ///    needed to break out of it;
 ///  - dead code is removed after non-fallthrough loops and `br`, `br_table` and `unreachable` instructions;
+///  - `global.get` that refers to constants are turned into the appropriate constant instruction (it is important this
+///    is done early on, before the const optimizations).
 #[derive(Debug)]
 pub struct BlockTree<'a> {
     pub elements: Vec<Element<'a>>,
@@ -52,7 +54,7 @@ pub struct BlockTree<'a> {
 
 impl<'a> BlockTree<'a> {
     pub fn load_function(
-        ctx: &CommonProgram,
+        ctx: &CommonProgram<'a>,
         op_reader: OperatorsReader<'a>,
     ) -> wasmparser::Result<Self> {
         let mut op_reader = op_reader.into_iter().peekable();
@@ -77,7 +79,7 @@ enum Ending {
 }
 
 fn parse_contents<'a>(
-    ctx: &CommonProgram,
+    ctx: &CommonProgram<'a>,
     op_reader: &mut Peekable<OperatorsIterator<'a>>,
     stack_level: u32,
     output_elements: &mut Vec<Element<'a>>,
@@ -301,6 +303,20 @@ fn parse_contents<'a>(
                 output_elements.push(Instruction::WASMOp(op).into());
 
                 false
+            }
+            Operator::GlobalGet { global_index } => {
+                // If the global is a constant, replace it with the constant value.
+                match &ctx.globals[global_index as usize] {
+                    Global::Mutable(..) => {
+                        // Mutable globals are not constants, so we leave the operator as is.
+                        output_elements.push(Instruction::WASMOp(op).into());
+                    }
+                    Global::Immutable(operator) => {
+                        output_elements.push(Instruction::WASMOp(operator.clone()).into());
+                    }
+                }
+
+                true
             }
             op => {
                 // Add the operator to the contents

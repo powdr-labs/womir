@@ -18,8 +18,8 @@ use dag::Dag;
 use flattening::WriteOnceASM;
 use itertools::Itertools;
 use wasmparser::{
-    CompositeInnerType, ElementItems, LocalsReader, MemoryType, Operator, OperatorsReader, Parser,
-    Payload, RefType, TableInit, TypeRef, ValType,
+    CompositeInnerType, ElementItems, LocalsReader, MemoryType, Operator, Parser, Payload, RefType,
+    TableInit, TypeRef, ValType,
 };
 
 use crate::loader::{
@@ -29,6 +29,13 @@ use crate::loader::{
 };
 
 pub use flattening::{func_idx_to_label, word_count_type};
+
+#[derive(Debug, Clone)]
+pub enum Global<'a> {
+    Mutable(AllocatedVar),
+    /// One of the *Const operators.
+    Immutable(Operator<'a>),
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatedVar {
@@ -146,8 +153,7 @@ impl InitialMemory {
                 let MemoryEntry::Value(old_value) = entry.get() else {
                     panic!("Memory entry is not a value");
                 };
-                assert!(old_value & mask == 0);
-                let new_value = old_value | word;
+                let new_value = (old_value & !mask) | word;
                 if new_value == 0 {
                     entry.remove();
                 } else {
@@ -258,7 +264,7 @@ pub struct CommonProgram<'a> {
     /// The initial memory, with the values to be set at startup.
     pub initial_memory: BTreeMap<u32, MemoryEntry>,
     /// The globals, in order of definition.
-    pub globals: Vec<AllocatedVar>,
+    pub globals: Vec<Global<'a>>,
     /// The memory segment, if any.
     pub memory: Option<Segment>,
     /// The tables, in order of definition.
@@ -349,23 +355,20 @@ pub struct Program<'a, S: Settings<'a>> {
 }
 
 impl<'a, S: Settings<'a>> Program<'a, S> {
-    fn eval_const_expr(
+    fn eval_const_op(
         &self,
         val_type: ValType,
-        expr: OperatorsReader,
+        op: &wasmparser::Operator<'a>,
     ) -> wasmparser::Result<Vec<MemoryEntry>> {
-        let mut iter = expr.into_iter();
-
-        let op = iter.next().unwrap()?;
-        let words = match op {
+        Ok(match op {
             Operator::I32Const { value } => {
                 assert_eq!(val_type, ValType::I32);
-                vec![MemoryEntry::Value(value as u32)]
+                vec![MemoryEntry::Value(*value as u32)]
             }
             Operator::I64Const { value } => {
                 assert_eq!(val_type, ValType::I64);
                 vec![
-                    MemoryEntry::Value(value as u32),
+                    MemoryEntry::Value(*value as u32),
                     MemoryEntry::Value((value >> 32) as u32),
                 ]
             }
@@ -384,8 +387,8 @@ impl<'a, S: Settings<'a>> Program<'a, S> {
             Operator::RefFunc { function_index } => {
                 assert_eq!(val_type, ValType::Ref(RefType::FUNCREF));
                 FunctionRef::<S>::new(
-                    self.c.get_func_type(function_index).unique_id,
-                    function_index,
+                    self.c.get_func_type(*function_index).unique_id,
+                    *function_index,
                 )
                 .to_memory_entries()
             }
@@ -394,14 +397,32 @@ impl<'a, S: Settings<'a>> Program<'a, S> {
                 // Since (0, 0) is a valid function reference, lets use u32::MAX to represent null.
                 vec![MemoryEntry::Value(u32::MAX), MemoryEntry::Value(u32::MAX)]
             }
+            Operator::GlobalGet { global_index } => {
+                let Global::Immutable(op) = &self.c.globals[*global_index as usize] else {
+                    panic!("non-constant global used in const expression");
+                };
+
+                return self.eval_const_op(val_type, op);
+            }
             op => panic!("Unsupported operator in const expr: {op:?}"),
-        };
+        })
+    }
+
+    fn eval_const_expr(
+        &self,
+        val_type: ValType,
+        expr: impl IntoIterator<Item = wasmparser::Result<wasmparser::Operator<'a>>>,
+    ) -> wasmparser::Result<(Operator<'a>, Vec<MemoryEntry>)> {
+        let mut iter = expr.into_iter();
+
+        let op = iter.next().unwrap()?;
+        let words = self.eval_const_op(val_type, &op)?;
 
         let end_op = iter.next().unwrap()?;
         assert_eq!(end_op, Operator::End);
         assert!(iter.next().is_none());
 
-        Ok(words)
+        Ok((op, words))
     }
 }
 
@@ -546,7 +567,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                     };
                     let type_idx = types.len() as u32;
                     types.push((type_idx, ty));
-                    log::debug!("Type read: {:?}", ctx.c.get_type(type_idx));
+                    log::debug!("Type read: {:?}", types.last().unwrap());
                 }
 
                 // Deduplicate the types
@@ -603,6 +624,62 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                             generate_imported_func_wrapper::<S>(&ctx, &mut label_gen, func_idx);
                         stats.register_copies_saved += copies_saved;
                         ctx.functions.push(wrapper_dag);
+                    } else if import.module == "spectest" {
+                        // To run the tests, the runtime must provide a few basic imports
+                        // of the `spectest` module.
+                        //
+                        // The definition is here:
+                        // https://github.com/WebAssembly/spec/blob/main/interpreter/README.md#spectest-host-module
+                        match import.ty {
+                            TypeRef::Memory(mut mtype) if import.name == "memory" => {
+                                // The spectest memory is always 2 pages, so we set the maximum to 2.
+                                mtype.maximum = Some(2);
+                                mtype.initial = 1;
+                                log::debug!("spectest.memory imported: {mtype:?}");
+                                mem_type = Some(mtype);
+                            }
+                            TypeRef::Global(gtype) => {
+                                assert!(!gtype.mutable);
+                                let value = match import.name {
+                                    "global_i32" => Operator::I32Const { value: 666 },
+                                    "global_i64" => Operator::I64Const { value: 666 },
+                                    "global_f32" => Operator::F32Const {
+                                        value: 666.6.into(),
+                                    },
+                                    "global_f64" => Operator::F64Const {
+                                        value: 666.6.into(),
+                                    },
+                                    _ => {
+                                        log::error!(
+                                            "Unsupported spectest import: {}.{} ({:?})",
+                                            import.module,
+                                            import.name,
+                                            import.ty
+                                        );
+                                        unsupported_feature_found = true;
+                                        continue;
+                                    }
+                                };
+                                ctx.c.globals.push(Global::Immutable(value));
+                            }
+                            _ => {
+                                log::error!(
+                                    "Unsupported spectest import: {}.{} ({:?})",
+                                    import.module,
+                                    import.name,
+                                    import.ty
+                                );
+                                unsupported_feature_found = true;
+                            }
+                        }
+                    } else {
+                        log::error!(
+                            "Unsupported import: {}.{} ({:?})",
+                            import.module,
+                            import.name,
+                            import.ty
+                        );
+                        unsupported_feature_found = true;
                     }
                 }
             }
@@ -695,17 +772,24 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 for global in section {
                     let global = global?;
                     let ty = global.ty.content_type;
-                    let var = mem_allocator.allocate_var(ty);
+                    let (const_op, words) =
+                        ctx.eval_const_expr(ty, global.init_expr.get_operators_reader())?;
 
                     log::debug!("Global variable {} has type {:?}", ctx.c.globals.len(), ty);
 
-                    // Initialize the global variables
-                    let words = ctx.eval_const_expr(ty, global.init_expr.get_operators_reader())?;
-                    for (idx, word) in words.into_iter().enumerate() {
-                        initial_memory.insert(var.address + 4 * idx as u32, word);
-                    }
-
-                    ctx.c.globals.push(var);
+                    let global = if global.ty.mutable {
+                        // Initialize the global variables
+                        let var = mem_allocator.allocate_var(ty);
+                        for (idx, word) in words.into_iter().enumerate() {
+                            initial_memory.insert(var.address + 4 * idx as u32, word);
+                        }
+                        Global::Mutable(var)
+                    } else {
+                        // Immutable globals are initialized with a constant expression.
+                        // We store the operator in the global, so it can be evaluated later.
+                        Global::Immutable(const_op)
+                    };
+                    ctx.c.globals.push(global);
                 }
             }
             Payload::ExportSection(section_limited) => {
@@ -752,7 +836,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                         }
                         ElementItems::Expressions(ref_type, section) => {
                             for elem in section {
-                                let val = ctx.eval_const_expr(
+                                let (_, val) = ctx.eval_const_expr(
                                     ValType::Ref(ref_type),
                                     elem?.get_operators_reader(),
                                 )?;
@@ -799,6 +883,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
                             let &[MemoryEntry::Value(offset)] = ctx
                                 .eval_const_expr(ValType::I32, offset_expr.get_operators_reader())?
+                                .1
                                 .as_slice()
                             else {
                                 panic!("Offset is not a u32 value");
@@ -935,6 +1020,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
                             let &[MemoryEntry::Value(offset)] = ctx
                                 .eval_const_expr(ValType::I32, offset_expr.get_operators_reader())?
+                                .1
                                 .as_slice()
                             else {
                                 panic!("Offset is not a u32 value");
@@ -945,6 +1031,10 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                                 panic!("Memory size is a label");
                             };
                             let mem_size = mem_size * WASM_PAGE_SIZE;
+                            println!(
+                                "###### Data segment found. Memory size: {mem_size}, offset: {offset}, data size: {}",
+                                data_segment.data.len()
+                            );
                             assert!(offset + data_segment.data.len() as u32 <= mem_size);
 
                             let mut byte_offset = memory.start + 8 + offset;
@@ -956,7 +1046,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                                 byte_offset -= alignment;
 
                                 let first_word;
-                                (first_word, data) = data.split_at(4 - alignment as usize);
+                                (first_word, data) =
+                                    data.split_at(data.len().min(4 - alignment as usize));
                                 initial_memory.insert_bytes(byte_offset, alignment, first_word);
                                 byte_offset += 4;
                             }
