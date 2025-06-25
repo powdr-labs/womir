@@ -9,6 +9,8 @@ use std::{
 use itertools::Itertools;
 use wasmparser::{FuncType, Operator as Op, RefType, ValType};
 
+use crate::loader::Global;
+
 use super::{
     Block, BlockKind, CommonProgram, Element, Instruction as Ins, locals_data_flow::LiftedBlockTree,
 };
@@ -749,11 +751,15 @@ impl StackTracker<'_, '_> {
 
             // # Variable instructions
             Op::GlobalGet { global_index } => {
-                let global = &self.module.globals[*global_index as usize];
+                let Global::Mutable(global) = &self.module.globals[*global_index as usize] else {
+                    panic!("immutable GlobalGet at DAG level");
+                };
                 (vec![], vec![global.val_type])
             }
             Op::GlobalSet { global_index } => {
-                let global = &self.module.globals[*global_index as usize];
+                let Global::Mutable(global) = &self.module.globals[*global_index as usize] else {
+                    panic!("GlobalSet on immutable global");
+                };
                 (vec![global.val_type], vec![])
             }
 

@@ -7,7 +7,7 @@ use wasmparser::Operator as Op;
 
 use crate::generic_ir::{Directive, GenericIrSetting as S};
 use crate::linker;
-use crate::loader::{Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
+use crate::loader::{Global, Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VRomValue {
@@ -1025,7 +1025,11 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         }
                     }
                     Op::GlobalGet { global_index } => {
-                        let global_info = self.program.c.globals[global_index as usize];
+                        let Global::Mutable(global_info) =
+                            self.program.c.globals[global_index as usize]
+                        else {
+                            panic!("immutable GlobalGet should have been resolved at compile time");
+                        };
                         let output = output.unwrap();
 
                         let size = word_count_type::<S>(global_info.val_type);
@@ -1037,7 +1041,11 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.set_vrom_relative_range(output, &value);
                     }
                     Op::GlobalSet { global_index } => {
-                        let global_info = self.program.c.globals[global_index as usize];
+                        let Global::Mutable(global_info) =
+                            self.program.c.globals[global_index as usize]
+                        else {
+                            panic!("GlobalSet expects a mutable global");
+                        };
 
                         let origin = inputs.pop().unwrap();
                         assert!(
