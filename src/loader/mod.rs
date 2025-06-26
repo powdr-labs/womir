@@ -1031,10 +1031,6 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                                 panic!("Memory size is a label");
                             };
                             let mem_size = mem_size * WASM_PAGE_SIZE;
-                            println!(
-                                "###### Data segment found. Memory size: {mem_size}, offset: {offset}, data size: {}",
-                                data_segment.data.len()
-                            );
                             assert!(offset + data_segment.data.len() as u32 <= mem_size);
 
                             let mut byte_offset = memory.start + 8 + offset;
