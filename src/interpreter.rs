@@ -1069,13 +1069,11 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     | Op::I32Store { memarg }
                     | Op::F32Store { memarg } => {
                         let (mask, byte_count) = match op {
-                            Op::I32Store8 { .. } => (0xff, 1),
-                            Op::I32Store16 { .. } => (0xffff, 2),
-                            Op::I64Store8 { .. } => (0xff, 1),
-                            Op::I64Store16 { .. } => (0xffff, 2),
-                            Op::I64Store32 { .. } => (0xffffffff, 4),
-                            Op::I32Store { .. } => (0xffffffff, 4),
-                            Op::F32Store { .. } => (0xffffffff, 4),
+                            Op::I32Store8 { .. } | Op::I64Store8 { .. } => (0xff, 1),
+                            Op::I32Store16 { .. } | Op::I64Store16 { .. } => (0xffff, 2),
+                            Op::I32Store { .. } | Op::F32Store { .. } | Op::I64Store32 { .. } => {
+                                (0xffffffff, 4)
+                            }
                             _ => unreachable!(),
                         };
 
