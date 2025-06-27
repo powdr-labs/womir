@@ -1061,47 +1061,55 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             self.set_ram(global_info.address + 4 * i as u32, value);
                         }
                     }
-                    Op::I32Store { memarg } => {
+                    Op::I32Store8 { memarg }
+                    | Op::I32Store16 { memarg }
+                    | Op::I64Store8 { memarg }
+                    | Op::I64Store16 { memarg }
+                    | Op::I64Store32 { memarg }
+                    | Op::I32Store { memarg }
+                    | Op::F32Store { memarg } => {
+                        let (mask, byte_count) = match op {
+                            Op::I32Store8 { .. } => (0xff, 1),
+                            Op::I32Store16 { .. } => (0xffff, 2),
+                            Op::I64Store8 { .. } => (0xff, 1),
+                            Op::I64Store16 { .. } => (0xffff, 2),
+                            Op::I64Store32 { .. } => (0xffffffff, 4),
+                            Op::I32Store { .. } => (0xffffffff, 4),
+                            Op::F32Store { .. } => (0xffffffff, 4),
+                            _ => unreachable!(),
+                        };
+
                         let addr =
                             self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let value = self.get_vrom_relative_u32(inputs[1].clone());
+
+                        // input[1] might have 1 or 2 words, but we only need the first word
+                        let val_input = inputs[1].start..(inputs[1].start + 1);
+                        let new_value = mask & self.get_vrom_relative_u32(val_input);
 
                         assert_eq!(memarg.memory, 0);
                         let mut memory = self.get_mem();
+
+                        // First word to be written:
+                        let word_addr = addr & !3;
+                        let old_value = memory.get_word(word_addr).expect("Out of bounds read");
+                        let first_shift = (addr & 3) * 8;
+                        let value =
+                            (old_value & !(mask << first_shift)) | (new_value << first_shift);
                         memory
-                            .write_contiguous(addr, &[value])
+                            .set_word(word_addr, value)
                             .expect("Out of bounds write");
-                    }
-                    Op::I32Store8 { memarg } => {
-                        let addr =
-                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let shift = (addr & 0x3) * 8; // shift based on address alignment
-                        let addr = addr & !0x3; // align to 4 bytes
 
-                        let byte = self.get_vrom_relative_u32(inputs[1].clone()) & 0xff;
-
-                        assert_eq!(memarg.memory, 0);
-                        let mut memory = self.get_mem();
-                        let old_value = memory.get_word(addr).expect("Out of bounds read");
-                        let new_value = (old_value & !(0xff << shift)) | (byte << shift);
-                        memory
-                            .set_word(addr, new_value)
-                            .expect("Out of bounds write");
-                    }
-                    Op::I32Store16 { memarg } => {
-                        let addr =
-                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let addr = addr & !0x3; // align to 4 bytes
-
-                        let bytes = self.get_vrom_relative_u32(inputs[1].clone()) & 0xffff;
-
-                        assert_eq!(memarg.memory, 0);
-                        let mut memory = self.get_mem();
-                        let old_value = memory.get_word(addr).expect("Out of bounds read");
-                        let new_value = (old_value & 0xffff0000) | bytes;
-                        memory
-                            .set_word(addr, new_value)
-                            .expect("Out of bounds write");
+                        // If some part of the value is in the next word, we need to write it, too.
+                        if first_shift + byte_count * 8 > 32 {
+                            let word_addr = word_addr + 4;
+                            let old_value = memory.get_word(word_addr).expect("Out of bounds read");
+                            let second_shift = 32 - first_shift;
+                            let value =
+                                (old_value & !(mask >> second_shift)) | (new_value >> second_shift);
+                            memory
+                                .set_word(word_addr, value)
+                                .expect("Out of bounds write");
+                        }
                     }
                     Op::I64Store { memarg } | Op::F64Store { memarg } => {
                         let addr =
@@ -1114,58 +1122,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let mut memory = self.get_mem();
                         memory
                             .write_contiguous(addr, &value)
-                            .expect("Out of bounds write");
-                    }
-                    Op::I64Store8 { memarg } => {
-                        let addr =
-                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let value = self
-                            .get_vrom_relative_range(inputs[1].clone())
-                            .collect_vec();
-                        let shift = (addr & 0x3) * 8; // shift based on address alignment
-                        let addr = addr & !0x3; // align to 4 bytes
-
-                        let byte = value[0] & 0xff;
-
-                        assert_eq!(memarg.memory, 0);
-                        let mut memory = self.get_mem();
-                        let old_value = memory.get_word(addr).expect("Out of bounds read");
-                        let new_value = (old_value & !(0xff << shift)) | (byte << shift);
-                        memory
-                            .set_word(addr, new_value)
-                            .expect("Out of bounds write");
-                    }
-                    Op::I64Store16 { memarg } => {
-                        let addr =
-                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let addr = addr & !0x3; // align to 4 bytes
-
-                        let value = self
-                            .get_vrom_relative_range(inputs[1].clone())
-                            .collect_vec();
-                        let bytes = value[0] & 0xffff;
-
-                        assert_eq!(memarg.memory, 0);
-                        let mut memory = self.get_mem();
-                        let old_value = memory.get_word(addr).expect("Out of bounds read");
-                        let new_value = (old_value & 0xffff0000) | bytes;
-                        memory
-                            .set_word(addr, new_value)
-                            .expect("Out of bounds write");
-                    }
-                    Op::I64Store32 { memarg } => {
-                        let addr =
-                            self.get_vrom_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let addr = addr & !0x3; // align to 4 bytes
-
-                        let value = self
-                            .get_vrom_relative_range(inputs[1].clone())
-                            .collect_vec();
-
-                        assert_eq!(memarg.memory, 0);
-                        let mut memory = self.get_mem();
-                        memory
-                            .set_word(addr, value[0])
                             .expect("Out of bounds write");
                     }
                     Op::I32Load { memarg }
@@ -1771,7 +1727,8 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     fn read_contiguous_bytes(&self, byte_addr: u32, num_bytes: u32) -> Result<Vec<u32>, ()> {
         let num_words = (num_bytes + 3) / 4;
         let mut data = Vec::with_capacity(num_words as usize);
-        if byte_addr % 4 == 0 {
+        let offset_bytes = byte_addr % 4;
+        if offset_bytes == 0 {
             // Simple aligned reads
             for i in 0..num_words {
                 let addr = byte_addr + (i * 4);
@@ -1779,9 +1736,8 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             }
         } else if num_words > 0 {
             // Unaligned reads
-            let offset_bytes = (byte_addr % 4) as usize;
-            let shift = (offset_bytes * 8) as u32;
-            let high_shift = 32u32 - shift;
+            let shift = offset_bytes * 8;
+            let high_shift = 32 - shift;
 
             let first_word_addr = byte_addr & !3;
 
@@ -1793,7 +1749,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             // the lower bits of the last word are sufficient to complete
             // the number of bytes requested.
             let num_bytes_last_word = (num_bytes - 1) % 4 + 1; // From 1 to 4 bytes needed in the last word
-            let num_bytes_carried_over = 4 - offset_bytes as u32;
+            let num_bytes_carried_over = 4 - offset_bytes;
             let extra_reading_iter = if num_bytes_carried_over >= num_bytes_last_word {
                 // The final read is not needed to form the last word.
                 0
