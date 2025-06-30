@@ -18,8 +18,8 @@ use dag::Dag;
 use flattening::WriteOnceASM;
 use itertools::Itertools;
 use wasmparser::{
-    CompositeInnerType, ElementItems, LocalsReader, MemoryType, Operator, Parser, Payload, RefType,
-    TableInit, TypeRef, ValType,
+    CompositeInnerType, ElementItems, FuncValidatorAllocations, LocalsReader, MemoryType, Operator,
+    Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator, WasmFeatures,
 };
 
 use crate::loader::{
@@ -526,21 +526,29 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
     let mut label_gen = 0..;
 
-    // TODO: validate while parsing
-
     let mut stats = Statistics::default();
+
+    let mut validator = Validator::new_with_features(WasmFeatures::WASM2);
+    let mut validator_allocs = FuncValidatorAllocations::default();
 
     // The payloads are processed in the order they appear in the file, so each variable written
     // in one step is available in the next steps.
     let mut unsupported_feature_found = false;
     for payload in parser.parse_all(wasm_file) {
         match payload? {
-            Payload::Version { num, .. } => {
-                // This is the encoding version, we don't care about it.
+            Payload::Version {
+                num,
+                encoding,
+                range,
+            } => {
+                // This is the encoding version, we don't care about it besides validating.
                 log::debug!("Binary encoding version: {num}");
+                validator.version(num, encoding, &range)?;
             }
             Payload::TypeSection(section) => {
                 log::debug!("Type Section found");
+                validator.type_section(&section)?;
+
                 let mut types = Vec::new();
                 for rec_group in section {
                     let mut iter = rec_group?.into_types();
@@ -604,6 +612,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
             }
             Payload::ImportSection(section) => {
                 log::debug!("Import Section found");
+                validator.import_section(&section)?;
+
                 // TODO: we could implement module load and cross module dependencies,
                 // but this is not a very used feature in WASM and modules are usually
                 // self-contained.
@@ -685,6 +695,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
             }
             Payload::FunctionSection(section) => {
                 log::debug!("Function Section found");
+                validator.function_section(&section)?;
+
                 for type_idx in section {
                     let type_idx = type_idx?;
                     let func_idx = ctx.c.func_types.len() as u32;
@@ -697,6 +709,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
             }
             Payload::TableSection(section) => {
                 log::debug!("Table Section found");
+                validator.table_section(&section)?;
+
                 for table in section {
                     let table = table?;
                     if (!table.ty.element_type.is_extern_ref()
@@ -742,6 +756,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
             }
             Payload::MemorySection(section) => {
                 log::debug!("Memory Section found");
+                validator.memory_section(&section)?;
+
                 for mem in section {
                     let mem = mem?;
 
@@ -767,8 +783,15 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                     mem_type = Some(mem);
                 }
             }
+            Payload::TagSection(s) => {
+                // I don't think this is part of WASM 2.0, but we give it to the validator,
+                // only to error out in case this is matched.
+                validator.tag_section(&s)?;
+            }
             Payload::GlobalSection(section) => {
                 log::debug!("Global Section found");
+                validator.global_section(&section)?;
+
                 for global in section {
                     let global = global?;
                     let ty = global.ty.content_type;
@@ -794,6 +817,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
             }
             Payload::ExportSection(section_limited) => {
                 log::debug!("Export Section found");
+                validator.export_section(&section_limited)?;
+
                 for export in section_limited {
                     let export = export?;
                     log::debug!(
@@ -813,12 +838,16 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                     }
                 }
             }
-            Payload::StartSection { func, .. } => {
+            Payload::StartSection { func, range } => {
                 log::debug!("Start Section found. Start function: {func}");
+                validator.start_section(func, &range)?;
+
                 ctx.c.start_function = Some(func);
             }
             Payload::ElementSection(section) => {
                 log::debug!("Element Section found");
+                validator.element_section(&section)?;
+
                 for elem_segment in section {
                     let elem_segment = elem_segment?;
 
@@ -913,23 +942,32 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                     }
                 }
             }
-            Payload::DataCountSection { count, .. } => {
-                log::debug!("Data Count Section found. Count: {count}");
+            Payload::DataCountSection { count, range } => {
                 // This is used only by the static validator.
+                log::debug!("Data Count Section found. Count: {count}");
+                validator.data_count_section(count, &range)?;
             }
-            Payload::CodeSectionStart { count, .. } => {
+            Payload::CodeSectionStart { count, range, .. } => {
                 log::debug!("Code Section Start found. Count: {count}");
+                validator.code_section_start(&range)?;
+
                 assert_eq!(
                     ctx.c.imported_functions.len() + count as usize,
                     ctx.c.func_types.len()
                 );
             }
             Payload::CodeSectionEntry(function) => {
-                // By the time we get here, the ctx will be complete,
+                // By the time we get here, the ctx will be mostly complete,
                 // because all previous sections have been processed.
 
                 let func_idx = ctx.functions.len() as u32;
                 log::debug!("Code Section Entry found, function {func_idx}");
+                let mut func_validator = validator
+                    .code_section_entry(&function)?
+                    .into_validator(validator_allocs);
+                func_validator.validate(&function)?;
+                validator_allocs = func_validator.into_allocations();
+
                 let func_type = ctx.c.get_func_type(func_idx);
                 let locals_types = read_locals(func_type, function.get_locals_reader()?)?;
 
@@ -972,6 +1010,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
             }
             Payload::DataSection(section) => {
                 log::debug!("Data Section found");
+                validator.data_section(&section)?;
+
                 for data_segment in section {
                     let data_segment = data_segment?;
 
@@ -1070,10 +1110,18 @@ pub fn load_wasm<'a, S: Settings<'a>>(
             }
             Payload::CustomSection(_) => {
                 // TODO: read function names and debug information
+                // There is no validation here.
             }
-            Payload::End(_) => {
+            Payload::UnknownSection { id, range, .. } => {
+                // This is also a section we don't support, and is matched
+                // only so validator can error out.
+                validator.unknown_section(id, &range)?
+            }
+            Payload::End(offset) => {
                 log::debug!("End of the module");
+                validator.end(offset)?;
             }
+
             unsupported_section => {
                 unsupported_feature_found = true;
                 log::error!("Unsupported section found: {unsupported_section:?}");

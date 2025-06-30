@@ -4,15 +4,20 @@ description = "Compiles WebAssembly into a ZK friendly IR with infinite-register
 edition = "2024"
 
 [dependencies]
+derive-where = "1.4.0"
 env_logger = "0.10.0"
 itertools = "0.13"
 log = "0.4.17"
-wasmparser = "0.227"
-derive-where = "1.4.0"
+wasmparser = { version = "0.235", default-features = false, features = [
+    'std',
+    'hash-collections',
+    'validate',
+    'features',
+    'simd',
+] }
 
+[dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3"
-
-[dev-dependencies]
 test-log = "0.2.17"
