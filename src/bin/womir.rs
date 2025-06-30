@@ -261,6 +261,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_load() {
+        test_wasm("wasm_testsuite/load.wast", None);
+    }
+
+    #[test]
     fn test_wasm_local_get() {
         test_wasm("wasm_testsuite/local_get.wast", None);
     }
@@ -297,6 +302,11 @@ mod tests {
     #[test]
     fn test_wasm_start() {
         test_wasm("wasm_testsuite/start.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_store() {
+        test_wasm("wasm_testsuite/store.wast", None);
     }
 
     #[test]
