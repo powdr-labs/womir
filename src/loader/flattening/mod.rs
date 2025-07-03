@@ -49,10 +49,10 @@ use super::{
 
 /// An assembly-like representation for a write-once memory machine.
 #[derive(Debug, Clone)]
-pub struct WriteOnceASM<'a, S: Settings<'a>> {
+pub struct WriteOnceASM<D> {
     pub func_idx: u32,
     pub _frame_size: u32,
-    pub directives: Vec<S::Directive>,
+    pub directives: Vec<D>,
 }
 
 pub enum Tree<T> {
@@ -191,7 +191,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     label_gen: &mut RangeFrom<u32>,
     dag: BlocklessDag<'a>,
     func_idx: u32,
-) -> (WriteOnceASM<'a, S>, usize) {
+) -> (WriteOnceASM<S::Directive>, usize) {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut reg_gen = RegisterGenerator::<S>::new();
 

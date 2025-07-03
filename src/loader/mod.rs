@@ -351,7 +351,7 @@ pub struct Program<'a, S: Settings<'a>> {
     /// Indices `[0..imported_functions.len()]` refers to generated wrappers around the imported
     /// functions, which can be used for indirect calls, and indices [imported_functions.len()..]
     /// refers to the functions defined in the module.
-    pub functions: Vec<WriteOnceASM<'a, S>>,
+    pub functions: Vec<WriteOnceASM<S::Directive>>,
 }
 
 impl<'a, S: Settings<'a>> Program<'a, S> {
@@ -1157,7 +1157,7 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
     label_gen: &mut RangeFrom<u32>,
     function_idx: u32,
-) -> (WriteOnceASM<'a, S>, usize) {
+) -> (WriteOnceASM<S::Directive>, usize) {
     let func_type = &ctx.c.get_func_type(function_idx).ty;
 
     // A very simple DAG that just calls the imported function.
