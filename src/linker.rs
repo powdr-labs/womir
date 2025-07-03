@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 
-use wasmparser::Operator as Op;
+use crate::loader::flattening::WriteOnceASM;
 
-use crate::{
-    generic_ir::{Directive, GenericIrSetting},
-    loader::flattening::WriteOnceASM,
-};
+pub struct Label<'a> {
+    pub id: &'a str,
+    pub frame_size: Option<u32>,
+}
+
+pub trait Directive: Clone {
+    fn nop() -> Self;
+    fn as_label(&self) -> Option<Label>;
+}
 
 #[derive(Debug)]
 pub struct LabelValue {
@@ -14,19 +19,13 @@ pub struct LabelValue {
     pub func_idx: Option<u32>,
 }
 
-pub fn link<'a>(
-    program: &[WriteOnceASM<'a, GenericIrSetting>],
+pub fn link<D: Directive>(
+    program: &[WriteOnceASM<D>],
     init_pc: u32,
-) -> (Vec<Directive<'a>>, HashMap<String, LabelValue>) {
+) -> (Vec<D>, HashMap<String, LabelValue>) {
     let mut pc: u32 = init_pc;
 
-    let nop = Directive::WASMOp {
-        op: Op::Nop,
-        inputs: vec![],
-        output: None,
-    };
-
-    let mut flat_program = vec![nop];
+    let mut flat_program = vec![D::nop(); init_pc as usize];
 
     let mut labels = HashMap::new();
     for fun in program {
@@ -35,15 +34,15 @@ pub fn link<'a>(
             fun.directives
                 .clone()
                 .into_iter()
-                .filter(|d| !matches!(d, Directive::Label { .. })),
+                .filter(|d| d.as_label().is_none()),
         );
         for instr in &fun.directives {
-            if let Directive::Label { id, frame_size } = instr {
+            if let Some(Label { id, frame_size }) = instr.as_label() {
                 labels.insert(
-                    id.clone(),
+                    id.to_string(),
                     LabelValue {
                         pc,
-                        frame_size: *frame_size,
+                        frame_size,
                         func_idx: (pc == func_pc).then_some(fun.func_idx),
                     },
                 );

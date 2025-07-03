@@ -1,6 +1,11 @@
-use crate::loader::flattening::{
-    Generators, RegisterGenerator, ReturnInfo, TrapReason,
-    settings::{ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings},
+use crate::{
+    linker,
+    loader::flattening::{
+        Generators, RegisterGenerator, ReturnInfo, TrapReason,
+        settings::{
+            ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
+        },
+    },
 };
 use std::{collections::BTreeSet, fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
@@ -428,6 +433,27 @@ pub enum Directive<'a> {
         inputs: Vec<Range<u32>>,
         output: Option<Range<u32>>,
     },
+}
+
+impl linker::Directive for Directive<'_> {
+    fn nop() -> Self {
+        Directive::WASMOp {
+            op: Op::Nop,
+            inputs: Vec::new(),
+            output: None,
+        }
+    }
+
+    fn as_label(&self) -> Option<linker::Label> {
+        if let Directive::Label { id, frame_size } = self {
+            Some(linker::Label {
+                id,
+                frame_size: *frame_size,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl Display for Directive<'_> {
