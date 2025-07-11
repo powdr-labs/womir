@@ -148,10 +148,10 @@ mod tests {
     fn test_vec_median() {
         test_interpreter_rust(
             "vec_median",
-            "main",
-            &[0, 0],
+            "vec_median",
+            &[],
             vec![5, 11, 15, 75, 6, 5, 1, 4, 7, 3, 2, 9, 2],
-            &[0],
+            &[],
         );
     }
 
