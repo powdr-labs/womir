@@ -6,8 +6,8 @@ use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::generic_ir::{Directive, GenericIrSetting as S};
-use crate::linker;
 use crate::loader::{Global, Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
+use crate::{linker, word_count_types};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VRomValue {
@@ -103,18 +103,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             .c
             .get_func_type(func_label.func_idx.unwrap())
             .ty;
-        let n_inputs: u32 = func_type
-            .params()
-            .iter()
-            .map(|ty| word_count_type::<S>(*ty))
-            .sum();
+        let n_inputs: u32 = word_count_types::<S>(func_type.params());
         assert_eq!(inputs.len(), n_inputs as usize);
 
-        let n_outputs: u32 = func_type
-            .results()
-            .iter()
-            .map(|ty| word_count_type::<S>(*ty))
-            .sum();
+        let n_outputs: u32 = word_count_types::<S>(func_type.results());
 
         self.pc = func_label.pc;
         self.fp = self.allocate(func_label.frame_size.unwrap());
