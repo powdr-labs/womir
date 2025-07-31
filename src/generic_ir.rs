@@ -26,11 +26,8 @@ impl<'a> Settings<'a> for GenericIrSetting {
         1
     }
 
-    fn is_jump_condition_available(cond: JumpCondition) -> bool {
-        match cond {
-            JumpCondition::IfZero => true,
-            JumpCondition::IfNotZero => true,
-        }
+    fn is_jump_condition_available(_cond: JumpCondition) -> bool {
+        true
     }
 
     fn is_relative_jump_available() -> bool {
