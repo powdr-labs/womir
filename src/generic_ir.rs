@@ -28,7 +28,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn is_jump_condition_available(cond: JumpCondition) -> bool {
         match cond {
-            JumpCondition::IfZero => false,
+            JumpCondition::IfZero => true,
             JumpCondition::IfNotZero => true,
         }
     }
@@ -179,10 +179,15 @@ impl<'a> Settings<'a> for GenericIrSetting {
         label: String,
         condition_ptr: Range<u32>,
     ) -> Directive<'a> {
-        assert_eq!(condition_type, JumpCondition::IfNotZero);
-        Directive::JumpIf {
-            target: label,
-            condition: condition_ptr.start,
+        match condition_type {
+            JumpCondition::IfZero => Directive::JumpIfZero {
+                target: label,
+                condition: condition_ptr.start,
+            },
+            JumpCondition::IfNotZero => Directive::JumpIf {
+                target: label,
+                condition: condition_ptr.start,
+            },
         }
     }
 
@@ -382,6 +387,11 @@ pub enum Directive<'a> {
         target: String,
         condition: Register, // size: i32
     },
+    /// Jump to a local label if the condition is zero.
+    JumpIfZero {
+        target: String,
+        condition: Register, // size: i32
+    },
     /// Jump and activate a frame.
     JumpAndActivateFrame {
         target: String,
@@ -502,6 +512,9 @@ impl Display for Directive<'_> {
             }
             Directive::JumpIf { target, condition } => {
                 write!(f, "    JumpIf {target} ${condition}")?;
+            }
+            Directive::JumpIfZero { target, condition } => {
+                write!(f, "    JumpIfZero {target} ${condition}")?;
             }
             Directive::JumpAndActivateFrame {
                 target,

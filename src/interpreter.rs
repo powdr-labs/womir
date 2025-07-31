@@ -1440,6 +1440,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         should_inc_pc = false;
                     }
                 }
+                Directive::JumpIfZero { target, condition } => {
+                    let target = self.labels[&target].pc;
+                    let cond = self.get_vrom_relative_u32(condition..condition + 1);
+                    if cond == 0 {
+                        self.pc = target;
+                        should_inc_pc = false;
+                    }
+                }
                 Directive::Jump { target } => {
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
