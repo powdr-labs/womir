@@ -1003,7 +1003,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
                 /*println!("Function: {func_idx}");
                 for d in definition.directives.iter() {
-                    println!("{d}");
+                    println!("{d:?}");
                 }*/
 
                 ctx.functions.push(definition);
