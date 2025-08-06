@@ -3,7 +3,6 @@ use wasmparser::Operator as Op;
 use crate::loader::flattening::{Generators, RegisterGenerator, ReturnInfo, TrapReason, Tree};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt::Debug,
     ops::Range,
 };
 
@@ -42,7 +41,7 @@ pub struct ReturnInfosToCopy<'a> {
 /// TODO: find a way to make calling conventions and interface registers allocation
 /// part of this trait.
 pub trait Settings<'a> {
-    type Directive: Debug + Clone;
+    type Directive;
 
     fn bytes_per_word() -> u32;
 

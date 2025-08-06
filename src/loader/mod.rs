@@ -1001,11 +1001,6 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                     flattening::flatten_dag::<S>(&ctx, &mut label_gen, blockless_dag, func_idx);
                 stats.register_copies_saved += copies_saved;
 
-                /*println!("Function: {func_idx}");
-                for d in definition.directives.iter() {
-                    println!("{d:?}");
-                }*/
-
                 ctx.functions.push(definition);
             }
             Payload::DataSection(section) => {
