@@ -57,11 +57,42 @@ pub trait Settings<'a> {
     /// The `saved_fps` set contains the depths of the frame pointers that
     /// must be saved for the loop. Relative to the loop frame iself, i.e. 1 is
     /// the parent frame, 2 is the grandparent frame, etc.
+    ///
+    /// The default implementation allocates packedly, in order:
+    /// - return PC (if needed)
+    /// - return frame pointer (if needed)
+    /// - saved frame pointers, in the order of the depths in the `saved_fps` set.
     fn allocate_loop_frame_slots(
         &self,
         need_ret_info: bool,
         saved_fps: BTreeSet<u32>,
-    ) -> (RegisterGenerator<'a, Self>, LoopFrameLayout);
+    ) -> (RegisterGenerator<'a, Self>, LoopFrameLayout) {
+        let mut rgen = RegisterGenerator::new();
+
+        let ret_info = need_ret_info.then(|| {
+            // Allocate the return PC and frame pointer for the loop.
+            let ret_pc = rgen.allocate_words(Self::words_per_ptr());
+            let ret_fp = rgen.allocate_words(Self::words_per_ptr());
+            ReturnInfo { ret_pc, ret_fp }
+        });
+
+        // Allocate the slots for the saved frame pointers.
+        let saved_fps = saved_fps
+            .into_iter()
+            .map(|depth| {
+                let outer_fp = rgen.allocate_words(Self::words_per_ptr());
+                (depth, outer_fp)
+            })
+            .collect();
+
+        (
+            rgen,
+            LoopFrameLayout {
+                saved_fps,
+                ret_info,
+            },
+        )
+    }
 
     /// Test if a directive is a plain jump to a local frame label.
     fn to_plain_local_jump(directive: Self::Directive) -> Result<String, Self::Directive>;
