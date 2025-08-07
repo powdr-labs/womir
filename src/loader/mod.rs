@@ -165,7 +165,7 @@ impl InitialMemory {
 }
 
 /// The table entry high level layout.
-struct FunctionRef<'a, S: Settings<'a>> {
+struct FunctionRef<'a, S: Settings<'a> + ?Sized> {
     /// The unique type ID of the function type.
     type_id: u32,
     /// The function index.
@@ -173,7 +173,7 @@ struct FunctionRef<'a, S: Settings<'a>> {
     settings: PhantomData<(&'a (), S)>,
 }
 
-impl<'a, S: Settings<'a>> FunctionRef<'a, S> {
+impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
     fn new(type_id: u32, func_index: u32) -> Self {
         FunctionRef {
             type_id,
@@ -192,7 +192,7 @@ impl<'a, S: Settings<'a>> FunctionRef<'a, S> {
 /// to the correct size in the implementations of the instructions that use function references.
 ///
 /// This struct is used to tell where, inside an entry, each of the values is stored.
-impl<'a, S: Settings<'a>> FunctionRef<'a, S> {
+impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
     const TYPE_ID: usize = 0;
     const FUNC_FRAME_SIZE: usize = 1;
     const FUNC_ADDR: usize = 2;

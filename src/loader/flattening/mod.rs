@@ -137,7 +137,7 @@ pub struct RegisterGenerator<'a, S: Settings<'a> + ?Sized> {
     settings: PhantomData<(&'a (), S)>,
 }
 
-impl<'a, S: Settings<'a>> RegisterGenerator<'a, S> {
+impl<'a, S: Settings<'a> + ?Sized> RegisterGenerator<'a, S> {
     pub fn new() -> Self {
         Self {
             next_available: 0,
@@ -1307,7 +1307,7 @@ pub fn func_idx_to_label(func_idx: u32) -> String {
     format_label(func_idx, LabelType::Function)
 }
 
-fn byte_size<'a, S: Settings<'a>>(ty: ValType) -> u32 {
+fn byte_size<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
     match ty {
         ValType::I32 | ValType::F32 => 4,
         ValType::I64 | ValType::F64 => 8,
@@ -1328,14 +1328,14 @@ fn split_func_ref_regs<'a, S: Settings<'a>>(func_ref_reg: Range<u32>) -> [Range<
     [type_index, func_addr, func_frame_size]
 }
 
-fn word_count<'a, S: Settings<'a>>(byte_size: u32) -> u32 {
+fn word_count<'a, S: Settings<'a> + ?Sized>(byte_size: u32) -> u32 {
     byte_size.div_ceil(S::bytes_per_word())
 }
 
-fn assert_ptr_size<'a, S: Settings<'a>>(ptr: &Range<u32>) {
+fn assert_ptr_size<'a, S: Settings<'a> + ?Sized>(ptr: &Range<u32>) {
     assert_eq!(ptr.len(), S::words_per_ptr() as usize);
 }
 
-pub fn word_count_type<'a, S: Settings<'a>>(ty: ValType) -> u32 {
+pub fn word_count_type<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
     word_count::<S>(byte_size::<S>(ty))
 }
