@@ -1,13 +1,11 @@
 use crate::{
     linker,
     loader::flattening::{
-        Generators, RegisterGenerator, ReturnInfo, TrapReason,
-        settings::{
-            ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
-        },
+        Generators, TrapReason,
+        settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings},
     },
 };
-use std::{collections::BTreeSet, fmt::Display, ops::Range};
+use std::{fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
 type Gen<'a, 'b> = Generators<'a, 'b, GenericIrSetting>;
