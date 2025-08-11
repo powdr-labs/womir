@@ -25,6 +25,13 @@ impl From<u32> for VRomValue {
     }
 }
 
+// How a null reference is represented in the VROM
+const NULL_REF: [u32; 3] = [
+    u32::MAX, // Function type: this is an invalid function type, so that calling a null reference will trap
+    0,        // Frame size: any value here would do, so we choose 0
+    0,        // Address: 0 is an invalid function address because START_ROM_ADDR > 0
+];
+
 pub struct Interpreter<'a, E: ExternalFunctions> {
     // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
@@ -63,9 +70,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let label = func_idx_to_label(*func_idx);
                         labels[&label].frame_size.unwrap()
                     }
-                    MemoryEntry::NullFuncType => u32::MAX /* this is an invalid function type, so that calling a null reference will trap */,
-                    MemoryEntry::NullFuncFrameSize => 0 /* any value here will do */,
-                    MemoryEntry::NullFuncAddr => 0 /* 0 is an invalid function address because START_ROM_ADDR > 0 */,
+                    MemoryEntry::NullFuncType => NULL_REF[FunctionRef::<S>::TYPE_ID],
+                    MemoryEntry::NullFuncFrameSize => NULL_REF[FunctionRef::<S>::FUNC_FRAME_SIZE],
+                    MemoryEntry::NullFuncAddr => NULL_REF[FunctionRef::<S>::FUNC_ADDR],
                 };
 
                 if value == 0 {
@@ -1364,6 +1371,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             &[func_type, frame_size, addr],
                         );
                     }
+                    Op::RefNull { .. } => {
+                        self.set_vrom_relative_range(output.unwrap(), &NULL_REF);
+                    }
                     Op::RefIsNull => {
                         let mut input = inputs[0].clone();
                         let output = output.unwrap();
@@ -1372,7 +1382,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         input.start += FunctionRef::<S>::FUNC_ADDR as u32;
                         let addr = self.get_vrom_relative_u32(input);
 
-                        self.set_vrom_relative_u32(output, if addr == 0 { 1 } else { 0 });
+                        self.set_vrom_relative_u32(
+                            output,
+                            if addr == NULL_REF[FunctionRef::<S>::FUNC_ADDR] {
+                                1
+                            } else {
+                                0
+                            },
+                        );
                     }
                     _ => todo!("Unsupported WASM operator: {op:?}"),
                 },

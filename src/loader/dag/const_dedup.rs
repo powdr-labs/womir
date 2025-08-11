@@ -3,7 +3,7 @@ use std::{
     hash::Hash,
 };
 
-use wasmparser::{Operator as Op, ValType};
+use wasmparser::{Operator as Op, RefType, ValType};
 
 use crate::loader::{
     BlockKind,
@@ -29,6 +29,7 @@ struct HashableConst<'a>(Op<'a>);
 impl HashableConst<'_> {
     fn value_type(&self) -> ValType {
         match self.0 {
+            Op::RefNull { .. } => ValType::Ref(RefType::FUNCREF),
             Op::I32Const { .. } => ValType::I32,
             Op::I64Const { .. } => ValType::I64,
             Op::F32Const { .. } => ValType::F32,
@@ -43,6 +44,9 @@ impl Hash for HashableConst<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::mem::discriminant(&self.0).hash(state);
         match self.0 {
+            Op::RefNull { .. } => {
+                // the attributes of RefNull are not part of WASM 2.0 spec, so we ignore it
+            }
             Op::I32Const { value } => value.hash(state),
             Op::I64Const { value } => value.hash(state),
             Op::F32Const { value } => value.bits().hash(state),
@@ -96,7 +100,8 @@ fn recursive_deduplication<'a>(
 
         match &mut node.operation {
             Operation::Inputs => unreachable!(),
-            Operation::WASMOp(op @ Op::I32Const { .. })
+            Operation::WASMOp(op @ Op::RefNull { .. })
+            | Operation::WASMOp(op @ Op::I32Const { .. })
             | Operation::WASMOp(op @ Op::I64Const { .. })
             | Operation::WASMOp(op @ Op::F32Const { .. })
             | Operation::WASMOp(op @ Op::F64Const { .. })
