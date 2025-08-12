@@ -528,7 +528,6 @@ mod tests {
             "externref" => {
                 let val = val.value.as_str().unwrap();
                 if val == "null" {
-                    // Our null reference representation.
                     NULL_REF.into()
                 } else {
                     // use three bytes to be compatible with our `funcref`
@@ -540,8 +539,7 @@ mod tests {
             "funcref" => {
                 let val = val.value.as_str().unwrap();
                 if val == "null" {
-                    // Our null reference representation:
-                    vec![u32::MAX, 0, 0]
+                    NULL_REF.into()
                 } else {
                     panic!("Unexpected funcref value: {val}");
                 }
