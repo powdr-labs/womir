@@ -26,7 +26,7 @@ impl From<u32> for VRomValue {
 }
 
 // How a null reference is represented in the VROM
-const NULL_REF: [u32; 3] = [
+pub const NULL_REF: [u32; 3] = [
     u32::MAX, // Function type: this is an invalid function type, so that calling a null reference will trap
     0,        // Frame size: any value here would do, so we choose 0
     0,        // Address: 0 is an invalid function address because START_ROM_ADDR > 0

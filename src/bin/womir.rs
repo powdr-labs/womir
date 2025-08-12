@@ -79,6 +79,7 @@ mod tests {
     use std::process::Command;
     use tempfile::NamedTempFile;
     use test_log::test;
+    use womir::interpreter::NULL_REF;
 
     fn test_interpreter(
         path: &str,
@@ -527,11 +528,13 @@ mod tests {
             "externref" => {
                 let val = val.value.as_str().unwrap();
                 if val == "null" {
-                    // Our null reference representation:
-                    vec![u32::MAX, 0, 0]
+                    // Our null reference representation.
+                    NULL_REF.into()
                 } else {
                     // use three bytes to be compatible with our `funcref`
-                    vec![0, 0, val.parse::<u32>().unwrap()]
+                    // we don't care much about its representation, only
+                    // that it is not a null reference.
+                    vec![0, val.parse::<u32>().unwrap(), 1]
                 }
             }
             "funcref" => {
