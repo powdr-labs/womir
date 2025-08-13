@@ -1019,7 +1019,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(c, r);
                     }
-                    Op::Select | Op::TypedSelect { .. } => {
+                    Op::Select => {
                         let condition = self.get_vrom_relative_u32(inputs[2].clone());
 
                         let selected = inputs[if condition != 0 { 0 } else { 1 }].clone();

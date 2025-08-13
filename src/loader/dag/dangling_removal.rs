@@ -492,8 +492,7 @@ fn may_have_side_effect(node: &Node) -> bool {
         | Op::RefIsNull
         | Op::RefFunc { .. }
         // Select is pure.
-        | Op::Select
-        | Op::TypedSelect { .. }
+        | Op::Select { .. }
         // Global get is pure.
         | Op::GlobalGet { .. }
         // Memory and table reads have no side-effects, although I am not sure they are strictly "pure".
