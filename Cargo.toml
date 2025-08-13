@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 derive-where = "1.4.0"
 env_logger = "0.10.0"
-itertools = "0.13"
+itertools = "0.14"
 log = "0.4.17"
 wasmparser = { version = "0.235", default-features = false, features = [
     'std',

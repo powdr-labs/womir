@@ -79,6 +79,7 @@ mod tests {
     use std::process::Command;
     use tempfile::NamedTempFile;
     use test_log::test;
+    use womir::interpreter::NULL_REF;
 
     fn test_interpreter(
         path: &str,
@@ -284,6 +285,17 @@ mod tests {
     fn test_wasm_loop() {
         test_wasm("wasm_testsuite/loop.wast", None);
     }
+
+    #[test]
+    fn test_wasm_ref_is_null() {
+        test_wasm("wasm_testsuite/ref_is_null.wast", None);
+    }
+
+    #[test]
+    fn test_wasm_ref_null() {
+        test_wasm("wasm_testsuite/ref_null.wast", None);
+    }
+
     #[test]
     fn test_wasm_return() {
         test_wasm("wasm_testsuite/return.wast", None);
@@ -513,8 +525,25 @@ mod tests {
                 let v = val.value.as_str().unwrap().parse::<u64>().unwrap();
                 vec![v as u32, (v >> 32) as u32]
             }
-            // three bytes to be compatible with our `funcref`
-            "externref" => vec![0, 0, val.value.as_str().unwrap().parse::<u32>().unwrap()],
+            "externref" => {
+                let val = val.value.as_str().unwrap();
+                if val == "null" {
+                    NULL_REF.into()
+                } else {
+                    // use three bytes to be compatible with our `funcref`
+                    // we don't care much about its representation, only
+                    // that it is not a null reference.
+                    vec![0, val.parse::<u32>().unwrap(), 1]
+                }
+            }
+            "funcref" => {
+                let val = val.value.as_str().unwrap();
+                if val == "null" {
+                    NULL_REF.into()
+                } else {
+                    panic!("Unexpected funcref value: {val}");
+                }
+            }
             _ => todo!(),
         }
     }
