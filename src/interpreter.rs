@@ -6,7 +6,10 @@ use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::generic_ir::{Directive, GenericIrSetting as S};
-use crate::loader::{Global, Program, Segment, WASM_PAGE_SIZE, func_idx_to_label, word_count_type};
+use crate::loader::{
+    FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE, func_idx_to_label,
+    word_count_type,
+};
 use crate::{linker, word_count_types};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +24,13 @@ impl From<u32> for VRomValue {
         VRomValue::Concrete(value)
     }
 }
+
+// How a null reference is represented in the VROM
+pub const NULL_REF: [u32; 3] = [
+    u32::MAX, // Function type: this is an invalid function type, so that calling a null reference will trap
+    0,        // Frame size: any value here would do, so we choose 0
+    0,        // Address: 0 is an invalid function address because START_ROM_ADDR > 0
+];
 
 pub struct Interpreter<'a, E: ExternalFunctions> {
     // TODO: maybe these 4 initial fields should be unique per `run()` call?
@@ -42,7 +52,8 @@ pub trait ExternalFunctions {
 
 impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     pub fn new(program: Program<'a, S>, external_functions: E) -> Self {
-        let (flat_program, labels) = linker::link(&program.functions, 0x1);
+        const START_ROM_ADDR: u32 = 0x1;
+        let (flat_program, labels) = linker::link(&program.functions, START_ROM_ADDR);
 
         let ram = program
             .c
@@ -50,15 +61,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             .iter()
             .filter_map(|(addr, value)| {
                 let value = match value {
-                    crate::loader::MemoryEntry::Value(v) => *v,
-                    crate::loader::MemoryEntry::FuncAddr(idx) => {
+                    MemoryEntry::Value(v) => *v,
+                    MemoryEntry::FuncAddr(idx) => {
                         let label = func_idx_to_label(*idx);
                         labels[&label].pc
                     }
-                    crate::loader::MemoryEntry::FuncFrameSize(func_idx) => {
+                    MemoryEntry::FuncFrameSize(func_idx) => {
                         let label = func_idx_to_label(*func_idx);
                         labels[&label].frame_size.unwrap()
                     }
+                    MemoryEntry::NullFuncType => NULL_REF[FunctionRef::<S>::TYPE_ID],
+                    MemoryEntry::NullFuncFrameSize => NULL_REF[FunctionRef::<S>::FUNC_FRAME_SIZE],
+                    MemoryEntry::NullFuncAddr => NULL_REF[FunctionRef::<S>::FUNC_ADDR],
                 };
 
                 if value == 0 {
@@ -1333,6 +1347,50 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let output_reg = output.unwrap();
                         self.set_vrom_relative_range(output_reg, &entry);
                     }
+                    Op::TableSet { table } => {
+                        assert_eq!(inputs[0].len(), 1);
+                        let index = self.get_vrom_relative_u32(inputs[0].clone());
+                        let value = self
+                            .get_vrom_relative_range(inputs[1].clone())
+                            .collect_array()
+                            .unwrap();
+
+                        let mut table =
+                            TableAccessor::new(self.program.c.tables[table as usize], self);
+                        table
+                            .set_entry(index, value)
+                            .expect("TableSet: index out of bounds");
+                    }
+                    Op::RefFunc { function_index } => {
+                        let func_type = self.program.c.get_func_type(function_index).unique_id;
+                        let frame_size = self.program.functions[function_index as usize].frame_size;
+                        let addr = self.labels[&func_idx_to_label(function_index)].pc;
+
+                        self.set_vrom_relative_range(
+                            output.unwrap(),
+                            &[func_type, frame_size, addr],
+                        );
+                    }
+                    Op::RefNull { .. } => {
+                        self.set_vrom_relative_range(output.unwrap(), &NULL_REF);
+                    }
+                    Op::RefIsNull => {
+                        let mut input = inputs[0].clone();
+                        let output = output.unwrap();
+
+                        // Read the address part of the reference struct
+                        input.start += FunctionRef::<S>::FUNC_ADDR as u32;
+                        let addr = self.get_vrom_relative_u32(input);
+
+                        self.set_vrom_relative_u32(
+                            output,
+                            if addr == NULL_REF[FunctionRef::<S>::FUNC_ADDR] {
+                                1
+                            } else {
+                                0
+                            },
+                        );
+                    }
                     _ => todo!("Unsupported WASM operator: {op:?}"),
                 },
                 Directive::AllocateFrameI {
@@ -1807,5 +1865,16 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
         let frame_size = self.interpreter.get_ram(base_addr + 4);
         let pc = self.interpreter.get_ram(base_addr + 8);
         Ok([type_idx, frame_size, pc])
+    }
+
+    fn set_entry(&mut self, index: u32, value: [u32; 3]) -> Result<(), ()> {
+        if index >= self.size {
+            return Err(());
+        }
+        let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
+        self.interpreter.set_ram(base_addr, value[0]);
+        self.interpreter.set_ram(base_addr + 4, value[1]);
+        self.interpreter.set_ram(base_addr + 8, value[2]);
+        Ok(())
     }
 }

@@ -69,6 +69,12 @@ pub enum MemoryEntry {
     FuncAddr(u32),
     /// Refers to the function frame size of a given function index.
     FuncFrameSize(u32),
+    /// Null value for the function type in a null reference.
+    NullFuncType,
+    /// Null value for the frame size in a null reference.
+    NullFuncFrameSize,
+    /// Null value for the function address in a null reference.
+    NullFuncAddr,
 }
 
 /// Helper struct to track unallocated memory.
@@ -83,12 +89,12 @@ impl MemoryAllocator {
         MemoryAllocator { next_free: 0 }
     }
 
-    fn allocate_var(&mut self, val_type: ValType) -> AllocatedVar {
+    fn allocate_var<'a, S: Settings<'a> + ?Sized>(&mut self, val_type: ValType) -> AllocatedVar {
         let var = AllocatedVar {
             val_type,
             address: self.next_free,
         };
-        self.next_free = self.next_free.checked_add(sz(val_type)).unwrap();
+        self.next_free = self.next_free.checked_add(sz::<S>(val_type)).unwrap();
         var
     }
 
@@ -165,21 +171,27 @@ impl InitialMemory {
 }
 
 /// The table entry high level layout.
-struct FunctionRef<'a, S: Settings<'a> + ?Sized> {
-    /// The unique type ID of the function type.
-    type_id: u32,
-    /// The function index.
-    func_index: u32,
-    settings: PhantomData<(&'a (), S)>,
+pub enum FunctionRef<'a, S: Settings<'a> + ?Sized> {
+    Null,
+    NonNull {
+        /// The unique type ID of the function type.
+        type_id: u32,
+        /// The function index.
+        func_index: u32,
+        settings: PhantomData<(&'a (), S)>,
+    },
 }
 
 impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
     fn new(type_id: u32, func_index: u32) -> Self {
-        FunctionRef {
+        FunctionRef::NonNull {
             type_id,
             func_index,
             settings: PhantomData,
         }
+    }
+    fn null() -> Self {
+        FunctionRef::Null
     }
 }
 
@@ -193,27 +205,43 @@ impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
 ///
 /// This struct is used to tell where, inside an entry, each of the values is stored.
 impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
-    const TYPE_ID: usize = 0;
-    const FUNC_FRAME_SIZE: usize = 1;
-    const FUNC_ADDR: usize = 2;
+    pub const TYPE_ID: usize = 0;
+    pub const FUNC_FRAME_SIZE: usize = 1;
+    pub const FUNC_ADDR: usize = 2;
 
     fn to_memory_entries(&self) -> Vec<MemoryEntry> {
         // If needed, this can be made to support non-power-of-two word sizes.
         // Which I doubt will ever be needed. People are not this crazy.
         assert!(S::bytes_per_word().is_power_of_two());
 
+        let (ty, frame_size, addr) = match self {
+            FunctionRef::Null => (
+                MemoryEntry::NullFuncType,
+                MemoryEntry::NullFuncFrameSize,
+                MemoryEntry::NullFuncAddr,
+            ),
+            FunctionRef::NonNull {
+                type_id,
+                func_index,
+                ..
+            } => (
+                MemoryEntry::Value(*type_id),
+                MemoryEntry::FuncFrameSize(*func_index),
+                MemoryEntry::FuncAddr(*func_index),
+            ),
+        };
         let mut entries = Vec::with_capacity(Self::total_byte_size() as usize / 4);
-        entries.push(MemoryEntry::Value(self.type_id));
+        entries.push(ty);
         entries.extend(itertools::repeat_n(
             MemoryEntry::Value(0),
             Self::u32_padding(),
         ));
-        entries.push(MemoryEntry::FuncFrameSize(self.func_index));
+        entries.push(frame_size);
         entries.extend(itertools::repeat_n(
             MemoryEntry::Value(0),
             Self::u32_padding(),
         ));
-        entries.push(MemoryEntry::FuncAddr(self.func_index));
+        entries.push(addr);
         entries.extend(itertools::repeat_n(
             MemoryEntry::Value(0),
             Self::u32_padding(),
@@ -394,8 +422,7 @@ impl<'a, S: Settings<'a>> Program<'a, S> {
             }
             Operator::RefNull { .. } => {
                 assert!(matches!(val_type, ValType::Ref(_)));
-                // Since (0, 0) is a valid function reference, lets use u32::MAX to represent null.
-                vec![MemoryEntry::Value(u32::MAX), MemoryEntry::Value(u32::MAX)]
+                FunctionRef::<S>::null().to_memory_entries()
             }
             Operator::GlobalGet { global_index } => {
                 let Global::Immutable(op) = &self.c.globals[*global_index as usize] else {
@@ -427,15 +454,16 @@ impl<'a, S: Settings<'a>> Program<'a, S> {
 }
 
 /// Type size, in bytes
-const fn sz(val_type: ValType) -> u32 {
+fn sz<'a, S: Settings<'a> + ?Sized>(val_type: ValType) -> u32 {
     match val_type {
         ValType::I32 => 4,
         ValType::I64 => 8,
         ValType::F32 => 4,
         ValType::F64 => 8,
         ValType::V128 => 16,
-        // References don't have a visible size in the WASM memory.
-        ValType::Ref(_) => panic!("Cannot get size of reference type"),
+        // References don't have a representable size in the WASM linear memory,
+        // but they can be stored in globals, and globals may sit in the machine memory.
+        ValType::Ref(_) => FunctionRef::<S>::total_byte_size(),
     }
 }
 
@@ -586,6 +614,9 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
                     let mut initial = Vec::with_capacity(num_types);
                     let (unique_id, ty) = types.next().unwrap();
+                    if unique_id == u32::MAX {
+                        panic!("Too many unique function types!");
+                    }
                     initial.push((unique_id, Rc::new(FuncType { unique_id, ty })));
 
                     // I tried doing this with itertools' `chunk_by()`, but lifetimes didn't let me.
@@ -802,7 +833,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
                     let global = if global.ty.mutable {
                         // Initialize the global variables
-                        let var = mem_allocator.allocate_var(ty);
+                        let var = mem_allocator.allocate_var::<S>(ty);
                         for (idx, word) in words.into_iter().enumerate() {
                             initial_memory.insert(var.address + 4 * idx as u32, word);
                         }

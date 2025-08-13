@@ -51,7 +51,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct WriteOnceASM<D> {
     pub func_idx: u32,
-    pub _frame_size: u32,
+    pub frame_size: u32,
     pub directives: Vec<D>,
 }
 
@@ -268,7 +268,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     (
         WriteOnceASM {
             func_idx,
-            _frame_size: frame_size,
+            frame_size,
             directives,
         },
         number_of_saved_copies,
