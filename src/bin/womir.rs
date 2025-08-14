@@ -322,6 +322,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_select() {
+        test_wasm("wasm_testsuite/select.wast", None);
+    }
+
+    #[test]
     fn test_wasm_unwind() {
         test_wasm("wasm_testsuite/unwind.wast", None);
     }

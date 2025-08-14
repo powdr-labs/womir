@@ -748,6 +748,11 @@ impl StackTracker<'_, '_> {
                 assert_eq!(ty, self.stack_type(len - 2));
                 (vec![ty, ty, ValType::I32], vec![ty])
             }
+            Op::TypedSelect { ty } => {
+                // In the specs, select is specified as a single instruction, but
+                // there are 2 different opcodes, and wasmparser distinguishes between them.
+                (vec![*ty, *ty, ValType::I32], vec![*ty])
+            }
 
             // # Variable instructions
             Op::GlobalGet { global_index } => {
