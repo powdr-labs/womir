@@ -18,8 +18,9 @@ use dag::Dag;
 use flattening::WriteOnceASM;
 use itertools::Itertools;
 use wasmparser::{
-    CompositeInnerType, ElementItems, FuncValidatorAllocations, LocalsReader, MemoryType, Operator,
-    Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator, WasmFeatures,
+    CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, LocalsReader,
+    MemoryType, Operator, Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator,
+    WasmFeatures,
 };
 
 use crate::loader::{
@@ -552,12 +553,13 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
     let mut initial_memory = InitialMemory::new();
 
-    let mut label_gen = 0..;
-
     let mut stats = Statistics::default();
 
     let mut validator = Validator::new_with_features(WasmFeatures::WASM2);
     let mut validator_allocs = FuncValidatorAllocations::default();
+
+    // We delay parsing the functions to after the entire module has been loaded.
+    let mut unparsed_functions = Vec::new();
 
     // The payloads are processed in the order they appear in the file, so each variable written
     // in one step is available in the next steps.
@@ -656,15 +658,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                     // We actually just support function imports, so we ignore the rest.
                     if let TypeRef::Func(type_idx) = import.ty {
                         log::debug!("Imported syscall: {}.{}", import.module, import.name);
-
-                        let func_idx = ctx.c.imported_functions.len() as u32;
                         ctx.c.func_types.push(type_idx);
                         ctx.c.imported_functions.push((import.module, import.name));
-
-                        let (wrapper_dag, copies_saved) =
-                            generate_imported_func_wrapper::<S>(&ctx, &mut label_gen, func_idx);
-                        stats.register_copies_saved += copies_saved;
-                        ctx.functions.push(wrapper_dag);
                     } else if import.module == "spectest" {
                         // To run the tests, the runtime must provide a few basic imports
                         // of the `spectest` module.
@@ -988,10 +983,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 );
             }
             Payload::CodeSectionEntry(function) => {
-                // By the time we get here, the ctx will be mostly complete,
-                // because all previous sections have been processed.
-
-                let func_idx = ctx.functions.len() as u32;
+                let func_idx = ctx.c.exported_functions.len() + unparsed_functions.len();
                 log::debug!("Code Section Entry found, function {func_idx}");
                 let mut func_validator = validator
                     .code_section_entry(&function)?
@@ -999,40 +991,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 func_validator.validate(&function)?;
                 validator_allocs = func_validator.into_allocations();
 
-                let func_type = ctx.c.get_func_type(func_idx);
-                let locals_types = read_locals(func_type, function.get_locals_reader()?)?;
-
-                // Loads the function to memory in the BlockTree format.
-                let block_tree =
-                    BlockTree::load_function(&ctx.c, function.get_operators_reader()?)?;
-
-                // Expose the reads and writes to locals inside blocks as inputs and outputs.
-                let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
-
-                // Build the DAG
-                let mut dag = Dag::new(&ctx.c, &func_type.ty, &locals_types, lifted_blocks)?;
-
-                // Optimization pass: deduplicate const definitions in the DAG.
-                stats.constants_deduplicated += dag::const_dedup::deduplicate_constants(&mut dag);
-
-                loop {
-                    // Optimization pass: remove unused const nodes.
-                    let pass_stats = dag::dangling_removal::clean_dangling_outputs(&mut dag);
-                    stats.dangling_nodes_removed += pass_stats.removed_nodes;
-                    stats.block_outputs_removed += pass_stats.removed_block_outputs;
-
-                    if pass_stats.removed_nodes == 0 && pass_stats.removed_block_outputs == 0 {
-                        break;
-                    }
-                }
-
-                let blockless_dag = blockless_dag::BlocklessDag::new(dag, &mut label_gen);
-
-                let (definition, copies_saved) =
-                    flattening::flatten_dag::<S>(&ctx, &mut label_gen, blockless_dag, func_idx);
-                stats.register_copies_saved += copies_saved;
-
-                ctx.functions.push(definition);
+                unparsed_functions.push(function);
             }
             Payload::DataSection(section) => {
                 log::debug!("Data Section found");
@@ -1166,6 +1125,25 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 
     ctx.c.initial_memory = initial_memory.0;
 
+    // By the time we get here, the ctx will be complete except for the functions.
+    // We are ready to actually emit them:
+    let mut label_gen = 0..;
+
+    // Emit the wrappers for imported functions, to allow for indirect call of them:
+    for function_idx in 0..(ctx.c.imported_functions.len() as u32) {
+        let (wrapper_dag, copies_saved) =
+            generate_imported_func_wrapper(&ctx, &mut label_gen, function_idx);
+        stats.register_copies_saved += copies_saved;
+        ctx.functions.push(wrapper_dag);
+    }
+
+    // Parse and emit the function defined in the module
+    for function in unparsed_functions {
+        let function_idx = ctx.functions.len() as u32;
+        let function = parse_function(&ctx, &mut stats, &mut label_gen, function_idx, function)?;
+        ctx.functions.push(function);
+    }
+
     log::info!(
         "WASM module loaded successfully loaded with {} functions!\nOptimization statistics:\n - {} register copies saved\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed",
         ctx.functions.len(),
@@ -1226,6 +1204,48 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
     // This will not turn into an infinite recursion because a Call
     // to an imported function if flattened into an ImportedCall.
     flattening::flatten_dag::<S>(ctx, label_gen, dag, function_idx)
+}
+
+fn parse_function<'a, S: Settings<'a>>(
+    ctx: &Program<'a, S>,
+    stats: &mut Statistics,
+    label_gen: &mut RangeFrom<u32>,
+    func_idx: u32,
+    function: FunctionBody<'a>,
+) -> wasmparser::Result<WriteOnceASM<S::Directive>> {
+    let func_type = ctx.c.get_func_type(func_idx);
+    let locals_types = read_locals(func_type, function.get_locals_reader()?)?;
+
+    // Loads the function to memory in the BlockTree format.
+    let block_tree = BlockTree::load_function(&ctx.c, function.get_operators_reader()?)?;
+
+    // Expose the reads and writes to locals inside blocks as inputs and outputs.
+    let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
+
+    // Build the DAG
+    let mut dag = Dag::new(&ctx.c, &func_type.ty, &locals_types, lifted_blocks)?;
+
+    // Optimization pass: deduplicate const definitions in the DAG.
+    stats.constants_deduplicated += dag::const_dedup::deduplicate_constants(&mut dag);
+
+    loop {
+        // Optimization pass: remove unused const nodes.
+        let pass_stats = dag::dangling_removal::clean_dangling_outputs(&mut dag);
+        stats.dangling_nodes_removed += pass_stats.removed_nodes;
+        stats.block_outputs_removed += pass_stats.removed_block_outputs;
+
+        if pass_stats.removed_nodes == 0 && pass_stats.removed_block_outputs == 0 {
+            break;
+        }
+    }
+
+    let blockless_dag = blockless_dag::BlocklessDag::new(dag, label_gen);
+
+    let (definition, copies_saved) =
+        flattening::flatten_dag::<S>(&ctx, label_gen, blockless_dag, func_idx);
+    stats.register_copies_saved += copies_saved;
+
+    Ok(definition)
 }
 
 /// Reads the function arguments and the explicit locals declaration.
