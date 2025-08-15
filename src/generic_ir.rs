@@ -8,7 +8,7 @@ use crate::{
 use std::{fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
-type Gen<'a, 'b> = Context<'a, 'b, GenericIrSetting>;
+type Ctx<'a, 'b> = Context<'a, 'b, GenericIrSetting>;
 
 pub struct GenericIrSetting;
 
@@ -32,20 +32,20 @@ impl<'a> Settings<'a> for GenericIrSetting {
         true
     }
 
-    fn emit_label(&self, _g: &mut Gen, name: String, frame_size: Option<u32>) -> Directive<'a> {
+    fn emit_label(&self, _c: &mut Ctx, name: String, frame_size: Option<u32>) -> Directive<'a> {
         Directive::Label {
             id: name,
             frame_size,
         }
     }
 
-    fn emit_trap(&self, _g: &mut Gen, trap: TrapReason) -> Directive<'a> {
+    fn emit_trap(&self, _c: &mut Ctx, trap: TrapReason) -> Directive<'a> {
         Directive::Trap { reason: trap }
     }
 
     fn emit_allocate_label_frame(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         label: String,
         result_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -57,7 +57,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_allocate_value_frame(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         frame_size_ptr: Range<u32>,
         result_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -67,7 +67,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
         }
     }
 
-    fn emit_copy(&self, _g: &mut Gen, src_ptr: Range<u32>, dest_ptr: Range<u32>) -> Directive<'a> {
+    fn emit_copy(&self, _c: &mut Ctx, src_ptr: Range<u32>, dest_ptr: Range<u32>) -> Directive<'a> {
         Directive::Copy {
             src_word: src_ptr.start,
             dest_word: dest_ptr.start,
@@ -76,7 +76,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_copy_into_frame(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         src_ptr: Range<u32>,
         dest_frame_ptr: Range<u32>,
         dest_offset: Range<u32>,
@@ -90,7 +90,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_jump_into_loop(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         loop_label: String,
         loop_frame_ptr: Range<u32>,
         ret_info_to_copy: Option<ReturnInfosToCopy>,
@@ -137,7 +137,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_conditional_jump(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         condition_type: JumpCondition,
         label: String,
         condition_ptr: Range<u32>,
@@ -156,7 +156,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_conditional_jump_cmp_immediate(
         &self,
-        g: &mut Gen,
+        c: &mut Ctx,
         cmp: ComparisonFunction,
         value_ptr: Range<u32>,
         immediate: u32,
@@ -168,8 +168,8 @@ impl<'a> Settings<'a> for GenericIrSetting {
             ComparisonFunction::LessThanUnsigned => Op::I32LtU,
         };
 
-        let const_value = g.register_gen.allocate_type(ValType::I32);
-        let comparison = g.register_gen.allocate_type(ValType::I32);
+        let const_value = c.register_gen.allocate_type(ValType::I32);
+        let comparison = c.register_gen.allocate_type(ValType::I32);
         vec![
             Directive::WASMOp {
                 op: Op::I32Const {
@@ -190,7 +190,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
         ]
     }
 
-    fn emit_relative_jump(&self, _g: &mut Gen, offset_ptr: Range<u32>) -> Directive<'a> {
+    fn emit_relative_jump(&self, _c: &mut Ctx, offset_ptr: Range<u32>) -> Directive<'a> {
         Directive::JumpOffset {
             offset: offset_ptr.start,
         }
@@ -198,7 +198,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_jump_out_of_loop(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         target_label: String,
         target_frame_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -212,7 +212,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_return(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         ret_pc_ptr: Range<u32>,
         caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -224,7 +224,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_imported_call(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         module: &'a str,
         function: &'a str,
         inputs: Vec<Range<u32>>,
@@ -240,7 +240,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_function_call(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         function_label: String,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -256,7 +256,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_indirect_call(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         target_pc_ptr: Range<u32>,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -272,7 +272,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_table_get(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         table_idx: u32,
         entry_idx_ptr: Range<u32>,
         dest_ptr: Range<u32>,
@@ -286,7 +286,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
 
     fn emit_wasm_op(
         &self,
-        _g: &mut Gen,
+        _c: &mut Ctx,
         op: Op<'a>,
         inputs: Vec<Range<u32>>,
         output: Option<Range<u32>>,
