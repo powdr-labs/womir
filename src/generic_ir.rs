@@ -1,14 +1,14 @@
 use crate::{
     linker,
     loader::flattening::{
-        Generators, TrapReason,
+        Context, TrapReason,
         settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings},
     },
 };
 use std::{fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
-type Gen<'a, 'b> = Generators<'a, 'b, GenericIrSetting>;
+type Gen<'a, 'b> = Context<'a, 'b, GenericIrSetting>;
 
 pub struct GenericIrSetting;
 
@@ -168,8 +168,8 @@ impl<'a> Settings<'a> for GenericIrSetting {
             ComparisonFunction::LessThanUnsigned => Op::I32LtU,
         };
 
-        let const_value = g.r.allocate_type(ValType::I32);
-        let comparison = g.r.allocate_type(ValType::I32);
+        let const_value = g.register_gen.allocate_type(ValType::I32);
+        let comparison = g.register_gen.allocate_type(ValType::I32);
         vec![
             Directive::WASMOp {
                 op: Op::I32Const {

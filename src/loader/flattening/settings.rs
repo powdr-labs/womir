@@ -1,6 +1,6 @@
 use wasmparser::Operator as Op;
 
-use crate::loader::flattening::{Generators, RegisterGenerator, ReturnInfo, TrapReason, Tree};
+use crate::loader::flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -100,7 +100,7 @@ pub trait Settings<'a> {
     /// Emits a directive to mark a code position, and possibly a frame size.
     fn emit_label(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         name: String,
         frame_size: Option<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -108,14 +108,14 @@ pub trait Settings<'a> {
     /// Emits a trap instruction with the given reason.
     fn emit_trap(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         trap: TrapReason,
     ) -> impl Into<Tree<Self::Directive>>;
 
     /// Emits the instructions to allocate a new frame for a given immediate label.
     fn emit_allocate_label_frame(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         label: String,
         result_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -123,7 +123,7 @@ pub trait Settings<'a> {
     /// Emits the instructions to allocate a new frame for a given a dynamic frame size.
     fn emit_allocate_value_frame(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         frame_size_ptr: Range<u32>,
         result_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -131,7 +131,7 @@ pub trait Settings<'a> {
     /// Copies a single word within the active frame.
     fn emit_copy(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        g: &mut Context<'a, '_, Self>,
         src_ptr: Range<u32>,
         dest_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -139,7 +139,7 @@ pub trait Settings<'a> {
     /// Copies a single word from the active frame to the given frame pointer.
     fn emit_copy_into_frame(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         src_ptr: Range<u32>,
         dest_frame_ptr: Range<u32>,
         dest_offset: Range<u32>,
@@ -157,7 +157,7 @@ pub trait Settings<'a> {
     /// and copy the return info into the loop.
     fn emit_jump_into_loop(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         loop_label: String,
         loop_frame_ptr: Range<u32>,
         ret_info_to_copy: Option<ReturnInfosToCopy>,
@@ -170,7 +170,7 @@ pub trait Settings<'a> {
     /// `is_branch_if_zero_available()` and `is_branch_if_not_zero_available()`.
     fn emit_conditional_jump(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         condition_type: JumpCondition,
         label: String,
         condition_ptr: Range<u32>,
@@ -179,7 +179,7 @@ pub trait Settings<'a> {
     /// Emits a jump to a label in the same frame conditioned on cmp(value, immediate).
     fn emit_conditional_jump_cmp_immediate(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         cmp: ComparisonFunction,
         value_ptr: Range<u32>,
         immediate: u32,
@@ -191,14 +191,14 @@ pub trait Settings<'a> {
     /// If offset is 0, it is equivalent to a NOP. Otherwise, it skips as many instructions as the offset.
     fn emit_relative_jump(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        g: &mut Context<'a, '_, Self>,
         offset_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
 
     /// Emits a jump out of a loop, to label in a parent frame.
     fn emit_jump_out_of_loop(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         target_label: String,
         target_frame_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -206,7 +206,7 @@ pub trait Settings<'a> {
     /// Emits a function return instruction.
     fn emit_return(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         ret_pc_ptr: Range<u32>,
         caller_fp_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -214,7 +214,7 @@ pub trait Settings<'a> {
     /// Emits a call to an imported function.
     fn emit_imported_call(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         module: &'a str,
         function: &'a str,
         inputs: Vec<Range<u32>>,
@@ -224,7 +224,7 @@ pub trait Settings<'a> {
     /// Emits a call to a local function.
     fn emit_function_call(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         function_label: String,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -234,7 +234,7 @@ pub trait Settings<'a> {
     /// Emits a call to a local function via a function pointer.
     fn emit_indirect_call(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         target_pc_ptr: Range<u32>,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -244,7 +244,7 @@ pub trait Settings<'a> {
     /// Emits the instructions to retrieve a function pointer from a table entry.
     fn emit_table_get(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         table_idx: u32,
         entry_idx_ptr: Range<u32>,
         dest_ptr: Range<u32>,
@@ -253,7 +253,7 @@ pub trait Settings<'a> {
     /// Emits the equivalent set of instructions to a WASM operation.
     fn emit_wasm_op(
         &self,
-        g: &mut Generators<'a, '_, Self>,
+        c: &mut Context<'a, '_, Self>,
         op: Op<'a>,
         inputs: Vec<Range<u32>>,
         output: Option<Range<u32>>,

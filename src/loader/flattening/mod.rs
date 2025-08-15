@@ -31,7 +31,7 @@ use std::{
 use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
-    FunctionRef,
+    CommonProgram, FunctionRef,
     blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
     flattening::{
@@ -120,12 +120,13 @@ pub enum TrapReason {
     WrongIndirectCallFunctionType,
 }
 
-pub struct Generators<'a, 'b, S: Settings<'a> + ?Sized> {
+pub struct Context<'a, 'b, S: Settings<'a> + ?Sized> {
+    pub program: &'b CommonProgram<'a>,
+    pub register_gen: RegisterGenerator<'a, S>,
     label_gen: &'b mut RangeFrom<u32>,
-    pub r: RegisterGenerator<'a, S>,
 }
 
-impl<'a, S: Settings<'a> + ?Sized> Generators<'a, '_, S> {
+impl<'a, S: Settings<'a> + ?Sized> Context<'a, '_, S> {
     pub fn new_label(&mut self, label_type: LabelType) -> String {
         format_label(self.label_gen.next().unwrap(), label_type)
     }
@@ -228,9 +229,10 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
         reg_gen.next_available,
     );
 
-    let mut gens = Generators {
+    let mut gens = Context {
+        program: &ctx.c,
         label_gen,
-        r: reg_gen,
+        register_gen: reg_gen,
     };
 
     let mut ctrl_stack = VecDeque::from([CtrlStackEntry {
@@ -282,7 +284,7 @@ struct FlatteningResult<T> {
 
 fn flatten_frame_tree<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     dag: BlocklessDag<'a>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: Option<ReturnInfo>,
@@ -314,7 +316,7 @@ fn flatten_frame_tree<'a, S: Settings<'a>>(
             tree: directives.into(),
             saved_copies: number_of_saved_copies,
         },
-        gens.r.next_available,
+        gens.register_gen.next_available,
     )
 }
 
@@ -332,7 +334,7 @@ fn is_single_plain_jump<'a, S: Settings<'a>>(
 
 fn translate_single_node<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
     ret_info: &Option<ReturnInfo>,
     node_idx: usize,
@@ -438,9 +440,10 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 &node.inputs,
             )?;
 
-            let mut loop_gens = Generators {
+            let mut loop_gens = Context {
+                program: &ctx.c,
                 label_gen: gens.label_gen,
-                r: loop_reg_gen,
+                register_gen: loop_reg_gen,
             };
             // Emit the listing for the loop itself.
             ctrl_stack.push_front(CtrlStackEntry {
@@ -711,7 +714,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 // Normal function calls requires a frame allocation and copying of the
                 // inputs and outputs into the frame (the outputs are provided by the
                 // prover "from the future").
-                let func_frame_ptr = gens.r.allocate_words(S::words_per_ptr());
+                let func_frame_ptr = gens.register_gen.allocate_words(S::words_per_ptr());
 
                 let inputs = node
                     .inputs
@@ -762,13 +765,13 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let mut inputs = map_input_into_regs(node.inputs, curr_entry)?;
             let entry_idx = inputs.pop().unwrap();
 
-            let func_ref_reg = gens.r.allocate_type(ValType::FUNCREF);
+            let func_ref_reg = gens.register_gen.allocate_type(ValType::FUNCREF);
 
             // Split the components of the function reference:
             let func_ref_regs = split_func_ref_regs::<S>(func_ref_reg.clone());
 
             let ok_label = gens.new_label(LabelType::Local);
-            let func_frame_ptr = gens.r.allocate_words(S::words_per_ptr());
+            let func_frame_ptr = gens.register_gen.allocate_words(S::words_per_ptr());
 
             // Perform the function call
             let call = prepare_function_call(
@@ -863,7 +866,7 @@ fn map_input_into_regs(
 
 fn copy_into_frame<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     src: Range<u32>,
     dest_frame: Range<u32>,
     dest: Range<u32>,
@@ -889,7 +892,7 @@ struct FunctionCall<D> {
 
 fn prepare_function_call<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     inputs: Vec<Range<u32>>,
     node_idx: usize,
     num_outputs: usize,
@@ -928,7 +931,7 @@ fn prepare_function_call<'a, S: Settings<'a>>(
 
 fn emit_jump<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     ret_info: Option<&ReturnInfo>,
     node_inputs: &[ValueOrigin],
     target: &BreakTarget,
@@ -1023,7 +1026,7 @@ fn emit_jump<'a, S: Settings<'a>>(
 
 fn copy_local_jump_args<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
     output_regs: &[Range<u32>],
@@ -1049,7 +1052,7 @@ fn copy_local_jump_args<'a, S: Settings<'a>>(
 
 fn local_jump<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     label_id: u32,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
@@ -1070,7 +1073,7 @@ fn local_jump<'a, S: Settings<'a>>(
 
 fn top_level_return<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     ret_info: &ReturnInfo,
     allocation: &Allocation,
     node_inputs: &[ValueOrigin],
@@ -1093,7 +1096,7 @@ fn top_level_return<'a, S: Settings<'a>>(
 
 fn return_from_loop<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     ctrl_stack_len: usize,
     output_regs: &[Range<u32>],
     node_inputs: &[ValueOrigin],
@@ -1135,7 +1138,7 @@ fn return_from_loop<'a, S: Settings<'a>>(
 
 fn jump_out_of_loop<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     depth: u32,
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
@@ -1176,7 +1179,7 @@ fn jump_out_of_loop<'a, S: Settings<'a>>(
 /// depth_offset is the difference between the caller frame depth and the loop frame depth.
 fn jump_into_loop<'a, S: Settings<'a>>(
     ctx: &Program<'a, S>,
-    gens: &mut Generators<'a, '_, S>,
+    gens: &mut Context<'a, '_, S>,
     loop_entry: &LoopStackEntry,
     depth_offset: i64,
     ret_info: Option<&ReturnInfo>,
@@ -1186,7 +1189,7 @@ fn jump_into_loop<'a, S: Settings<'a>>(
     let mut directives: Vec<Tree<S::Directive>> = Vec::new();
 
     // We start by allocating the frame.
-    let loop_fp = gens.r.allocate_words(S::words_per_ptr());
+    let loop_fp = gens.register_gen.allocate_words(S::words_per_ptr());
     directives.push(
         ctx.s
             .emit_allocate_label_frame(gens, loop_entry.label.clone(), loop_fp.clone())
