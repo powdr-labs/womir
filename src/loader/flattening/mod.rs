@@ -188,7 +188,7 @@ struct LoopStackEntry {
 }
 
 pub fn flatten_dag<'a, S: Settings<'a>>(
-    ctx: &Program<'a, S>,
+    prog: &Program<'a, S>,
     label_gen: &mut RangeFrom<u32>,
     dag: BlocklessDag<'a>,
     func_idx: u32,
@@ -202,7 +202,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
     // the outputs are filled by the caller, value preemptively provided by the prover.
-    let func_type = &ctx.c.get_func_type(func_idx).ty;
+    let func_type = &prog.c.get_func_type(func_idx).ty;
     let input_regs = func_type
         .params()
         .iter()
@@ -229,8 +229,8 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
         reg_gen.next_available,
     );
 
-    let mut gens = Context {
-        program: &ctx.c,
+    let mut ctx = Context {
+        program: &prog.c,
         label_gen,
         register_gen: reg_gen,
     };
@@ -241,25 +241,25 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     }]);
 
     let (flat_result, frame_size) =
-        flatten_frame_tree(ctx, &mut gens, dag, &mut ctrl_stack, Some(ret_info));
+        flatten_frame_tree(prog, &mut ctx, dag, &mut ctrl_stack, Some(ret_info));
     number_of_saved_copies += flat_result.saved_copies;
 
     // Add the function label with the frame size.
     let mut directives_with_labels = vec![
-        ctx.s
+        prog.s
             .emit_label(
-                &mut gens,
+                &mut ctx,
                 format_label(func_idx, LabelType::Function),
                 Some(frame_size),
             )
             .into(),
     ];
 
-    if let Some(name) = ctx.c.get_exported_func(func_idx) {
+    if let Some(name) = prog.c.get_exported_func(func_idx) {
         // Add an alternative label, using the exported function name.
         directives_with_labels.push(
-            ctx.s
-                .emit_label(&mut gens, name.to_string(), Some(frame_size))
+            prog.s
+                .emit_label(&mut ctx, name.to_string(), Some(frame_size))
                 .into(),
         );
     }
