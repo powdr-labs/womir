@@ -1242,7 +1242,7 @@ fn parse_function<'a, S: Settings<'a>>(
     let blockless_dag = blockless_dag::BlocklessDag::new(dag, label_gen);
 
     let (definition, copies_saved) =
-        flattening::flatten_dag::<S>(&ctx, label_gen, blockless_dag, func_idx);
+        flattening::flatten_dag(ctx, label_gen, blockless_dag, func_idx);
     stats.register_copies_saved += copies_saved;
 
     Ok(definition)
