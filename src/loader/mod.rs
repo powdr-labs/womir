@@ -364,13 +364,11 @@ impl<'a> CommonProgram<'a> {
         self.memory
     }
 
-    /// Translate an address in the program space to the linear memory space allocated in ROM.
-    /// Returns None if the module has no memory.
-    pub fn translate_memory_addr(&mut self, addr: u32) -> Option<u32> {
+    /// Get the start of linear memory, if present.
+    pub fn linear_memory_start(&mut self) -> Option<u32> {
         self.memory.map(|mem| {
             // 8 skips the header of "size" and "maximum size"
-            let offset = addr.checked_add(8).unwrap();
-            offset.checked_add(mem.start).unwrap()
+            mem.start.checked_add(8).unwrap()
         })
     }
 }
