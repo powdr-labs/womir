@@ -1,4 +1,4 @@
-# WOMIR - Write Once Memory IR
+# 🤮 WOMIR - Write Once Memory IR
 
 WOMIR is a compiler from [WebAssembly](https://webassembly.org/) to an IR that flattens stack and locals into abstract infinite registers, with the goal of optimizing local accesses in VMs that can benefit such knowledge, especially zkVMs. The IR does not have a DSL and is represented only in a Rust library.
 
