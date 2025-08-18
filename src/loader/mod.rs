@@ -365,7 +365,7 @@ impl<'a> CommonProgram<'a> {
     }
 
     /// Get the start of linear memory, if present.
-    pub fn linear_memory_start(&mut self) -> Option<u32> {
+    pub fn linear_memory_start(&self) -> Option<u32> {
         self.memory.map(|mem| {
             // 8 skips the header of "size" and "maximum size"
             mem.start.checked_add(8).unwrap()
