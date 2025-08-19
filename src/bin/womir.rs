@@ -1,7 +1,13 @@
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
+
 use itertools::Itertools;
 use womir::{
     generic_ir::GenericIrSetting,
     interpreter::{ExternalFunctions, Interpreter},
+    loader::Program,
 };
 
 struct DataInput {
@@ -60,6 +66,10 @@ fn main() -> wasmparser::Result<()> {
 
     let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?;
 
+    if let Err(err) = dump_ir(&program) {
+        log::error!("Failed to dump IR: {err}");
+    }
+
     if let Some(func_name) = func_name {
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         log::info!("Executing function: {func_name}");
@@ -67,6 +77,19 @@ fn main() -> wasmparser::Result<()> {
         log::info!("Outputs: {:?}", outputs);
     }
 
+    Ok(())
+}
+
+fn dump_ir(program: &Program<GenericIrSetting>) -> std::io::Result<()> {
+    let mut file = BufWriter::new(File::create("ir_dump.txt")?);
+    for (i, func) in program.functions.iter().enumerate() {
+        writeln!(file, "Function {i}:")?;
+        for directive in &func.directives {
+            writeln!(file, "  {directive}")?;
+        }
+    }
+    file.flush()?;
+    log::info!("IR dump written to ir_dump.txt");
     Ok(())
 }
 
