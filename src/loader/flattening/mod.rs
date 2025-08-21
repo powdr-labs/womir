@@ -743,6 +743,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     prog.s
                         .emit_function_call(
                             ctx,
+                            function_index,
                             format_label(function_index, LabelType::Function),
                             func_frame_ptr,
                             call.ret_info.ret_pc,
@@ -784,6 +785,8 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 func_frame_ptr.clone(),
             )?;
 
+            let func_type = prog.c.get_type(type_index);
+
             vec![
                 prog.s
                     .emit_table_get(ctx, table_index, entry_idx, func_ref_reg)
@@ -793,7 +796,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                         ctx,
                         ComparisonFunction::Equal,
                         func_ref_regs[FunctionRef::<S>::TYPE_ID].clone(),
-                        prog.c.get_type(type_index).unique_id,
+                        func_type.unique_id,
                         ok_label.clone(),
                     )
                     .into(),
@@ -812,6 +815,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 prog.s
                     .emit_indirect_call(
                         ctx,
+                        func_type,
                         func_ref_regs[FunctionRef::<S>::FUNC_ADDR].clone(),
                         func_frame_ptr,
                         call.ret_info.ret_pc,

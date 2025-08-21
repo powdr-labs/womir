@@ -1,6 +1,9 @@
 use wasmparser::Operator as Op;
 
-use crate::loader::flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree};
+use crate::loader::{
+    FuncType,
+    flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -225,6 +228,7 @@ pub trait Settings<'a> {
     fn emit_function_call(
         &self,
         c: &mut Context<'a, '_, Self>,
+        function_index: u32,
         function_label: String,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -235,6 +239,7 @@ pub trait Settings<'a> {
     fn emit_indirect_call(
         &self,
         c: &mut Context<'a, '_, Self>,
+        function_type: &FuncType,
         target_pc_ptr: Range<u32>,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,

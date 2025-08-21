@@ -1,8 +1,11 @@
 use crate::{
     linker,
-    loader::flattening::{
-        Context, TrapReason,
-        settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings},
+    loader::{
+        FuncType,
+        flattening::{
+            Context, TrapReason,
+            settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings},
+        },
     },
 };
 use std::{fmt::Display, ops::Range};
@@ -241,6 +244,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
     fn emit_function_call(
         &self,
         _c: &mut Ctx,
+        _func_index: u32,
         function_label: String,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -257,6 +261,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
     fn emit_indirect_call(
         &self,
         _c: &mut Ctx,
+        _func_type: &FuncType,
         target_pc_ptr: Range<u32>,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
