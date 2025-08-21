@@ -52,6 +52,17 @@ pub trait Settings<'a> {
     fn is_jump_condition_available(cond: JumpCondition) -> bool;
     fn is_relative_jump_available() -> bool;
 
+    /// Tells wether outputs are bound to the function frame before the call,
+    /// with copy_into_frame, or if they must be copied out after the call.
+    ///
+    /// If true, the executor needs future knowledge of the return value,
+    /// which makes it more complex.
+    ///
+    /// If false, the system requires one extra type of operation (copy out of frame),
+    /// and don't allow for certain tail call optimizations (that we don't yet support),
+    /// but the execution is straightforward.
+    fn use_non_deterministic_function_outputs() -> bool;
+
     /// Allocates the slots in the interface of the loop frame
     ///
     /// The `saved_fps` set contains the depths of the frame pointers that
@@ -143,6 +154,15 @@ pub trait Settings<'a> {
         src_ptr: Range<u32>,
         dest_frame_ptr: Range<u32>,
         dest_offset: Range<u32>,
+    ) -> impl Into<Tree<Self::Directive>>;
+
+    /// Copies a single word from the given frame pointer to the active frame pointer.
+    fn emit_copy_from_frame(
+        &self,
+        c: &mut Context<'a, '_, Self>,
+        source_frame_ptr: Range<u32>,
+        source_offset: Range<u32>,
+        dest_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
 
     /// Emits a plain jump to a label in the same frame.

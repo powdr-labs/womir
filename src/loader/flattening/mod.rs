@@ -739,7 +739,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                             func_frame_ptr.clone(),
                         )
                         .into(),
-                    call.copy_directives.into(),
+                    call.prefix_directives.into(),
                     prog.s
                         .emit_function_call(
                             ctx,
@@ -808,7 +808,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                         func_frame_ptr.clone(),
                     )
                     .into(),
-                call.copy_directives.into(),
+                call.prefix_directives.into(),
                 prog.s
                     .emit_indirect_call(
                         ctx,
@@ -818,6 +818,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                         call.ret_info.ret_fp,
                     )
                     .into(),
+                call.suffix_directives.into(),
             ]
             .into()
         }
@@ -885,8 +886,30 @@ fn copy_into_frame<'a, S: Settings<'a>>(
         .collect()
 }
 
+fn copy_from_frame<'a, S: Settings<'a>>(
+    prog: &Program<'a, S>,
+    ctx: &mut Context<'a, '_, S>,
+    src_frame: Range<u32>,
+    src: Range<u32>,
+    dest: Range<u32>,
+) -> Vec<Tree<S::Directive>> {
+    src.zip_eq(dest)
+        .map(move |(src_word, dest_word)| {
+            prog.s
+                .emit_copy_from_frame(
+                    ctx,
+                    src_frame.clone(),
+                    src_word..src_word + 1,
+                    dest_word..dest_word + 1,
+                )
+                .into()
+        })
+        .collect()
+}
+
 struct FunctionCall<D> {
-    copy_directives: Vec<Tree<D>>,
+    prefix_directives: Vec<Tree<D>>,
+    suffix_directives: Vec<Tree<D>>,
     ret_info: ReturnInfo,
 }
 
@@ -899,7 +922,8 @@ fn prepare_function_call<'a, S: Settings<'a>>(
     curr_entry: &CtrlStackEntry,
     frame_ptr: Range<u32>,
 ) -> Result<FunctionCall<S::Directive>, NotAllocatedError> {
-    let mut copy_directives = Vec::new();
+    let mut prefix_directives = Vec::new();
+    let mut suffix_directives = Vec::new();
 
     // Generate the registers in the order expected by the calling convention.
     let mut fn_reg_gen = RegisterGenerator::<S>::new();
@@ -910,21 +934,28 @@ fn prepare_function_call<'a, S: Settings<'a>>(
 
     for src_reg in inputs {
         let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        copy_directives
+        prefix_directives
             .push(copy_into_frame(prog, ctx, src_reg, frame_ptr.clone(), dest_reg).into());
     }
     for output_idx in 0..num_outputs {
-        let src_reg = curr_entry.allocation.get(&ValueOrigin {
+        let caller_reg = curr_entry.allocation.get(&ValueOrigin {
             node: node_idx,
             output_idx: output_idx as u32,
         })?;
-        let dest_reg = fn_reg_gen.allocate_words(src_reg.len() as u32);
-        copy_directives
-            .push(copy_into_frame(prog, ctx, src_reg, frame_ptr.clone(), dest_reg).into());
+        let callee_reg = fn_reg_gen.allocate_words(caller_reg.len() as u32);
+
+        if S::use_non_deterministic_function_outputs() {
+            prefix_directives
+                .push(copy_into_frame(prog, ctx, caller_reg, frame_ptr.clone(), callee_reg).into());
+        } else {
+            suffix_directives
+                .push(copy_from_frame(prog, ctx, frame_ptr.clone(), callee_reg, caller_reg).into());
+        }
     }
 
     Ok(FunctionCall {
-        copy_directives,
+        prefix_directives,
+        suffix_directives,
         ret_info,
     })
 }

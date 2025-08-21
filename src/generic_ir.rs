@@ -1,7 +1,7 @@
 use crate::{
     linker,
     loader::flattening::{
-        Context, TrapReason,
+        Context, TrapReason, Tree,
         settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings},
     },
 };
@@ -29,6 +29,10 @@ impl<'a> Settings<'a> for GenericIrSetting {
     }
 
     fn is_relative_jump_available() -> bool {
+        true
+    }
+
+    fn use_non_deterministic_function_outputs() -> bool {
         true
     }
 
@@ -86,6 +90,17 @@ impl<'a> Settings<'a> for GenericIrSetting {
             dest_frame: dest_frame_ptr.start,
             dest_word: dest_offset.start,
         }
+    }
+
+    fn emit_copy_from_frame(
+        &self,
+        _c: &mut Context<'a, '_, Self>,
+        _source_frame_ptr: Range<u32>,
+        _source_offset: Range<u32>,
+        _dest_ptr: Range<u32>,
+    ) -> Tree<Directive<'a>> {
+        // This function is not used because we use non-deterministic function outputs.
+        Tree::Empty
     }
 
     fn emit_jump_into_loop(
@@ -290,7 +305,7 @@ impl<'a> Settings<'a> for GenericIrSetting {
         op: Op<'a>,
         inputs: Vec<Range<u32>>,
         output: Option<Range<u32>>,
-    ) -> impl Into<crate::loader::flattening::Tree<Self::Directive>> {
+    ) -> Directive<'a> {
         Directive::WASMOp { op, inputs, output }
     }
 }
