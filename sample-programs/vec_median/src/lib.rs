@@ -8,19 +8,17 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 pub fn vec_median() {
-    let expected = read_u32();
+    // let expected = read_u32();
     let len = read_u32();
 
-    let mut vec: Vec<_> = (0..len).map(|_| read_u32()).collect();
-    vec.sort();
+    // WORKS
+    // let mut vec = vec![];
+    // for i in 0..len {
+    //     vec.push(i);
+    // }
 
-    let half = (len / 2) as usize;
-    let median = if len & 1 == 1 {
-        vec[half]
-    } else {
-        (vec[half - 1] + vec[half]) / 2
-    };
+    // DOESNT WORK
+    let mut vec: Vec<_> = (0..len).collect();
 
-    print!("Found median of {median}\n");
-    assert_eq!(median, expected);
+    let elem = vec[2];
 }
