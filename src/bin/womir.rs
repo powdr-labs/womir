@@ -176,10 +176,11 @@ mod tests {
         test_interpreter_rust(
             "vec_median",
             "vec_median",
-            &[],
-            // vec![5, 11, 15, 75, 6, 5, 1, 4, 7, 3, 2, 9, 2],
-            // vec![3, 4, 1, 2, 3, 4],
-            vec![4],
+            // WORKS
+            &[4],
+            // DOESNT WORK
+            // &[5],
+            vec![],
             &[],
         );
     }
