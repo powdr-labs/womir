@@ -11,12 +11,14 @@ use womir::{
 };
 
 struct DataInput {
-    values: Vec<u32>,
+    values: <Vec<u32> as IntoIterator>::IntoIter,
 }
 
 impl DataInput {
     fn new(values: Vec<u32>) -> Self {
-        Self { values }
+        Self {
+            values: values.into_iter(),
+        }
     }
 }
 
@@ -24,7 +26,7 @@ impl ExternalFunctions for DataInput {
     fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
-                vec![self.values[args[0] as usize]]
+                vec![self.values.next().expect("Not enough input values")]
             }
             ("env", "abort") => {
                 panic!("Abort called with args: {:?}", args);
