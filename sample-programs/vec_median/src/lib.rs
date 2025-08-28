@@ -7,11 +7,18 @@ unsafe extern "C" {
 }
 
 #[unsafe(no_mangle)]
-pub fn vec_median(len: u32) {
-    let mut vec = vec![];
-    for i in 0..len {
-        vec.push(i);
-    }
+pub fn vec_median() {
+    // let expected = read_u32();
+    let len = read_u32();
+
+    // WORKS
+    // let mut vec = vec![];
+    // for i in 0..len {
+    //     vec.push(i);
+    // }
+
+    // DOESNT WORK
+    let mut vec: Vec<_> = (0..len).collect();
 
     let elem = vec[2];
 }
