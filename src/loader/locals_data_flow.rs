@@ -32,7 +32,9 @@ pub fn lift_data_flow(block_tree: BlockTree<'_>) -> wasmparser::Result<LiftedBlo
                 loop {
                     let (new_block, has_changed) = process_block(&mut control_stack, block);
                     if !has_changed {
-                        print_block_local_interface(&new_block, 0);
+                        if log::log_enabled!(log::Level::Trace) {
+                            trace_block_local_interface(&new_block, 0);
+                        }
                         break Element::Block(new_block);
                     }
                     block = new_block;
@@ -48,8 +50,8 @@ pub fn lift_data_flow(block_tree: BlockTree<'_>) -> wasmparser::Result<LiftedBlo
     Ok(LiftedBlockTree { elements })
 }
 
-fn print_block_local_interface(block: &Block, depth: u32) {
-    println!(
+fn trace_block_local_interface(block: &Block, depth: u32) {
+    log::trace!(
         "{}{}, Input Locals: {:?}, Output Locals: {:?}",
         "    ".repeat(depth as usize),
         match block.block_kind {
@@ -61,7 +63,7 @@ fn print_block_local_interface(block: &Block, depth: u32) {
     );
     for elem in &block.elements {
         match elem {
-            Element::Block(b) => print_block_local_interface(b, depth + 1),
+            Element::Block(b) => trace_block_local_interface(b, depth + 1),
             _ => { /* ignore instructions */ }
         }
     }
