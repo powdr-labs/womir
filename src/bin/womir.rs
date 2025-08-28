@@ -113,7 +113,6 @@ mod tests {
         data_inputs: Vec<u32>,
         outputs: &[u32],
     ) {
-        println!("Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}");
         let wasm_file = std::fs::read(path).unwrap();
         let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
@@ -177,9 +176,7 @@ mod tests {
             "vec_median",
             "vec_median",
             &[],
-            // vec![5, 11, 15, 75, 6, 5, 1, 4, 7, 3, 2, 9, 2],
-            // vec![3, 4, 1, 2, 3, 4],
-            vec![4],
+            vec![5, 11, 15, 75, 6, 5, 1, 4, 7, 3, 2, 9, 2],
             &[],
         );
     }
