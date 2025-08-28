@@ -230,11 +230,11 @@ fn process_break_target(
         .iter()
         .take(relative_depth as usize + 1)
         .flat_map(|entry| entry.local_outputs.iter().cloned())
-        .collect::<BTreeSet<u32>>();
+        .collect_vec();
 
     let target_entry = &mut control_stack[relative_depth as usize];
     target_entry.new_break_locals.extend(carried_locals);
-    target_entry.new_break_locals.extend(accum_outputs.iter());
+    target_entry.new_break_locals.extend(accum_outputs);
 
     // Every local this break requires that we don't have marked as output must
     // be taken as input, so it can be forwarded to the break.
