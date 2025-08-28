@@ -3,15 +3,15 @@
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    pub safe fn read_u32() -> u32;
+    pub safe fn read_u32(x: u32) -> u32;
 }
 
 #[unsafe(no_mangle)]
 pub fn vec_median() {
-    let expected = read_u32();
-    let len = read_u32();
+    let expected = read_u32(0);
+    let len = read_u32(1);
 
-    let mut vec: Vec<_> = (0..len).map(|_| read_u32()).collect();
+    let mut vec: Vec<_> = (2..(len + 2)).map(|idx| read_u32(idx)).collect();
     vec.sort();
 
     let half = (len / 2) as usize;
