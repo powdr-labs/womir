@@ -287,10 +287,13 @@ fn process_break_target(
     );
     target_entry.new_break_locals.extend(accum_outputs.iter());
 
-    // Every local this break requires that we don't have marked as output, must
+    // Every local this break requires that we don't have marked as output must
     // be taken as input, so it can be forwarded to the break.
-    let diff = accum_outputs
-        .difference(&target_entry.old_break_locals)
+    let target_entry = &control_stack[relative_depth as usize];
+    let curr_entry = &control_stack[0];
+    let diff = target_entry
+        .old_break_locals
+        .difference(&curr_entry.local_outputs)
         .collect_vec();
     println!(
         "{}Inputs {:?} extended with {:?} (due to break)",
