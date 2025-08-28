@@ -12,4 +12,6 @@ pub fn vec_median(len: u32) {
     for i in 0..len {
         vec.push(i);
     }
+
+    let elem = vec[2];
 }
