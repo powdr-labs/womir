@@ -1,9 +1,6 @@
 use core::panic;
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::ops::Range;
-use std::vec;
 
 use itertools::Itertools;
 use wasmparser::Operator as Op;
@@ -28,27 +25,6 @@ impl From<u32> for VRomValue {
     }
 }
 
-impl TryFrom<VRomValue> for u32 {
-    type Error = ();
-
-    fn try_from(value: VRomValue) -> Result<Self, Self::Error> {
-        match value {
-            VRomValue::Concrete(v) => Ok(v),
-            _ => Err(()),
-        }
-    }
-}
-
-impl Display for VRomValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VRomValue::Unassigned => write!(f, "???"),
-            VRomValue::Future(v) => write!(f, "?{v}"),
-            VRomValue::Concrete(v) => write!(f, "{v}"),
-        }
-    }
-}
-
 // How a null reference is represented in the VROM
 pub const NULL_REF: [u32; 3] = [
     u32::MAX, // Function type: this is an invalid function type, so that calling a null reference will trap
@@ -56,7 +32,7 @@ pub const NULL_REF: [u32; 3] = [
     0,        // Address: 0 is an invalid function address because START_ROM_ADDR > 0
 ];
 
-pub struct Interpreter<'a, E> {
+pub struct Interpreter<'a, E: ExternalFunctions> {
     // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
@@ -169,7 +145,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let mut cycles = 0usize;
         let final_fp = loop {
             let instr = self.flat_program[self.pc as usize].clone();
-            let trace = DirectiveTracer::new(self);
+            log::trace!("PC: {}, FP: {}, Instr: {instr}", self.pc, self.fp);
 
             let mut should_inc_pc = true;
 
@@ -1544,8 +1520,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 }
             }
 
-            trace.trace(self);
-
             if should_inc_pc {
                 self.pc += 1;
             }
@@ -1636,6 +1610,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             }
         };
 
+        log::trace!("Reading VRom address {addr}: {value:?}");
         value
     }
 
@@ -1645,6 +1620,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
     fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
         let slot = &mut self.vrom[addr as usize];
+        log::trace!("Setting VRom address {addr}: {value:?}");
         match (*slot, value) {
             (VRomValue::Unassigned, VRomValue::Unassigned) => {
                 // This is important to catch to prevent bugs.
@@ -1707,171 +1683,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 }
 
-struct DirectiveTracer<'a> {
-    directive: Directive<'a>,
-    pc: u32,
-    fp: u32,
-}
-
-impl<'a> DirectiveTracer<'a> {
-    /// Call this before the execution of the instruction
-    fn new<E>(interpreter: &Interpreter<'a, E>) -> Self {
-        DirectiveTracer {
-            directive: interpreter.flat_program[interpreter.pc as usize].clone(),
-            pc: interpreter.pc,
-            fp: interpreter.fp,
-        }
-    }
-
-    /// Call this after the execution of the instruction
-    fn trace<E: ExternalFunctions>(self, interpreter: &mut Interpreter<'a, E>) {
-        log::trace!("PC: {}, FP: {}, {}", self.pc, self.fp, self.directive);
-        log::trace!("{}", self.trace_directive_regs(interpreter));
-    }
-
-    fn trace_directive_regs<E: ExternalFunctions>(
-        mut self,
-        interpreter: &mut Interpreter<'a, E>,
-    ) -> String {
-        // In order to relative accesses to work, we temporarily set the fp of before the instruction being executed
-        std::mem::swap(&mut interpreter.fp, &mut self.fp);
-
-        let (inputs_regs, outputs_regs): (Cow<[Range<u32>]>, Cow<[Range<u32>]>) = match &self
-            .directive
-        {
-            Directive::Label { .. } | Directive::Jump { .. } | Directive::Trap { .. } => {
-                Default::default()
-            }
-            Directive::AllocateFrameI { result_ptr, .. } => {
-                (Cow::default(), vec![*result_ptr..*result_ptr + 1].into())
-            }
-            Directive::AllocateFrameV {
-                frame_size,
-                result_ptr,
-            } => (
-                vec![*frame_size..*frame_size + 1].into(),
-                vec![*result_ptr..*result_ptr + 1].into(),
-            ),
-            Directive::Copy {
-                src_word,
-                dest_word,
-            } => (
-                vec![*src_word..*src_word + 1].into(),
-                vec![*dest_word..*dest_word + 1].into(),
-            ),
-            Directive::CopyIntoFrame {
-                src_word,
-                dest_frame,
-                ..
-            } => (
-                vec![*src_word..*src_word + 1, *dest_frame..*dest_frame + 1].into(),
-                Cow::default(),
-            ),
-            Directive::JumpOffset { offset } => (vec![*offset..*offset + 1].into(), Cow::default()),
-            Directive::JumpIf { condition, .. } | Directive::JumpIfZero { condition, .. } => {
-                (vec![*condition..*condition + 1].into(), Cow::default())
-            }
-            Directive::JumpAndActivateFrame { new_frame_ptr, .. } => (
-                vec![*new_frame_ptr..*new_frame_ptr + 1].into(),
-                Cow::default(),
-            ),
-            Directive::Return { ret_pc, ret_fp } => (
-                vec![*ret_pc..*ret_pc + 1, *ret_fp..*ret_fp + 1].into(),
-                Cow::default(),
-            ),
-            Directive::Call { new_frame_ptr, .. } => (
-                vec![*new_frame_ptr..*new_frame_ptr + 1].into(),
-                Cow::default(),
-            ),
-            Directive::CallIndirect {
-                target_pc,
-                new_frame_ptr,
-                ..
-            } => (
-                vec![
-                    *target_pc..*target_pc + 1,
-                    *new_frame_ptr..*new_frame_ptr + 1,
-                ]
-                .into(),
-                Cow::default(),
-            ),
-            Directive::ImportedCall {
-                inputs, outputs, ..
-            } => (inputs.into(), outputs.into()),
-            Directive::WASMOp { inputs, output, .. } => {
-                (inputs.into(), output.iter().cloned().collect_vec().into())
-            }
-        };
-
-        // Load all the regs relative to current frame pointer.
-        let [inputs, outputs] = [&inputs_regs, &outputs_regs].map(|regs| {
-            regs.iter()
-                .map(|r| {
-                    r.clone()
-                        .map(|reg| interpreter.get_vrom_relative(reg))
-                        .collect_vec()
-                })
-                .collect_vec()
-        });
-
-        // Load the regs relative to a given frame pointer.
-        let indirect_outputs_regs = match &self.directive {
-            Directive::CopyIntoFrame { dest_word, .. } => vec![*dest_word],
-            Directive::JumpAndActivateFrame {
-                saved_caller_fp, ..
-            } => saved_caller_fp.iter().cloned().collect(),
-            Directive::Call {
-                saved_ret_pc,
-                saved_caller_fp,
-                ..
-            }
-            | Directive::CallIndirect {
-                saved_ret_pc,
-                saved_caller_fp,
-                ..
-            } => vec![*saved_ret_pc, *saved_caller_fp].into(),
-            _ => Vec::new(),
-        };
-
-        let reference_reg =
-            (!indirect_outputs_regs.is_empty()).then(|| inputs_regs.last().unwrap().start);
-        let reference = reference_reg.map(|addr| interpreter.get_vrom_relative_u32(addr..addr + 1));
-        let indirect_outputs = indirect_outputs_regs
-            .iter()
-            .map(|reg| interpreter.get_vrom_absolute(reference.unwrap() + reg))
-            .collect_vec();
-
-        // Restore the interpreter's frame pointer
-        interpreter.fp = self.fp;
-
-        if !inputs.is_empty() || !outputs.is_empty() {
-            format!(
-                "{{{}{}}}",
-                [
-                    inputs_regs.into_iter().zip(inputs),
-                    outputs_regs.into_iter().zip(outputs)
-                ]
-                .map(|reg_set| reg_set
-                    .map(|(reg, val)| if reg.len() == 1 {
-                        format!("${} = {}", reg.start, val[0])
-                    } else {
-                        format!("${}..{} = [{}]", reg.start, reg.end, val.iter().format(","))
-                    })
-                    .format(", "))
-                .into_iter()
-                .format("} → {"),
-                indirect_outputs_regs
-                    .into_iter()
-                    .zip(indirect_outputs)
-                    .map(|(reg, val)| { format!("*({}+{}) = {}", reference.unwrap(), reg, val) })
-                    .format(", ")
-            )
-        } else {
-            Default::default()
-        }
-    }
-}
-
 struct MemoryAccessor<'a, 'b, E: ExternalFunctions> {
     segment: Segment,
     interpreter: &'a mut Interpreter<'b, E>,
@@ -1908,6 +1719,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         let value = self.interpreter.get_ram(ram_addr);
+        log::trace!("Reading Memory word at {ram_addr}: {value}");
         Ok(value)
     }
 
@@ -1918,6 +1730,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         self.interpreter.set_ram(ram_addr, value);
+        log::trace!("Writing Memory word at {ram_addr}: {value}");
         Ok(())
     }
 
