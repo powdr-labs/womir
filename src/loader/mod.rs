@@ -1228,7 +1228,6 @@ fn parse_function<'a, S: Settings<'a>>(
     let block_tree = BlockTree::load_function(&ctx.c, function.get_operators_reader()?)?;
 
     // Expose the reads and writes to locals inside blocks as inputs and outputs.
-    println!("#### FUNC {}", func_idx);
     let lifted_blocks = locals_data_flow::lift_data_flow(block_tree)?;
 
     // Build the DAG

@@ -1,3 +1,11 @@
+//! Run with, e.g.:
+//! womir vec_median.wasm vec_median "" 5,11,15,75,6,5,1,4,7,3,2,9,2
+
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    pub safe fn read_u32() -> u32;
+}
+
 #[unsafe(no_mangle)]
 pub fn vec_median(len: u32) {
     let mut vec = vec![];
