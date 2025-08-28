@@ -30,7 +30,7 @@ pub fn lift_data_flow(block_tree: BlockTree<'_>) -> wasmparser::Result<LiftedBlo
             // Iterate repeatedly, until all the inputs and outputs are exposed.
             {
                 loop {
-                    let (new_block, has_changed) = process_block(&mut control_stack, block);
+                    let (new_block, has_changed) = process_block(&mut control_stack, block, 0);
                     println!("");
                     print_block_local_interface(&new_block, 0);
                     if !has_changed {
@@ -71,6 +71,7 @@ fn print_block_local_interface(block: &Block, depth: u32) {
 fn process_block<'a>(
     control_stack: &mut VecDeque<BlockStackEntry>,
     block: Block<'a>,
+    depth: u32,
 ) -> (Block<'a>, bool) {
     let Block {
         block_kind,
@@ -87,6 +88,12 @@ fn process_block<'a>(
     let new_elements;
     let has_changed;
 
+    println!(
+        "{}Processing {:?} Block",
+        "##  ".repeat(depth as usize),
+        block_kind
+    );
+
     let (old_input_locals, old_output_locals) = match block_kind {
         BlockKind::Block => {
             // In a Block, breaks to it are outputs.
@@ -98,7 +105,8 @@ fn process_block<'a>(
                 local_outputs: BTreeSet::new(),
             });
 
-            (new_elements, new_input_locals, has_changed) = process_elems(control_stack, elements);
+            (new_elements, new_input_locals, has_changed) =
+                process_elems(control_stack, elements, depth + 1);
 
             let this_entry = control_stack.pop_front().unwrap();
 
@@ -120,7 +128,8 @@ fn process_block<'a>(
                 local_outputs: BTreeSet::new(),
             });
 
-            (new_elements, new_input_locals, has_changed) = process_elems(control_stack, elements);
+            (new_elements, new_input_locals, has_changed) =
+                process_elems(control_stack, elements, depth + 1);
 
             // Due to previous pass transformation, loops never fall through, thus
             // they never have direct outputs.
@@ -158,6 +167,7 @@ fn process_block<'a>(
 fn process_elems<'a>(
     control_stack: &mut VecDeque<BlockStackEntry>,
     elements: Vec<Element<'a>>,
+    depth: u32,
 ) -> (Vec<Element<'a>>, BTreeSet<u32>, bool) {
     let mut local_inputs = BTreeSet::new();
 
@@ -167,11 +177,23 @@ fn process_elems<'a>(
         .into_iter()
         .map(|elem| match elem {
             Element::Block(block) => {
-                let (block, block_has_changed) = process_block(control_stack, block);
+                let (block, block_has_changed) = process_block(control_stack, block, depth);
 
                 has_changed = has_changed || block_has_changed;
 
+                println!(
+                    "{}Inputs {:?} extended with {:?} (due to block)",
+                    "##  ".repeat(depth as usize),
+                    local_inputs,
+                    block.input_locals
+                );
                 local_inputs.extend(block.input_locals.iter());
+                println!(
+                    "{}Outputs {:?} extended with {:?} (due to block)",
+                    "##  ".repeat(depth as usize),
+                    control_stack[0].local_outputs,
+                    block.output_locals
+                );
                 control_stack[0]
                     .local_outputs
                     .extend(block.output_locals.iter());
@@ -182,23 +204,45 @@ fn process_elems<'a>(
                 match &ins {
                     // Local variables operations
                     Ins::WASMOp(Operator::LocalGet { local_index }) => {
+                        println!(
+                            "{}Inputs {:?} extended with {} (due to local.get)",
+                            "##  ".repeat(depth as usize),
+                            local_inputs,
+                            local_index
+                        );
                         local_inputs.insert(*local_index);
                     }
                     Ins::WASMOp(Operator::LocalSet { local_index })
                     | Ins::WASMOp(Operator::LocalTee { local_index }) => {
+                        println!(
+                            "{}Outputs {:?} extended with {} (due to local.set/local.tee)",
+                            "##  ".repeat(depth as usize),
+                            control_stack[0].local_outputs,
+                            local_index
+                        );
                         control_stack[0].local_outputs.insert(*local_index);
                     }
 
                     // Break operations
                     Ins::BrTable { targets } => {
                         for relative_depth in targets {
-                            process_break_target(control_stack, &mut local_inputs, *relative_depth);
+                            process_break_target(
+                                control_stack,
+                                &mut local_inputs,
+                                *relative_depth,
+                                depth,
+                            );
                         }
                     }
                     Ins::WASMOp(Operator::Br { relative_depth })
                     | Ins::WASMOp(Operator::BrIf { relative_depth })
                     | Ins::BrIfZero { relative_depth } => {
-                        process_break_target(control_stack, &mut local_inputs, *relative_depth);
+                        process_break_target(
+                            control_stack,
+                            &mut local_inputs,
+                            *relative_depth,
+                            depth,
+                        );
                     }
 
                     // All other operations
@@ -217,6 +261,7 @@ fn process_break_target(
     control_stack: &mut VecDeque<BlockStackEntry>,
     local_inputs: &mut BTreeSet<u32>,
     relative_depth: u32,
+    debug_depth: u32,
 ) {
     // Every carried local up to the break depth must be given to this break.
     let carried_locals = control_stack
@@ -234,11 +279,25 @@ fn process_break_target(
 
     let target_entry = &mut control_stack[relative_depth as usize];
     target_entry.new_break_locals.extend(carried_locals);
+    println!(
+        "{}Break to target {relative_depth} {:?} extended with {:?} (due to break)",
+        "##  ".repeat(debug_depth as usize),
+        target_entry.new_break_locals,
+        accum_outputs
+    );
     target_entry.new_break_locals.extend(accum_outputs.iter());
 
     // Every local this break requires that we don't have marked as output, must
     // be taken as input, so it can be forwarded to the break.
-    let diff = target_entry.old_break_locals.difference(&accum_outputs);
+    let diff = accum_outputs
+        .difference(&target_entry.old_break_locals)
+        .collect_vec();
+    println!(
+        "{}Inputs {:?} extended with {:?} (due to break)",
+        "##  ".repeat(debug_depth as usize),
+        local_inputs,
+        diff
+    );
     local_inputs.extend(diff);
 }
 
