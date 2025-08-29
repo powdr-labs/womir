@@ -113,6 +113,9 @@ mod tests {
         data_inputs: Vec<u32>,
         outputs: &[u32],
     ) {
+        println!(
+            "Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}"
+        );
         let wasm_file = std::fs::read(path).unwrap();
         let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
@@ -168,6 +171,11 @@ mod tests {
     #[test]
     fn test_sqrt() {
         test_interpreter_rust("sqrt", "main", &[0, 0], vec![9, 3], &[0]);
+    }
+
+    #[test]
+    fn test_vec_grow() {
+        test_interpreter_rust("vec_grow", "vec_grow", &[5], vec![], &[]);
     }
 
     #[test]

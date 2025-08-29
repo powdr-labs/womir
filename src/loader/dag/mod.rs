@@ -220,7 +220,7 @@ fn build_dag<'a>(
                     );
 
                     // The stack part of the input
-                    // BrIf[Not] does not consume the stack.
+                    // BrIf[Zero] does not consume the stack.
                     let mut inputs = t.stack[t.stack.len() - target.stack.len()..].to_vec();
                     assert!(types_matches(&t.nodes, &target.stack, &inputs));
 
