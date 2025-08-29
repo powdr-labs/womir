@@ -208,6 +208,8 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
         .iter()
         .map(|ty| reg_gen.allocate_type(*ty))
         .collect_vec();
+
+    let output_start = reg_gen.next_available;
     let output_regs = func_type
         .results()
         .iter()
@@ -217,17 +219,21 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let ret_info = ReturnInfo { ret_pc, ret_fp };
 
     // Perform the register allocation for the function's top-level frame.
+    let mut allocation_reg_gen = RegisterGenerator::<S>::new();
+    // This has the same layout of output_regs, but starts at 0.
+    let allocate_output_regs = func_type
+        .results()
+        .iter()
+        .map(|ty| allocation_reg_gen.allocate_type(*ty))
+        .collect_vec();
     let (mut allocation, mut number_of_saved_copies) =
-        optimistic_allocation(&dag, &mut RegisterGenerator::<S>::new());
+        optimistic_allocation(&dag, &mut allocation_reg_gen, Some(&allocate_output_regs));
 
     // Since this is the top-level frame, the allocation can
     // not be arbitrary. It must conform to the calling convention,
     // so we must permute the allocation we found to match it.
-    let reg_gen = allocate_registers::permute_allocation::<S>(
-        &mut allocation,
-        input_regs,
-        reg_gen.next_available,
-    );
+    let reg_gen =
+        allocate_registers::permute_allocation::<S>(&mut allocation, input_regs, output_start);
 
     let mut ctx = Context {
         program: &prog.c,
@@ -412,7 +418,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
 
             // Finally allocate all the registers for the loop instructions, including the inputs.
             let (loop_allocation, saved_copies) =
-                optimistic_allocation(&sub_dag, &mut loop_reg_gen);
+                optimistic_allocation(&sub_dag, &mut loop_reg_gen, None);
             number_of_saved_copies += saved_copies;
 
             // Sanity check: loops have no outputs:
