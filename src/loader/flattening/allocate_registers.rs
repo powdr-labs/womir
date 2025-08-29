@@ -251,7 +251,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
             // We are breaking to a local label, who has registers in the active frame.
             &target_label.regs
         } else if let Some(regs) = top_level_return_regs {
-            // We are breaking out of the function from the top level function, so
+            // We are breaking out of the function from the top level frame, so
             // the return arguments are on the active frame, and we can still optmize.
             regs
         } else {
