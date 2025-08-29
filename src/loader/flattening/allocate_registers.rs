@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap, btree_map},
-    marker::PhantomData,
     ops::Range,
 };
 
@@ -436,12 +435,12 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
 }
 
 /// A permutation of a given allocation, so that the input registers are the given ones, and all the others
-/// begin at a given address.
+/// begin at a given address and are shifted back to fill the holes left by the moved inputs.
 ///
 /// Assumes the original allocation is tightly packed starting at 0.
-struct InputPermutation(Vec<(u32, i64)>);
+struct RepackPermutation(Vec<(u32, i64)>);
 
-impl InputPermutation {
+impl RepackPermutation {
     fn new(
         required_inputs: Vec<Range<u32>>,
         current_inputs: impl Iterator<Item = Range<u32>>,
@@ -494,16 +493,15 @@ impl InputPermutation {
     }
 }
 
-/// Permutes the allocation so that the input registers are the given ones,
-/// and all the others begin at a given address.
-pub fn permute_allocation<'a, S: Settings<'a>>(
+/// Reorders the allocation so that the input registers are the given ones,
+/// and all the others begin at a given address, and are tightly repacked to
+/// fill the holes left by the moved inputs.
+pub fn reorder_allocation<'a, S: Settings<'a>>(
     allocation: &mut Allocation,
     inputs: Vec<Range<u32>>,
     first_non_reserved_addr: u32,
-) -> RegisterGenerator<'a, S> {
-    let mut last_used_addr = first_non_reserved_addr;
-
-    let map = InputPermutation::new(
+) {
+    let map = RepackPermutation::new(
         inputs,
         allocation
             .nodes_outputs
@@ -516,9 +514,6 @@ pub fn permute_allocation<'a, S: Settings<'a>>(
     // Permute the nodes outputs
     for reg in allocation.nodes_outputs.values_mut() {
         map.permute_range(reg);
-        if reg.end > last_used_addr {
-            last_used_addr = reg.end;
-        }
     }
 
     // Now we need to permute the labels
@@ -528,11 +523,6 @@ pub fn permute_allocation<'a, S: Settings<'a>>(
             // There is no need to update last_used_addr, because
             // all the labels are also represented as nodes.
         }
-    }
-
-    RegisterGenerator {
-        next_available: last_used_addr,
-        settings: PhantomData,
     }
 }
 
@@ -547,7 +537,7 @@ mod tests {
         let current_inputs = vec![5..15, 25..35].into_iter();
         let first_non_reserved = 50;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         // Check offsets are correctly computed
         assert_eq!(map.permute(0), 50);
@@ -573,7 +563,7 @@ mod tests {
         let current_inputs = vec![0..10].into_iter();
         let first_non_reserved = 20;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 10);
         assert_eq!(map.permute(9), 19);
@@ -587,7 +577,7 @@ mod tests {
         let current_inputs = vec![].into_iter();
         let first_non_reserved = 100;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 100);
         assert_eq!(map.permute(10), 110);
@@ -599,7 +589,7 @@ mod tests {
         let current_inputs = vec![].into_iter();
         let first_non_reserved = 0;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 0);
         assert_eq!(map.permute(10), 10);
@@ -611,7 +601,7 @@ mod tests {
         let current_inputs = vec![10..20, 30..40, 50..60].into_iter();
         let first_non_reserved = 100;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 100);
         assert_eq!(map.permute(9), 109);
@@ -631,7 +621,7 @@ mod tests {
         let current_inputs = vec![25..35, 5..15].into_iter();
         let first_non_reserved = 50;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         // "Fixed" addresses
         // 25 -> 10
