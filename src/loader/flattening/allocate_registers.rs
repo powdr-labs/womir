@@ -65,7 +65,7 @@ impl AssignmentSet {
         }
 
         if let Some(w2r) = w2r {
-            // Both are writer and registers are free, so we can assign the register to the writer.
+            // Both the writer and registers are free, so we can assign the register to the writer.
             for r in reg_range.clone() {
                 self.reg_to_writers.entry(r).or_default().push(*w2r.key());
             }
@@ -265,7 +265,17 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
         // the inputs of the break, or at least leave the registers reserved in case of
         // conflicts.
         for (input_idx, reg) in regs.iter().enumerate() {
-            let origin = inputs.map(|inputs| inputs[input_idx]);
+            let origin = inputs.and_then(|inputs| {
+                let origin = inputs[input_idx];
+                if origin.node == 0 && target.kind == TargetType::FunctionOrLoop {
+                    // The target is the function output and the origin is the function
+                    // input, due to calling convention they must necessarily be different
+                    // registers, so we can't do optimistic allocation.
+                    None
+                } else {
+                    Some(origin)
+                }
+            });
 
             active_path
                 .assignments
@@ -352,6 +362,8 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
                                 kind: *kind,
                             },
                             &mut labels,
+                            // The inputs to this break comes from the loop's frame,
+                            // so it can't be optimistically assigned.
                             None,
                             node_idx,
                         );
