@@ -1,6 +1,7 @@
 mod block_tree;
 mod blockless_dag;
 mod dag;
+mod dumb_jump_removal;
 pub mod flattening;
 mod locals_data_flow;
 
@@ -509,6 +510,8 @@ struct Statistics {
     dangling_nodes_removed: usize,
     /// Number of block outputs removed from the DAG.
     block_outputs_removed: usize,
+    /// Number of useless jumps removed from flattened assembly.
+    useless_jumps_removed: usize,
 }
 
 pub fn load_wasm<'a, S: Settings<'a>>(
@@ -1153,12 +1156,13 @@ pub fn load_wasm<'a, S: Settings<'a>>(
     }
 
     log::info!(
-        "WASM module loaded successfully loaded with {} functions!\nOptimization statistics:\n - {} register copies saved\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed",
+        "WASM module loaded successfully loaded with {} functions!\nOptimization statistics:\n - {} register copies saved\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed\n - {} useless jumps removed",
         ctx.functions.len(),
         stats.register_copies_saved,
         stats.constants_deduplicated,
         stats.dangling_nodes_removed,
-        stats.block_outputs_removed
+        stats.block_outputs_removed,
+        stats.useless_jumps_removed
     );
 
     Ok(ctx)
@@ -1249,9 +1253,11 @@ fn parse_function<'a, S: Settings<'a>>(
 
     let blockless_dag = blockless_dag::BlocklessDag::new(dag, label_gen);
 
-    let (definition, copies_saved) =
+    let (mut definition, copies_saved) =
         flattening::flatten_dag(ctx, label_gen, blockless_dag, func_idx);
     stats.register_copies_saved += copies_saved;
+
+    stats.useless_jumps_removed += dumb_jump_removal::remove_dumb_jumps(&ctx.s, &mut definition);
 
     Ok(definition)
 }

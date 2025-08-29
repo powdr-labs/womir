@@ -40,14 +40,6 @@ This files describes all the optimizations ideas we left out for now.
   destination instead of going through multiple frame barriers, because
   each frame barrier potentially adds multiple copies.
 
-- after flattening the DAG, there might remain Jump instructions that
-  targets a label that follows immediately. These Jumps can be eliminated.
-  This is important even when compiling an optimized WASM, because
-  the Br nodes are added explicitly during the DAG processing, even
-  on blocks that falls through (which is needed to properly handle
-  the data flow from breaks to labels). And these Br nodes may generate
-  these superfluous Jumps.
-
 - [tail call]: a call immediately followed by a return can be optimized
   to a tail call. We can even do this for calls where its outputs
   are not related to the return values, because we can set the
