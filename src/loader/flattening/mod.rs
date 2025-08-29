@@ -238,7 +238,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     //    | output_regs | internal_regs + input_regs (mixed) |
     // After the reordering, it will look like this:
     //    | return_pc | return_fp | input_regs | output_regs | internal_regs |
-    allocate_registers::reorder_allocation::<S>(&mut allocation, input_regs, output_start);
+    allocate_registers::reorder_allocation(&mut allocation, input_regs, output_start);
 
     let mut ctx = Context {
         program: &prog.c,

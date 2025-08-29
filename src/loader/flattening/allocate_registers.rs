@@ -496,7 +496,7 @@ impl RepackPermutation {
 /// Reorders the allocation so that the input registers are the given ones,
 /// and all the others begin at a given address, and are tightly repacked to
 /// fill the holes left by the moved inputs.
-pub fn reorder_allocation<'a, S: Settings<'a>>(
+pub fn reorder_allocation(
     allocation: &mut Allocation,
     inputs: Vec<Range<u32>>,
     first_non_reserved_addr: u32,
