@@ -32,6 +32,9 @@ pub fn lift_data_flow(block_tree: BlockTree<'_>) -> wasmparser::Result<LiftedBlo
                 loop {
                     let (new_block, has_changed) = process_block(&mut control_stack, block);
                     if !has_changed {
+                        if log::log_enabled!(log::Level::Trace) {
+                            trace_block_local_interface(&new_block, 0);
+                        }
                         break Element::Block(new_block);
                     }
                     block = new_block;
@@ -45,6 +48,25 @@ pub fn lift_data_flow(block_tree: BlockTree<'_>) -> wasmparser::Result<LiftedBlo
     drop(control_stack);
 
     Ok(LiftedBlockTree { elements })
+}
+
+fn trace_block_local_interface(block: &Block, depth: u32) {
+    log::trace!(
+        "{}{}, Input Locals: {:?}, Output Locals: {:?}",
+        "    ".repeat(depth as usize),
+        match block.block_kind {
+            BlockKind::Block => "Block",
+            BlockKind::Loop => "Loop",
+        },
+        block.input_locals,
+        block.output_locals
+    );
+    for elem in &block.elements {
+        match elem {
+            Element::Block(b) => trace_block_local_interface(b, depth + 1),
+            _ => { /* ignore instructions */ }
+        }
+    }
 }
 
 fn process_block<'a>(
@@ -74,6 +96,7 @@ fn process_block<'a>(
                 old_break_locals: old_output_locals,
                 new_break_locals: BTreeSet::new(),
                 carried_locals: BTreeSet::new(),
+                local_outputs: BTreeSet::new(),
             });
 
             (new_elements, new_input_locals, has_changed) = process_elems(control_stack, elements);
@@ -95,6 +118,7 @@ fn process_block<'a>(
                 old_break_locals: old_input_locals,
                 new_break_locals: BTreeSet::new(),
                 carried_locals: old_carried_locals,
+                local_outputs: BTreeSet::new(),
             });
 
             (new_elements, new_input_locals, has_changed) = process_elems(control_stack, elements);
@@ -137,7 +161,6 @@ fn process_elems<'a>(
     elements: Vec<Element<'a>>,
 ) -> (Vec<Element<'a>>, BTreeSet<u32>, bool) {
     let mut local_inputs = BTreeSet::new();
-    let mut local_outputs = BTreeSet::new();
 
     let mut has_changed = false;
 
@@ -148,9 +171,10 @@ fn process_elems<'a>(
                 let (block, block_has_changed) = process_block(control_stack, block);
 
                 has_changed = has_changed || block_has_changed;
-
                 local_inputs.extend(block.input_locals.iter());
-                local_outputs.extend(block.output_locals.iter());
+                control_stack[0]
+                    .local_outputs
+                    .extend(block.output_locals.iter());
 
                 Element::Block(block)
             }
@@ -162,29 +186,19 @@ fn process_elems<'a>(
                     }
                     Ins::WASMOp(Operator::LocalSet { local_index })
                     | Ins::WASMOp(Operator::LocalTee { local_index }) => {
-                        local_outputs.insert(*local_index);
+                        control_stack[0].local_outputs.insert(*local_index);
                     }
 
                     // Break operations
                     Ins::BrTable { targets } => {
                         for relative_depth in targets {
-                            process_break_target(
-                                control_stack,
-                                &mut local_inputs,
-                                &local_outputs,
-                                *relative_depth,
-                            );
+                            process_break_target(control_stack, &mut local_inputs, *relative_depth);
                         }
                     }
                     Ins::WASMOp(Operator::Br { relative_depth })
                     | Ins::WASMOp(Operator::BrIf { relative_depth })
                     | Ins::BrIfZero { relative_depth } => {
-                        process_break_target(
-                            control_stack,
-                            &mut local_inputs,
-                            &local_outputs,
-                            *relative_depth,
-                        );
+                        process_break_target(control_stack, &mut local_inputs, *relative_depth);
                     }
 
                     // All other operations
@@ -202,7 +216,6 @@ fn process_elems<'a>(
 fn process_break_target(
     control_stack: &mut VecDeque<BlockStackEntry>,
     local_inputs: &mut BTreeSet<u32>,
-    local_outputs: &BTreeSet<u32>,
     relative_depth: u32,
 ) {
     // Every carried local up to the break depth must be given to this break.
@@ -212,15 +225,24 @@ fn process_break_target(
         .flat_map(|entry| entry.carried_locals.iter().cloned())
         .collect_vec();
 
-    let entry = &mut control_stack[relative_depth as usize];
-    entry.new_break_locals.extend(carried_locals);
+    // Every local output up to the break depth must be given to this break.
+    let accum_outputs = control_stack
+        .iter()
+        .take(relative_depth as usize + 1)
+        .flat_map(|entry| entry.local_outputs.iter().cloned())
+        .collect_vec();
 
-    // Every local that have been marked as output must be given to this break.
-    entry.new_break_locals.extend(local_outputs.iter());
+    let target_entry = &mut control_stack[relative_depth as usize];
+    target_entry.new_break_locals.extend(carried_locals);
+    target_entry.new_break_locals.extend(accum_outputs);
 
-    // Every local this break requires that we don't have marked as output, must
+    // Every local this break requires that we don't have marked as output must
     // be taken as input, so it can be forwarded to the break.
-    let diff = entry.old_break_locals.difference(local_outputs);
+    let target_entry = &control_stack[relative_depth as usize];
+    let curr_entry = &control_stack[0];
+    let diff = target_entry
+        .old_break_locals
+        .difference(&curr_entry.local_outputs);
     local_inputs.extend(diff);
 }
 
@@ -228,6 +250,7 @@ struct BlockStackEntry {
     old_break_locals: BTreeSet<u32>,
     new_break_locals: BTreeSet<u32>,
     carried_locals: BTreeSet<u32>,
+    local_outputs: BTreeSet<u32>,
 }
 
 impl BlockStackEntry {
@@ -236,6 +259,7 @@ impl BlockStackEntry {
             old_break_locals: BTreeSet::new(),
             new_break_locals: BTreeSet::new(),
             carried_locals: BTreeSet::new(),
+            local_outputs: BTreeSet::new(),
         }
     }
 }
