@@ -188,6 +188,7 @@ impl Allocation {
 pub fn optimistic_allocation<'a, S: Settings<'a>>(
     dag: &BlocklessDag<'_>,
     reg_gen: &mut RegisterGenerator<'a, S>,
+    top_level_return_regs: Option<&[Range<u32>]>,
 ) -> (Allocation, usize) {
     let mut number_of_saved_copies = 0;
 
@@ -244,17 +245,26 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
                         labels: &mut HashMap<u32, LabelAllocation<'a, S>>,
                         inputs: Option<&[ValueOrigin]>,
                         current_node_idx: usize| {
-        // First, we merge the path from the target label
-        let Some(target_label) =
+        // First, we try to merge the path from the target label
+        let regs = if let Some(target_label) =
             merge_path_from_target(active_path, target, labels, current_node_idx)
-        else {
+        {
+            // We are breaking to a local label, who has registers in the active frame.
+            &target_label.regs
+        } else if let Some(regs) = top_level_return_regs {
+            // We are breaking out of the function from the top level function, so
+            // the return arguments are on the active frame, and we can still optmize.
+            regs
+        } else {
+            // The break inputs must be copied into another frame, so we can't
+            // try optimistic allocation.
             return;
         };
 
         // Now we must optimistically assign the expected registers to all
         // the inputs of the break, or at least leave the registers reserved in case of
         // conflicts.
-        for (input_idx, reg) in target_label.regs.iter().enumerate() {
+        for (input_idx, reg) in regs.iter().enumerate() {
             let origin = inputs.map(|inputs| inputs[input_idx]);
 
             active_path
