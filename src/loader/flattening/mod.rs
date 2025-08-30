@@ -749,6 +749,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                             call.ret_info.ret_fp,
                         )
                         .into(),
+                    call.suffix_directives.into(),
                 ])
             }
         }
