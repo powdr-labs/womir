@@ -5,6 +5,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
+mini-alloc = "1.0.0"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
 [profile.release-with-debug]
