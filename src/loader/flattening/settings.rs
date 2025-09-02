@@ -108,6 +108,9 @@ pub trait Settings<'a> {
     /// Test if a directive is a plain jump to a local frame label.
     fn to_plain_local_jump(directive: Self::Directive) -> Result<String, Self::Directive>;
 
+    /// Test if a directive is a label.
+    fn is_label(directive: &Self::Directive) -> Option<&str>;
+
     /// Emits a directive to mark a code position, and possibly a frame size.
     fn emit_label(
         &self,

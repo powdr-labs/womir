@@ -138,6 +138,14 @@ impl<'a> Settings<'a> for GenericIrSetting {
         directives
     }
 
+    fn is_label(directive: &Self::Directive) -> Option<&str> {
+        if let Directive::Label { id, .. } = directive {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
     fn to_plain_local_jump(directive: Directive) -> Result<String, Directive> {
         if let Directive::Jump { target } = directive {
             Ok(target)
