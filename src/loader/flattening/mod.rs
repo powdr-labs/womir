@@ -194,10 +194,10 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     func_idx: u32,
 ) -> (WriteOnceASM<S::Directive>, usize) {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
-    let mut reg_gen = RegisterGenerator::<S>::new();
+    let mut header_reg_gen = RegisterGenerator::<S>::new();
 
-    let ret_pc = reg_gen.allocate_words(S::words_per_ptr());
-    let ret_fp = reg_gen.allocate_words(S::words_per_ptr());
+    let ret_pc = header_reg_gen.allocate_words(S::words_per_ptr());
+    let ret_fp = header_reg_gen.allocate_words(S::words_per_ptr());
 
     // As per zCray calling convention, after the return PC and FP, we reserve
     // space for the function inputs and outputs. Not only the inputs, but also
@@ -206,33 +206,47 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let input_regs = func_type
         .params()
         .iter()
-        .map(|ty| reg_gen.allocate_type(*ty))
+        .map(|ty| header_reg_gen.allocate_type(*ty))
         .collect_vec();
+
+    let output_start = header_reg_gen.next_available;
     let output_regs = func_type
         .results()
         .iter()
-        .map(|ty| reg_gen.allocate_type(*ty))
+        .map(|ty| header_reg_gen.allocate_type(*ty))
         .collect_vec();
 
     let ret_info = ReturnInfo { ret_pc, ret_fp };
 
     // Perform the register allocation for the function's top-level frame.
+    let mut allocation_reg_gen = RegisterGenerator::<S>::new();
+    // These output regs have the same layout of output_regs, but starts at 0.
+    let allocate_output_regs = func_type
+        .results()
+        .iter()
+        .map(|ty| allocation_reg_gen.allocate_type(*ty))
+        .collect_vec();
     let (mut allocation, mut number_of_saved_copies) =
-        optimistic_allocation(&dag, &mut RegisterGenerator::<S>::new());
+        optimistic_allocation(&dag, &mut allocation_reg_gen, Some(&allocate_output_regs));
+    let num_allocated_regs = allocation_reg_gen.next_available;
 
     // Since this is the top-level frame, the allocation can
     // not be arbitrary. It must conform to the calling convention,
-    // so we must permute the allocation we found to match it.
-    let reg_gen = allocate_registers::permute_allocation::<S>(
-        &mut allocation,
-        input_regs,
-        reg_gen.next_available,
-    );
+    // so we must reorder the allocation we found to match it.
+    //
+    // As of now, the register space looks like this:
+    //    | output_regs | internal_regs + input_regs (mixed) |
+    // After the reordering, it will look like this:
+    //    | return_pc | return_fp | input_regs | output_regs | internal_regs |
+    allocate_registers::reorder_allocation(&mut allocation, input_regs, output_start);
 
     let mut ctx = Context {
         program: &prog.c,
         label_gen,
-        register_gen: reg_gen,
+        register_gen: RegisterGenerator {
+            next_available: output_start + num_allocated_regs,
+            settings: PhantomData,
+        },
     };
 
     let mut ctrl_stack = VecDeque::from([CtrlStackEntry {
@@ -412,7 +426,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
 
             // Finally allocate all the registers for the loop instructions, including the inputs.
             let (loop_allocation, saved_copies) =
-                optimistic_allocation(&sub_dag, &mut loop_reg_gen);
+                optimistic_allocation(&sub_dag, &mut loop_reg_gen, None);
             number_of_saved_copies += saved_copies;
 
             // Sanity check: loops have no outputs:

@@ -208,6 +208,17 @@ mod tests {
     }
 
     #[test]
+    fn test_add() {
+        test_interpreter_from_sample_programs(
+            "add.wasm",
+            "add",
+            &[666, (-624_i32) as u32],
+            vec![],
+            &[42],
+        );
+    }
+
+    #[test]
     fn test_collatz() {
         test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[1 << 22], vec![], &[22]);
         test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[310], vec![], &[86]);
