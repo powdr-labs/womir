@@ -1,20 +1,32 @@
-# WOMIR - Write Once Memory IR
+# WOMIR - Write-Once Memory IR
 
-WOMIR is a compiler from [WebAssembly](https://webassembly.org/) to an IR that flattens stack and locals into abstract infinite registers, with the goal of optimizing local accesses in VMs that can benefit such knowledge, especially zkVMs. The IR does not have a DSL and is represented only in a Rust library.
+WOMIR is a compiler pipeline from [WebAssembly](https://webassembly.org/) to machines with a very particular execution model: write-once memory (WOM) machines.
 
-WOMIR is designed for optimal compilation to [PetraVM](https://github.com/PetraProver/PetraVM), developed through a collaboration between [powdr](https://www.powdr.org/) and [Irreducible](https://www.irreducible.com/).
+Instead of a fixed register bank or a stack, these machines have as many registers as needed, but each can only be written once. To differentiate
+between multiple calls of the same function, or multiple iterations of the same loop, the references to a register are relative
+to a frame pointer managed by loops and function calls. This execution model fits naturally with zkVMs, where the execution trace is immutable anyway.
+
+WOMIR transforms the WebAssembly program into an IR, where WASM local variables and stack becomes egdes of a DAG, from which it can output an
+user-defined assembly-like representation of the WOM program.
+
+WOMIR was initiallty designed for [PetraVM](https://github.com/PetraProver/PetraVM), developed through a collaboration between [powdr](https://www.powdr.org/)
+and [Irreducible](https://www.irreducible.com/).
 
 ## Targets
 
-The IR can target any ISA that supports the usual MIPS/RISC-V style instructions and has RAM. ISAs that have a write once memory region may benefit heavily from infinite registers. This is especially true for zkVMs.
+WOMIR can target ISAs for WOM machines that have arbitrarily many general purpose registers, a special frame pointer (FP) register,
+and instructions that operate on registers relative to the frame pointer. It also enforces that no register is written more than
+once on the same frame. Besides the WOM specific stuff, the WASM operations are carried over throught the IR, so your ISA must be
+able to implement the WASM operations.
 
 Under development:
 
+- [ ] [womir-openvm](https://github.com/powdr-labs/womir-openvm)
 - [ ] [PetraVM](https://github.com/PetraProver/PetraVM)
 
 ## Interpreter
 
-WOMIR has an [interpreter](https://github.com/powdr-labs/womir/blob/main/src/interpreter.rs) that is used for testing.
+WOMIR has its own ISA and a corresponding [interpreter](https://github.com/powdr-labs/womir/blob/main/src/interpreter.rs) that are used for testing.
 
 ## Contributing
 
