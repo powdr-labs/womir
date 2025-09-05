@@ -66,7 +66,8 @@ fn main() -> wasmparser::Result<()> {
 
     let wasm_file = std::fs::read(wasm_file_path).unwrap();
 
-    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?;
+    let program =
+        womir::loader::load_wasm(GenericIrSetting, &wasm_file)?.process_all_functions()?;
 
     if let Err(err) = dump_ir(&program) {
         log::error!("Failed to dump IR: {err}");
@@ -117,7 +118,10 @@ mod tests {
             "Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}"
         );
         let wasm_file = std::fs::read(path).unwrap();
-        let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
+        let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+            .unwrap()
+            .process_all_functions()
+            .unwrap();
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
         assert_eq!(got_output, outputs);
@@ -423,7 +427,10 @@ mod tests {
                 for (mod_name, line, asserts) in modules {
                     println!("Testing module: {} at line {line}", mod_name.display());
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
+                    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+                        .unwrap()
+                        .process_all_functions()
+                        .unwrap();
                     let mut interpreter = Interpreter::new(program, SpectestExternalFunctions);
 
                     asserts

@@ -56,7 +56,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let (flat_program, labels) = linker::link(&program.functions, START_ROM_ADDR);
 
         let ram = program
-            .c
+            .m
             .initial_memory
             .iter()
             .filter_map(|(addr, value)| {
@@ -97,7 +97,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             labels,
         };
 
-        if let Some(start_function) = interpreter.program.c.start_function {
+        if let Some(start_function) = interpreter.program.m.start_function {
             let label = func_idx_to_label(start_function);
             interpreter.run(&label, &[]);
         }
@@ -106,7 +106,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b, 'a, E> {
-        MemoryAccessor::new(self.program.c.memory.unwrap(), self)
+        MemoryAccessor::new(self.program.m.memory.unwrap(), self)
     }
 
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
@@ -114,7 +114,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
         let func_type = &self
             .program
-            .c
+            .m
             .get_func_type(func_label.func_idx.unwrap())
             .ty;
         let n_inputs: u32 = word_count_types::<S>(func_type.params());
@@ -1032,7 +1032,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     }
                     Op::GlobalGet { global_index } => {
                         let Global::Mutable(global_info) =
-                            self.program.c.globals[global_index as usize]
+                            self.program.m.globals[global_index as usize]
                         else {
                             panic!("immutable GlobalGet should have been resolved at compile time");
                         };
@@ -1048,7 +1048,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     }
                     Op::GlobalSet { global_index } => {
                         let Global::Mutable(global_info) =
-                            self.program.c.globals[global_index as usize]
+                            self.program.m.globals[global_index as usize]
                         else {
                             panic!("GlobalSet expects a mutable global");
                         };
@@ -1339,7 +1339,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(inputs[0].len(), 1);
                         let index = self.get_vrom_relative_u32(inputs[0].clone());
 
-                        let table = TableAccessor::new(self.program.c.tables[table as usize], self);
+                        let table = TableAccessor::new(self.program.m.tables[table as usize], self);
                         let entry = table
                             .get_entry(index)
                             .expect("TableGet: index out of bounds");
@@ -1356,13 +1356,13 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .unwrap();
 
                         let mut table =
-                            TableAccessor::new(self.program.c.tables[table as usize], self);
+                            TableAccessor::new(self.program.m.tables[table as usize], self);
                         table
                             .set_entry(index, value)
                             .expect("TableSet: index out of bounds");
                     }
                     Op::RefFunc { function_index } => {
-                        let func_type = self.program.c.get_func_type(function_index).unique_id;
+                        let func_type = self.program.m.get_func_type(function_index).unique_id;
                         let frame_size = self.program.functions[function_index as usize].frame_size;
                         let addr = self.labels[&func_idx_to_label(function_index)].pc;
 
