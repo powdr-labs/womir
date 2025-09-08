@@ -445,7 +445,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             )?;
 
             let mut loop_ctx = Context {
-                program: &ctx.program,
+                program: ctx.program,
                 label_gen: ctx.label_gen,
                 register_gen: loop_reg_gen,
             };

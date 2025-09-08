@@ -409,7 +409,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 // Loads the function to memory in the BlockTree format.
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(func_type, body.get_locals_reader()?)?;
-                let block_tree = BlockTree::load_function(&ctx, body.get_operators_reader()?)?;
+                let block_tree = BlockTree::load_function(ctx, body.get_operators_reader()?)?;
                 FunctionProcessingStage::BlockTree {
                     locals_types,
                     tree: block_tree,

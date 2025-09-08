@@ -12,7 +12,7 @@ use wasmparser::{FuncType, Operator as Op, RefType, ValType};
 use crate::loader::Global;
 
 use super::{
-    Block, BlockKind, Module, Element, Instruction as Ins, locals_data_flow::LiftedBlockTree,
+    Block, BlockKind, Element, Instruction as Ins, Module, locals_data_flow::LiftedBlockTree,
 };
 
 #[derive(Debug)]
