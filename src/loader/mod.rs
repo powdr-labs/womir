@@ -666,15 +666,15 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
 #[derive(Debug, Default)]
 pub struct Statistics {
     /// Number of register copies saved by the "smart" register allocation.
-    register_copies_saved: usize,
+    pub register_copies_saved: usize,
     /// Number of constants deduplicated in the DAG.
-    constants_deduplicated: usize,
+    pub constants_deduplicated: usize,
     /// Number of dangling nodes removed from the DAG.
-    dangling_nodes_removed: usize,
+    pub dangling_nodes_removed: usize,
     /// Number of block outputs removed from the DAG.
-    block_outputs_removed: usize,
+    pub block_outputs_removed: usize,
     /// Number of useless jumps removed from flattened assembly.
-    useless_jumps_removed: usize,
+    pub useless_jumps_removed: usize,
 }
 
 impl Display for Statistics {
