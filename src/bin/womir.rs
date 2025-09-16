@@ -335,6 +335,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_memory_fill() {
+        test_wasm("wasm_testsuite/memory_fill.wast", None);
+    }
+
+    #[test]
     fn test_wasm_ref_is_null() {
         test_wasm("wasm_testsuite/ref_is_null.wast", None);
     }

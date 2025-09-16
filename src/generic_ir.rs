@@ -440,7 +440,7 @@ impl linker::Directive for Directive<'_> {
         }
     }
 
-    fn as_label(&self) -> Option<linker::Label> {
+    fn as_label(&self) -> Option<linker::Label<'_>> {
         if let Directive::Label { id, frame_size } = self {
             Some(linker::Label {
                 id,

@@ -9,7 +9,7 @@ pub struct Label<'a> {
 
 pub trait Directive: Clone {
     fn nop() -> Self;
-    fn as_label(&self) -> Option<Label>;
+    fn as_label(&self) -> Option<Label<'_>>;
 }
 
 #[derive(Debug)]
