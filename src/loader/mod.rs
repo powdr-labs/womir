@@ -1,9 +1,9 @@
-mod block_tree;
-mod blockless_dag;
-mod dag;
-mod dumb_jump_removal;
+pub mod block_tree;
+pub mod blockless_dag;
+pub mod dag;
+pub mod dumb_jump_removal;
 pub mod flattening;
-mod locals_data_flow;
+pub mod locals_data_flow;
 
 use core::panic;
 use std::{
@@ -17,7 +17,7 @@ use std::{
 
 use block_tree::BlockTree;
 use dag::Dag;
-use flattening::WriteOnceASM;
+use flattening::WriteOnceAsm;
 use itertools::Itertools;
 use wasmparser::{
     CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, LocalsReader,
@@ -387,12 +387,12 @@ pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
         local_types: Vec<ValType>,
         tree: LiftedBlockTree<'a>,
     },
-    PlainDAG(Dag<'a>),
-    ConstDedupDAG(Dag<'a>),
-    DanglingOptDAG(Dag<'a>),
-    BlocklessDAG(BlocklessDag<'a>),
-    PlainFlatASM(WriteOnceASM<S::Directive>),
-    DumbJumpOptFlatASM(WriteOnceASM<S::Directive>),
+    PlainDag(Dag<'a>),
+    ConstDedupDag(Dag<'a>),
+    DanglingOptDag(Dag<'a>),
+    BlocklessDag(BlocklessDag<'a>),
+    PlainFlatAsm(WriteOnceAsm<S::Directive>),
+    DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
 }
 
 impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
@@ -427,17 +427,17 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 // Build the DAG representation of the function.
                 let func_type = ctx.get_func_type(func_idx);
                 let dag = Dag::new(ctx, &func_type.ty, &local_types, tree)?;
-                FunctionProcessingStage::PlainDAG(dag)
+                FunctionProcessingStage::PlainDag(dag)
             }
-            FunctionProcessingStage::PlainDAG(mut dag) => {
+            FunctionProcessingStage::PlainDag(mut dag) => {
                 // Optimization pass: deduplicate const definitions in the DAG.
                 let constants_deduplicated = dag::const_dedup::deduplicate_constants(&mut dag);
                 if let Some(stats) = stats {
                     stats.constants_deduplicated += constants_deduplicated;
                 }
-                FunctionProcessingStage::ConstDedupDAG(dag)
+                FunctionProcessingStage::ConstDedupDag(dag)
             }
-            FunctionProcessingStage::ConstDedupDAG(mut dag) => {
+            FunctionProcessingStage::ConstDedupDag(mut dag) => {
                 // Optimization passes: remove pure nodes that does not contribute to the output.
                 let mut removed_nodes = 0;
                 let mut removed_block_outputs = 0;
@@ -454,33 +454,33 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                     stats.dangling_nodes_removed += removed_nodes;
                     stats.block_outputs_removed += removed_block_outputs;
                 }
-                FunctionProcessingStage::DanglingOptDAG(dag)
+                FunctionProcessingStage::DanglingOptDag(dag)
             }
-            FunctionProcessingStage::DanglingOptDAG(dag) => {
+            FunctionProcessingStage::DanglingOptDag(dag) => {
                 // Convert the DAG to a blockless DAG representation.
                 let blockless_dag = BlocklessDag::new(dag, label_gen);
-                FunctionProcessingStage::BlocklessDAG(blockless_dag)
+                FunctionProcessingStage::BlocklessDag(blockless_dag)
             }
-            FunctionProcessingStage::BlocklessDAG(blockless_dag) => {
+            FunctionProcessingStage::BlocklessDag(blockless_dag) => {
                 // Flatten the blockless DAG into assembly-like representation.
                 let (flat_asm, copies_saved) =
                     flattening::flatten_dag(settings, ctx, label_gen, blockless_dag, func_idx);
                 if let Some(stats) = stats {
                     stats.register_copies_saved += copies_saved;
                 }
-                FunctionProcessingStage::PlainFlatASM(flat_asm)
+                FunctionProcessingStage::PlainFlatAsm(flat_asm)
             }
-            FunctionProcessingStage::PlainFlatASM(mut flat_asm) => {
+            FunctionProcessingStage::PlainFlatAsm(mut flat_asm) => {
                 // Optimization pass: remove useless jumps.
                 let jumps_removed = dumb_jump_removal::remove_dumb_jumps(settings, &mut flat_asm);
                 if let Some(stats) = stats {
                     stats.useless_jumps_removed += jumps_removed;
                 }
-                FunctionProcessingStage::DumbJumpOptFlatASM(flat_asm)
+                FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
             }
-            FunctionProcessingStage::DumbJumpOptFlatASM(flat_asm) => {
+            FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm) => {
                 // Processing is complete. Just return itself.
-                FunctionProcessingStage::DumbJumpOptFlatASM(flat_asm)
+                FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
             }
         })
     }
@@ -492,9 +492,9 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
         func_idx: u32,
         label_gen: &mut RangeFrom<u32>,
         mut stats: Option<&mut Statistics>,
-    ) -> wasmparser::Result<WriteOnceASM<S::Directive>> {
+    ) -> wasmparser::Result<WriteOnceAsm<S::Directive>> {
         loop {
-            if let FunctionProcessingStage::DumbJumpOptFlatASM(flat_asm) = self {
+            if let FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm) = self {
                 return Ok(flat_asm);
             }
             self = self.advance_stage(settings, ctx, func_idx, label_gen, stats.as_deref_mut())?;
@@ -623,7 +623,7 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
 
 pub struct Program<'a, S: Settings<'a>> {
     pub m: Module<'a>,
-    pub functions: Vec<WriteOnceASM<S::Directive>>,
+    pub functions: Vec<WriteOnceAsm<S::Directive>>,
 }
 
 /// Type size, in bytes
@@ -849,7 +849,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                         // called indirectly. Direct calls are resolved statically.
                         let wrapper_func = generate_imported_func_wrapper(&ctx, func_idx);
                         ctx.functions
-                            .push(FunctionProcessingStage::BlocklessDAG(wrapper_func));
+                            .push(FunctionProcessingStage::BlocklessDag(wrapper_func));
                     } else if import.module == "spectest" {
                         // To run the tests, the runtime must provide a few basic imports
                         // of the `spectest` module.

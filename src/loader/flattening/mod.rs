@@ -46,7 +46,7 @@ use super::blockless_dag::{BlocklessDag, Operation};
 
 /// An assembly-like representation for a write-once memory machine.
 #[derive(Debug, Clone)]
-pub struct WriteOnceASM<D> {
+pub struct WriteOnceAsm<D> {
     pub func_idx: u32,
     pub frame_size: u32,
     pub directives: Vec<D>,
@@ -190,7 +190,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     label_gen: &mut RangeFrom<u32>,
     dag: BlocklessDag<'a>,
     func_idx: u32,
-) -> (WriteOnceASM<S::Directive>, usize) {
+) -> (WriteOnceAsm<S::Directive>, usize) {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut header_reg_gen = RegisterGenerator::<S>::new();
 
@@ -278,7 +278,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let directives = Tree::Node(directives_with_labels).flatten();
 
     (
-        WriteOnceASM {
+        WriteOnceAsm {
             func_idx,
             frame_size,
             directives,

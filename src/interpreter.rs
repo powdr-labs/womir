@@ -1781,7 +1781,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     /// The high bytes of the last returned word can be anything if `num_bytes` is
     /// not a multiple of 4.
     fn read_contiguous_bytes(&self, byte_addr: u32, num_bytes: u32) -> Result<Vec<u32>, ()> {
-        let num_words = (num_bytes + 3) / 4;
+        let num_words = num_bytes.div_ceil(4);
         let mut data = Vec::with_capacity(num_words as usize);
         let offset_bytes = byte_addr % 4;
         if offset_bytes == 0 {
