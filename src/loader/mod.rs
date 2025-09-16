@@ -308,6 +308,30 @@ pub struct Module<'a> {
 }
 
 impl<'a> Module<'a> {
+    /// Appends a function type to the module, returning the new function index.
+    pub fn append_function(&mut self, inputs: &[ValType], outputs: &[ValType]) -> u32 {
+        // We either find an existing identical type, or we create a new one.
+        let type_idx = self
+            .types
+            .iter()
+            .position(|t| t.ty.params() == inputs && t.ty.results() == outputs)
+            .unwrap_or_else(|| {
+                // Create a new type.
+                let type_idx = self.types.len();
+                self.types.push(Rc::new(FuncType {
+                    unique_id: type_idx as u32,
+                    ty: wasmparser::FuncType::new(inputs.iter().cloned(), outputs.iter().cloned()),
+                }));
+
+                type_idx
+            }) as u32;
+
+        let func_idx = self.func_types.len() as u32;
+        self.func_types.push(type_idx);
+
+        func_idx
+    }
+
     fn get_type(&self, type_idx: u32) -> &FuncType {
         &self.types[type_idx as usize]
     }
