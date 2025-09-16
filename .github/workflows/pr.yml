@@ -24,12 +24,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install Rust toolchain 1.85.1 (stable)
+      - name: Install Rust toolchain 1.89.0 (stable)
         run: |
-          rustup install 1.85.1
-          rustup +1.85.1 component add clippy
-          rustup +1.85.1 component add rustfmt
-          rustup +1.85.1 component add rust-src
+          rustup install 1.89.0
+          rustup +1.89.0 component add clippy
+          rustup +1.89.0 component add rustfmt
+          rustup +1.89.0 component add rust-src
 
       - name: Build project
         run: cargo build --release
@@ -51,10 +51,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain 1.85.1 (stable)
+      - name: Install Rust toolchain 1.89.0 (stable)
         run: |
-          rustup install 1.85.1
-          rustup +1.85.1 component add clippy
+          rustup install 1.89.0
+          rustup +1.89.0 component add clippy
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -67,10 +67,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain 1.85.1 (stable)
+      - name: Install Rust toolchain 1.89.0 (stable)
         run: |
-          rustup install 1.85.1
-          rustup +1.85.1 component add rustfmt
+          rustup install 1.89.0
+          rustup +1.89.0 component add rustfmt
 
       - name: Check formatting
         run: cargo fmt --all -- --check
