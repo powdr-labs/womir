@@ -12,7 +12,7 @@ use wasmparser::{FuncType, Operator as Op, RefType, ValType};
 use crate::loader::Global;
 
 use super::{
-    Block, BlockKind, CommonProgram, Element, Instruction as Ins, locals_data_flow::LiftedBlockTree,
+    Block, BlockKind, Element, Instruction as Ins, Module, locals_data_flow::LiftedBlockTree,
 };
 
 #[derive(Debug)]
@@ -58,7 +58,7 @@ pub struct Dag<'a> {
 
 impl<'a> Dag<'a> {
     pub fn new(
-        module: &CommonProgram<'a>,
+        module: &Module<'a>,
         func_type: &FuncType,
         locals_types: &[ValType],
         block_tree: LiftedBlockTree<'a>,
@@ -125,7 +125,7 @@ struct BreakArgs {
 // TODO: refactor
 #[allow(clippy::type_complexity)]
 fn build_dag<'a>(
-    module: &CommonProgram<'a>,
+    module: &Module<'a>,
     locals_types: &[ValType],
     input_types: Vec<ValType>,
     block_stack: &mut VecDeque<BreakArgs>,
@@ -392,7 +392,7 @@ fn build_dag<'a>(
 }
 
 fn build_dag_for_block<'a>(
-    module: &CommonProgram<'a>,
+    module: &Module<'a>,
     locals_types: &[ValType],
     inputs: Vec<ValueOrigin>,
     block_stack: &mut VecDeque<BreakArgs>,
@@ -575,7 +575,7 @@ fn default_const_for_type(value_type: ValType) -> Operation<'static> {
 }
 
 struct StackTracker<'a, 'b> {
-    module: &'b CommonProgram<'a>,
+    module: &'b Module<'a>,
     nodes: Vec<Node<'a>>,
     stack: Vec<ValueOrigin>,
 }
