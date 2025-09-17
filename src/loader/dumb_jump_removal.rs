@@ -4,11 +4,11 @@
 //! This must be done after flattening, because breaks are important to
 //! generate the appropriate argument copy instructions.
 
-use crate::loader::flattening::{WriteOnceASM, settings::Settings};
+use crate::loader::flattening::{WriteOnceAsm, settings::Settings};
 
 pub fn remove_dumb_jumps<'a, S: Settings<'a>>(
     s: &S,
-    asm: &mut WriteOnceASM<S::Directive>,
+    asm: &mut WriteOnceAsm<S::Directive>,
 ) -> usize {
     let mut removed = 0;
 
