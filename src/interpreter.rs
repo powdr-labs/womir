@@ -1277,6 +1277,59 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         self.set_vrom_relative_u32(output.unwrap(), result);
                     }
+                    Op::MemoryFill { mem } => {
+                        assert_eq!(mem, 0);
+
+                        let dst = self.get_vrom_relative_u32(inputs[0].clone());
+                        let value = self.get_vrom_relative_u32(inputs[1].clone()) as u8;
+                        let mut byte_size = self.get_vrom_relative_u32(inputs[2].clone());
+
+                        let mut memory = self.get_mem();
+
+                        // write the first misaligned bytes
+                        let misalignment = dst & 3;
+                        let mut dst_word = dst & !3;
+                        if misalignment != 0 {
+                            let mut word = memory
+                                .get_word(dst_word)
+                                .expect("Out of bounds read")
+                                .to_le_bytes();
+                            for i in misalignment..4 {
+                                if byte_size == 0 {
+                                    break;
+                                }
+                                word[i as usize] = value;
+                                byte_size -= 1;
+                            }
+                            memory
+                                .set_word(dst_word, u32::from_le_bytes(word))
+                                .expect("Out of bounds write");
+                            dst_word += 4;
+                        }
+
+                        // write the middle aligned words
+                        let num_full_words = byte_size / 4;
+                        let full_word = u32::from_le_bytes([value; 4]);
+                        memory
+                            .write_contiguous(dst_word, &vec![full_word; num_full_words as usize])
+                            .expect("Out of bounds write");
+                        byte_size -= num_full_words * 4;
+                        dst_word += num_full_words * 4;
+
+                        // write the last misaligned bytes
+                        if byte_size > 0 {
+                            let mut word = memory
+                                .get_word(dst_word)
+                                .expect("Out of bounds read")
+                                .to_le_bytes();
+                            for i in 0..byte_size {
+                                word[i as usize] = value;
+                            }
+                            memory
+                                .set_word(dst_word, u32::from_le_bytes(word))
+                                .expect("Out of bounds write");
+                        }
+                    }
                     Op::MemoryCopy { dst_mem, src_mem } => {
                         assert_eq!(dst_mem, 0);
                         assert_eq!(src_mem, 0);
