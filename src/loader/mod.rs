@@ -955,7 +955,8 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                         .ty
                         .maximum
                         .map(|v| v as u32)
-                        .unwrap_or(DEFAULT_MAX_TABLE_SIZE);
+                        // ensure table max size is a least as big as the initial size
+                        .unwrap_or(DEFAULT_MAX_TABLE_SIZE.max(table.ty.initial as u32));
 
                     // We include two extra words for the table size and maximum size
                     let segment = mem_allocator
