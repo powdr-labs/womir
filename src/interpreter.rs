@@ -1259,6 +1259,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let value = [signed as u32, (signed >> 32) as u32];
                         self.set_vrom_relative_range(output_reg, &value);
                     }
+                    Op::MemorySize { mem } => {
+                        assert_eq!(mem, 0, "Only memory 0 is supported in this interpreter");
+                        let memory = self.get_mem();
+                        let num_pages = memory.get_size() / WASM_PAGE_SIZE;
+                        self.set_vrom_relative_u32(output.unwrap(), num_pages);
+                    }
                     Op::MemoryGrow { mem } => {
                         let extra_pages = self.get_vrom_relative_u32(inputs[0].clone());
 
