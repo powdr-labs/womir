@@ -1,7 +1,11 @@
 use wasmparser::Operator as Op;
 
-use crate::loader::flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree};
+use crate::loader::{
+    dag::WasmValue,
+    flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree},
+};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     ops::Range,
 };
@@ -36,6 +40,18 @@ pub struct ReturnInfosToCopy<'a> {
     pub dest: &'a ReturnInfo,
 }
 
+/// Indicates whether a Wasm input is a constant, and if so, its value.
+///
+/// The `must_collapse` cell can be mutated to indicate that the constant
+/// should be collapsed into the instruction, if the ISA supports it.
+pub enum MaybeConstant {
+    NonConstant,
+    Constant {
+        value: WasmValue,
+        must_collapse: Cell<bool>,
+    },
+}
+
 /// Trait controlling the behavior of the flattening process.
 ///
 /// TODO: find a way to make calling conventions and interface registers allocation
@@ -51,6 +67,20 @@ pub trait Settings<'a> {
 
     fn is_jump_condition_available(cond: JumpCondition) -> bool;
     fn is_relative_jump_available() -> bool;
+
+    /// Tells whether constant collapsing optimization is enabled.
+    ///
+    /// The returned function will be called on every Wasm node with
+    /// at least one provably constant input, and is responsible for
+    /// deciding which of them, if any, should be part of the node itself.
+    ///
+    /// This can be used for ISAs that support immediate operands on
+    /// certain instructions.
+    ///
+    /// Default implementation returns None, meaning no constant collapsing.
+    fn get_const_collapse_processor(&self) -> Option<impl Fn(&Op, &[MaybeConstant])> {
+        None::<fn(&Op, &[MaybeConstant])>
+    }
 
     /// Tells wether outputs are bound to the function frame before the call,
     /// with copy_into_frame, or if they must be copied out after the call.

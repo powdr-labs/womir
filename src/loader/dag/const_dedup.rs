@@ -1,13 +1,8 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    hash::Hash,
-};
-
-use wasmparser::{Operator as Op, RefType, ValType};
+use std::collections::{HashMap, hash_map::Entry};
 
 use crate::loader::{
     BlockKind,
-    dag::{Dag, Node, NodeInput, Operation, ValueOrigin},
+    dag::{Dag, Node, NodeInput, Operation, ValueOrigin, WasmValue},
 };
 
 /// This is an optimization pass that, if a constant has been defined
@@ -23,46 +18,11 @@ pub fn deduplicate_constants(dag: &mut Dag) -> usize {
     num_removed_consts
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct HashableConst<'a>(Op<'a>);
-
-impl HashableConst<'_> {
-    fn value_type(&self) -> ValType {
-        match self.0 {
-            Op::RefNull { .. } | Op::RefFunc { .. } => ValType::Ref(RefType::FUNCREF),
-            Op::I32Const { .. } => ValType::I32,
-            Op::I64Const { .. } => ValType::I64,
-            Op::F32Const { .. } => ValType::F32,
-            Op::F64Const { .. } => ValType::F64,
-            Op::V128Const { .. } => ValType::V128,
-            _ => panic!("Unsupported constant type for hashing"),
-        }
-    }
-}
-
-impl Hash for HashableConst<'_> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(&self.0).hash(state);
-        match self.0 {
-            Op::RefNull { .. } => {
-                // the attributes of RefNull are not part of WASM 2.0 spec, so we ignore it
-            }
-            Op::RefFunc { function_index } => function_index.hash(state),
-            Op::I32Const { value } => value.hash(state),
-            Op::I64Const { value } => value.hash(state),
-            Op::F32Const { value } => value.bits().hash(state),
-            Op::F64Const { value } => value.bits().hash(state),
-            Op::V128Const { value } => value.hash(state),
-            _ => panic!("Unsupported constant type for hashing"),
-        }
-    }
-}
-
 fn recursive_deduplication<'a>(
     nodes: &mut Vec<Node<'a>>,
-    mut const_to_origin: HashMap<HashableConst<'a>, Option<ValueOrigin>>,
-    mut origin_to_const: HashMap<ValueOrigin, HashableConst<'a>>,
-) -> (usize, Vec<HashableConst<'a>>) {
+    mut const_to_origin: HashMap<WasmValue, Option<ValueOrigin>>,
+    mut origin_to_const: HashMap<ValueOrigin, WasmValue>,
+) -> (usize, Vec<WasmValue>) {
     let mut num_consts_removed = 0;
 
     let (input_node, nodes) = nodes.as_mut_slice().split_first_mut().unwrap();
@@ -71,8 +31,8 @@ fn recursive_deduplication<'a>(
     let mut missing_from_inputs = Vec::new();
 
     // Find the best origin of a constant, possibly requiring it as input if not available.
-    let mut get_origin = |const_to_origin: &mut HashMap<HashableConst<'a>, Option<ValueOrigin>>,
-                          ct: &HashableConst<'a>|
+    let mut get_origin = |const_to_origin: &mut HashMap<WasmValue, Option<ValueOrigin>>,
+                          ct: &WasmValue|
      -> ValueOrigin {
         let origin = const_to_origin.get_mut(ct).unwrap();
         if let Some(origin) = origin {
@@ -104,26 +64,22 @@ fn recursive_deduplication<'a>(
 
         match &mut node.operation {
             Operation::Inputs => unreachable!(),
-            Operation::WASMOp(op @ Op::RefNull { .. })
-            | Operation::WASMOp(op @ Op::RefFunc { .. })
-            | Operation::WASMOp(op @ Op::I32Const { .. })
-            | Operation::WASMOp(op @ Op::I64Const { .. })
-            | Operation::WASMOp(op @ Op::F32Const { .. })
-            | Operation::WASMOp(op @ Op::F64Const { .. })
-            | Operation::WASMOp(op @ Op::V128Const { .. }) => {
-                // Every constant creates an entry in the `origin_to_const` map.
-                origin_to_const.insert(ValueOrigin::new(node_index, 0), HashableConst(op.clone()));
+            Operation::WASMOp(op) => {
+                if let Ok(const_val) = WasmValue::try_from(&*op) {
+                    // Every constant creates an entry in the `origin_to_const` map.
+                    origin_to_const.insert(ValueOrigin::new(node_index, 0), const_val.clone());
 
-                // If there is no previous definition of this constant, it also
-                // creates an entry in the `const_to_origin` map.
-                match const_to_origin.entry(HashableConst(op.clone())) {
-                    Entry::Occupied(..) => {
-                        num_consts_removed += 1;
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(Some(ValueOrigin::new(node_index, 0)));
-                    }
-                };
+                    // If there is no previous definition of this constant, it also
+                    // creates an entry in the `const_to_origin` map.
+                    match const_to_origin.entry(const_val) {
+                        Entry::Occupied(..) => {
+                            num_consts_removed += 1;
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(Some(ValueOrigin::new(node_index, 0)));
+                        }
+                    };
+                }
             }
             Operation::Block {
                 kind: BlockKind::Loop,

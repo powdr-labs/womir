@@ -17,7 +17,6 @@
 //! break inputs are explicitly marked.
 
 mod allocate_registers;
-pub mod settings;
 
 use derive_where::derive_where;
 
@@ -34,12 +33,8 @@ use crate::loader::{
     FunctionRef, Module,
     blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
-    flattening::{
-        allocate_registers::NotAllocatedError,
-        settings::{
-            ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
-        },
-    },
+    flattening::allocate_registers::NotAllocatedError,
+    settings::{ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings},
 };
 
 use super::blockless_dag::{BlocklessDag, NodeInput, Operation};

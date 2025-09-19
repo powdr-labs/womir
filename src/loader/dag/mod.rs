@@ -1,3 +1,4 @@
+pub mod const_collapse;
 pub mod const_dedup;
 pub mod dangling_removal;
 
@@ -44,7 +45,7 @@ impl ValueOrigin {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WasmValue {
     I32(i32),
     I64(i64),
@@ -52,6 +53,37 @@ pub enum WasmValue {
     F64(Ieee64),
     V128(V128),
     RefNull,
+    RefFunc(u32),
+}
+
+impl WasmValue {
+    fn value_type(&self) -> ValType {
+        match self {
+            WasmValue::RefNull | WasmValue::RefFunc { .. } => ValType::Ref(RefType::FUNCREF),
+            WasmValue::I32(_) => ValType::I32,
+            WasmValue::I64(_) => ValType::I64,
+            WasmValue::F32(_) => ValType::F32,
+            WasmValue::F64(_) => ValType::F64,
+            WasmValue::V128(_) => ValType::V128,
+        }
+    }
+}
+
+impl TryFrom<&Op<'_>> for WasmValue {
+    type Error = ();
+
+    fn try_from(value: &Op<'_>) -> Result<Self, Self::Error> {
+        match value {
+            Op::I32Const { value } => Ok(WasmValue::I32(*value)),
+            Op::I64Const { value } => Ok(WasmValue::I64(*value)),
+            Op::F32Const { value } => Ok(WasmValue::F32(*value)),
+            Op::F64Const { value } => Ok(WasmValue::F64(*value)),
+            Op::V128Const { value } => Ok(WasmValue::V128(*value)),
+            Op::RefNull { .. } => Ok(WasmValue::RefNull),
+            Op::RefFunc { function_index } => Ok(WasmValue::RefFunc(*function_index)),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

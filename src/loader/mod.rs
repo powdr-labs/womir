@@ -4,6 +4,7 @@ pub mod dag;
 pub mod dumb_jump_removal;
 pub mod flattening;
 pub mod locals_data_flow;
+pub mod settings;
 
 use core::panic;
 use std::{
@@ -28,8 +29,8 @@ use wasmparser::{
 use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget},
     dag::{NodeInput, ValueOrigin},
-    flattening::settings::Settings,
     locals_data_flow::LiftedBlockTree,
+    settings::Settings,
 };
 
 pub use flattening::{func_idx_to_label, word_count_type};
