@@ -42,7 +42,7 @@ use crate::loader::{
     },
 };
 
-use super::blockless_dag::{BlocklessDag, Operation};
+use super::blockless_dag::{BlocklessDag, NodeInput, Operation};
 
 /// An assembly-like representation for a write-once memory machine.
 #[derive(Debug, Clone)]
@@ -566,7 +566,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     let inputs = target
                         .input_permutation
                         .iter()
-                        .map(|&idx| node_inputs[idx as usize])
+                        .map(|&idx| node_inputs[idx as usize].clone())
                         .collect_vec();
 
                     // Emit the jump to the target label.
@@ -692,10 +692,12 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 let inputs = map_input_into_regs(node.inputs, curr_entry)?;
                 let outputs = (0..node.output_types.len())
                     .map(|output_idx| {
-                        curr_entry.allocation.get(&ValueOrigin {
-                            node: node_idx,
-                            output_idx: output_idx as u32,
-                        })
+                        curr_entry
+                            .allocation
+                            .get(&NodeInput::Reference(ValueOrigin {
+                                node: node_idx,
+                                output_idx: output_idx as u32,
+                            }))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -816,10 +818,14 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let inputs = map_input_into_regs(node.inputs, curr_entry)?;
             let output = match node.output_types.len() {
                 0 => None,
-                1 => Some(curr_entry.allocation.get(&ValueOrigin {
-                    node: node_idx,
-                    output_idx: 0,
-                })?),
+                1 => Some(
+                    curr_entry
+                        .allocation
+                        .get(&NodeInput::Reference(ValueOrigin {
+                            node: node_idx,
+                            output_idx: 0,
+                        }))?,
+                ),
                 _ => {
                     panic!("WASM instructions with multiple outputs! This is a bug.");
                 }
@@ -840,12 +846,12 @@ fn assert_reg<'a, S: Settings<'a>>(reg: &Range<u32>, ty: ValType) {
 }
 
 fn map_input_into_regs(
-    node_inputs: Vec<ValueOrigin>,
+    node_inputs: Vec<NodeInput>,
     curr_entry: &CtrlStackEntry,
 ) -> Result<Vec<Range<u32>>, NotAllocatedError> {
     node_inputs
         .into_iter()
-        .map(|origin| curr_entry.allocation.get(&origin))
+        .map(|input| curr_entry.allocation.get(&input))
         .collect()
 }
 
@@ -920,10 +926,12 @@ fn prepare_function_call<'a, S: Settings<'a>>(
             .push(copy_into_frame(s, ctx, src_reg, frame_ptr.clone(), dest_reg).into());
     }
     for output_idx in 0..num_outputs {
-        let caller_reg = curr_entry.allocation.get(&ValueOrigin {
-            node: node_idx,
-            output_idx: output_idx as u32,
-        })?;
+        let caller_reg = curr_entry
+            .allocation
+            .get(&NodeInput::Reference(ValueOrigin {
+                node: node_idx,
+                output_idx: output_idx as u32,
+            }))?;
         let callee_reg = fn_reg_gen.allocate_words(caller_reg.len() as u32);
 
         if S::use_non_deterministic_function_outputs() {
@@ -946,7 +954,7 @@ fn emit_jump<'a, S: Settings<'a>>(
     s: &S,
     ctx: &mut Context<'a, '_, S>,
     ret_info: Option<&ReturnInfo>,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     target: &BreakTarget,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
@@ -1041,7 +1049,7 @@ fn copy_local_jump_args<'a, S: Settings<'a>>(
     s: &S,
     ctx: &mut Context<'a, '_, S>,
     allocation: &Allocation,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     output_regs: &[Range<u32>],
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
     // Copy the node inputs into the output registers, if they are not already assigned.
@@ -1067,7 +1075,7 @@ fn local_jump<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_, S>,
     label_id: u32,
     allocation: &Allocation,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
     // Copy the node inputs into the output registers, if they are not already assigned.
     let output_regs = &allocation.labels[&label_id];
@@ -1084,7 +1092,7 @@ fn top_level_return<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_, S>,
     ret_info: &ReturnInfo,
     allocation: &Allocation,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     output_regs: &[Range<u32>],
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
     // Copy the node inputs into the output registers, if they are not already assigned.
@@ -1106,7 +1114,7 @@ fn return_from_loop<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_, S>,
     ctrl_stack_len: usize,
     output_regs: &[Range<u32>],
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     allocation: &Allocation,
     curr_entry: &LoopStackEntry,
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
@@ -1148,7 +1156,7 @@ fn jump_out_of_loop<'a, S: Settings<'a>>(
     depth: u32,
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
     let caller_entry = ctrl_stack.front().unwrap();
     let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
@@ -1188,7 +1196,7 @@ fn jump_into_loop<'a, S: Settings<'a>>(
     depth_offset: i64,
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
 ) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
     let mut directives: Vec<Tree<S::Directive>> = Vec::new();
 

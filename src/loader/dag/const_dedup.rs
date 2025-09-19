@@ -7,7 +7,7 @@ use wasmparser::{Operator as Op, RefType, ValType};
 
 use crate::loader::{
     BlockKind,
-    dag::{Dag, Node, Operation, ValueOrigin},
+    dag::{Dag, Node, NodeInput, Operation, ValueOrigin},
 };
 
 /// This is an optimization pass that, if a constant has been defined
@@ -94,9 +94,12 @@ fn recursive_deduplication<'a>(
     for (node_index, node) in (1usize..).zip(nodes.iter_mut()) {
         // For each input of this node, remap it if needed.
         for input in node.inputs.iter_mut() {
-            if let Some(ct) = origin_to_const.get(input) {
-                *input = get_origin(&mut const_to_origin, ct);
+            if let NodeInput::Reference(origin) = input
+                && let Some(ct) = origin_to_const.get(origin)
+            {
+                *origin = get_origin(&mut const_to_origin, ct);
             }
+            // Constants pass through unchanged
         }
 
         match &mut node.operation {
@@ -151,13 +154,19 @@ fn recursive_deduplication<'a>(
                     .iter()
                     .enumerate()
                     .filter_map(|(input_idx, input)| {
-                        origin_to_const.get(input).map(|constant| {
-                            // Inside the block, its inputs became the outputs of the Inputs node (node 0).
-                            let origin = ValueOrigin::new(0, input_idx as u32);
-                            *block_const_to_origin.get_mut(constant).unwrap() = Some(origin);
+                        match input {
+                            NodeInput::Reference(origin) => {
+                                origin_to_const.get(origin).map(|constant| {
+                                    // Inside the block, its inputs became the outputs of the Inputs node (node 0).
+                                    let origin = ValueOrigin::new(0, input_idx as u32);
+                                    *block_const_to_origin.get_mut(constant).unwrap() =
+                                        Some(origin);
 
-                            (origin, constant.clone())
-                        })
+                                    (origin, constant.clone())
+                                })
+                            }
+                            NodeInput::Constant(_) => None, // Constants don't need deduplication
+                        }
                     })
                     .collect();
 
@@ -172,7 +181,7 @@ fn recursive_deduplication<'a>(
                 node.inputs.extend(
                     requested_inputs
                         .iter()
-                        .map(|ct| get_origin(&mut const_to_origin, ct)),
+                        .map(|ct| NodeInput::Reference(get_origin(&mut const_to_origin, ct))),
                 );
             }
             _ => (),
