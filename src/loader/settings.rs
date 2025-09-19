@@ -46,7 +46,8 @@ pub struct ReturnInfosToCopy<'a> {
 /// should be collapsed into the instruction, if the ISA supports it.
 pub enum MaybeConstant {
     NonConstant,
-    Constant {
+    CollapsedConstant(WasmValue),
+    ReferenceConstant {
         value: WasmValue,
         must_collapse: Cell<bool>,
     },
