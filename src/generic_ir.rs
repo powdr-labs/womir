@@ -1,7 +1,7 @@
 use crate::{
     linker,
-    loader::flattening::{
-        Context, TrapReason, Tree,
+    loader::{
+        flattening::{Context, TrapReason, Tree},
         settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings},
     },
 };

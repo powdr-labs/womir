@@ -8,7 +8,7 @@ use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::loader::{
-    blockless_dag::{BlocklessDag, BreakTarget, Operation, TargetType},
+    blockless_dag::{BlocklessDag, BreakTarget, NodeInput, Operation, TargetType},
     dag::ValueOrigin,
     flattening::Settings,
 };
@@ -156,11 +156,17 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    pub fn get(&self, origin: &ValueOrigin) -> Result<Range<u32>, NotAllocatedError> {
-        self.nodes_outputs
-            .get(origin)
-            .cloned()
-            .ok_or(NotAllocatedError)
+    pub fn get(&self, input: &NodeInput) -> Result<Range<u32>, NotAllocatedError> {
+        match input {
+            NodeInput::Reference(origin) => self
+                .nodes_outputs
+                .get(origin)
+                .cloned()
+                .ok_or(NotAllocatedError),
+            NodeInput::Constant(_) => {
+                panic!("Input register requested, but it is a constant")
+            }
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&ValueOrigin, &Range<u32>)> {
@@ -242,7 +248,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
     let handle_break = |active_path: &mut PerPathData<'a, S>,
                         target: &BreakTarget,
                         labels: &mut HashMap<u32, LabelAllocation<'a, S>>,
-                        inputs: Option<&[ValueOrigin]>,
+                        inputs: Option<&[NodeInput]>,
                         current_node_idx: usize| {
         // First, we try to merge the path from the target label
         let regs = if let Some(target_label) =
@@ -265,14 +271,21 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
         // conflicts.
         for (input_idx, reg) in regs.iter().enumerate() {
             let origin = inputs.and_then(|inputs| {
-                let origin = inputs[input_idx];
-                if origin.node == 0 && target.kind == TargetType::FunctionOrLoop {
-                    // The target is the function output and the origin is the function
-                    // input, due to calling convention they must necessarily be different
-                    // registers, so we can't do optimistic allocation.
-                    None
-                } else {
-                    Some(origin)
+                match &inputs[input_idx] {
+                    NodeInput::Reference(origin) => {
+                        if origin.node == 0 && target.kind == TargetType::FunctionOrLoop {
+                            // The target is the function output and the origin is the function
+                            // input, due to calling convention they must necessarily be different
+                            // registers, so we can't do optimistic allocation.
+                            None
+                        } else {
+                            Some(*origin)
+                        }
+                    }
+                    NodeInput::Constant(_) => {
+                        // Constants don't need register allocation
+                        None
+                    }
                 }
             });
 
@@ -337,7 +350,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
                     let inputs = target
                         .input_permutation
                         .iter()
-                        .map(|input_idx| node.inputs[*input_idx as usize])
+                        .map(|input_idx| node.inputs[*input_idx as usize].clone())
                         .collect_vec();
                     handle_break(
                         &mut active_path,

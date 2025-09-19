@@ -4,6 +4,7 @@ pub mod dag;
 pub mod dumb_jump_removal;
 pub mod flattening;
 pub mod locals_data_flow;
+pub mod settings;
 
 use core::panic;
 use std::{
@@ -27,9 +28,9 @@ use wasmparser::{
 
 use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget},
-    dag::ValueOrigin,
-    flattening::settings::Settings,
+    dag::{NodeInput, ValueOrigin},
     locals_data_flow::LiftedBlockTree,
+    settings::Settings,
 };
 
 pub use flattening::{func_idx_to_label, word_count_type};
@@ -1369,9 +1370,11 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                     function_index: function_idx,
                 }),
                 inputs: (0..func_type.params().len() as u32)
-                    .map(|i| ValueOrigin {
-                        node: 0,
-                        output_idx: i,
+                    .map(|i| {
+                        NodeInput::Reference(ValueOrigin {
+                            node: 0,
+                            output_idx: i,
+                        })
                     })
                     .collect(),
                 output_types: func_type.results().to_vec(),
@@ -1382,9 +1385,11 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                     kind: blockless_dag::TargetType::FunctionOrLoop,
                 }),
                 inputs: (0..func_type.results().len() as u32)
-                    .map(|i| ValueOrigin {
-                        node: 1,
-                        output_idx: i,
+                    .map(|i| {
+                        NodeInput::Reference(ValueOrigin {
+                            node: 1,
+                            output_idx: i,
+                        })
                     })
                     .collect(),
                 output_types: Vec::new(),
