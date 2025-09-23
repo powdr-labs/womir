@@ -168,11 +168,7 @@ impl Allocation {
 
     pub fn get_as_reg(&self, input: &NodeInput) -> Result<Range<u32>, Error> {
         match input {
-            NodeInput::Reference(origin) => self
-                .nodes_outputs
-                .get(origin)
-                .cloned()
-                .ok_or(Error::NotAllocated),
+            NodeInput::Reference(origin) => self.get(origin),
             NodeInput::Constant(_) => {
                 // Constants don't need register allocation
                 Err(Error::NotARegister)
