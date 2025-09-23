@@ -413,6 +413,7 @@ pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
         tree: LiftedBlockTree<'a>,
     },
     PlainDag(Dag<'a>),
+    ConstCollapsedDag(Dag<'a>),
     ConstDedupDag(Dag<'a>),
     DanglingOptDag(Dag<'a>),
     BlocklessDag(BlocklessDag<'a>),
@@ -455,6 +456,15 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 FunctionProcessingStage::PlainDag(dag)
             }
             FunctionProcessingStage::PlainDag(mut dag) => {
+                // Optimization pass: collapse constants into instructions that use them, if possible.
+                let constants_collapsed =
+                    dag::const_collapse::constant_collapse(settings, &mut dag);
+                if let Some(stats) = stats {
+                    stats.constants_deduplicated += constants_collapsed;
+                }
+                FunctionProcessingStage::ConstCollapsedDag(dag)
+            }
+            FunctionProcessingStage::ConstCollapsedDag(mut dag) => {
                 // Optimization pass: deduplicate const definitions in the DAG.
                 let constants_deduplicated = dag::const_dedup::deduplicate_constants(&mut dag);
                 if let Some(stats) = stats {
@@ -692,6 +702,8 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
 pub struct Statistics {
     /// Number of register copies saved by the "smart" register allocation.
     pub register_copies_saved: usize,
+    /// Number of constants collapsed into instructions.
+    pub constants_collapsed: usize,
     /// Number of constants deduplicated in the DAG.
     pub constants_deduplicated: usize,
     /// Number of dangling nodes removed from the DAG.
@@ -706,8 +718,9 @@ impl Display for Statistics {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
-            "Optimization statistics:\n - {} register copies saved\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed\n - {} useless jumps removed",
+            "Optimization statistics:\n - {} register copies saved\n - {} constants collapsed\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed\n - {} useless jumps removed",
             self.register_copies_saved,
+            self.constants_collapsed,
             self.constants_deduplicated,
             self.dangling_nodes_removed,
             self.block_outputs_removed,

@@ -7,11 +7,6 @@ This files describes all the optimizations ideas we left out for now.
   But there shouldn't be any already, if the WASM is from an optimizing
   compiler.
 
-- [dag]: if the final ISA supports instructions that
-  operate on constants, like `addi $result, $input, 42`, then the DAG
-  could be optimized to take advantage of this by folding constant
-  values into the instructions that can use them.
-
 - [locals_data_flow]: track locals permutation. If some locals are read into
   a block, but in the end they are just output unmodified (either on stack
   or on some local), this can be resolved statically when building the DAG,

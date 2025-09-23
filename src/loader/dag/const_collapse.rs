@@ -128,7 +128,7 @@ impl ConstantInputFinder {
         inputs: &[NodeInput],
         nodes: &mut [dag::Node],
         const_block_inputs: HashMap<u32, WasmValue>,
-    ) -> (bool, &'a mut [MaybeConstant]) {
+    ) -> (bool, &'a [MaybeConstant]) {
         let mut has_constant = false;
 
         // Check if any of the inputs are constants.
@@ -160,6 +160,6 @@ impl ConstantInputFinder {
             })
         }));
 
-        (has_constant, &mut self.buffer)
+        (has_constant, &self.buffer)
     }
 }
