@@ -53,6 +53,11 @@ pub enum MaybeConstant {
     },
 }
 
+pub enum WasmOpInput {
+    Register(Range<u32>),
+    Constant(WasmValue),
+}
+
 /// Trait controlling the behavior of the flattening process.
 ///
 /// TODO: find a way to make calling conventions and interface registers allocation
@@ -309,7 +314,7 @@ pub trait Settings<'a> {
         &self,
         c: &mut Context<'a, '_, Self>,
         op: Op<'a>,
-        inputs: Vec<Range<u32>>,
+        inputs: Vec<WasmOpInput>,
         output: Option<Range<u32>>,
     ) -> impl Into<Tree<Self::Directive>>;
 }

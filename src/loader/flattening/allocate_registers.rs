@@ -143,7 +143,10 @@ impl AssignmentSet {
     }
 }
 
-pub struct NotAllocatedError;
+pub enum Error {
+    NotAllocated,
+    NotARegister,
+}
 
 /// One possible register allocation for a given DAG.
 pub struct Allocation {
@@ -156,15 +159,23 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    pub fn get(&self, input: &NodeInput) -> Result<Range<u32>, NotAllocatedError> {
+    pub fn get(&self, origin: &ValueOrigin) -> Result<Range<u32>, Error> {
+        self.nodes_outputs
+            .get(origin)
+            .cloned()
+            .ok_or(Error::NotAllocated)
+    }
+
+    pub fn get_as_reg(&self, input: &NodeInput) -> Result<Range<u32>, Error> {
         match input {
             NodeInput::Reference(origin) => self
                 .nodes_outputs
                 .get(origin)
                 .cloned()
-                .ok_or(NotAllocatedError),
+                .ok_or(Error::NotAllocated),
             NodeInput::Constant(_) => {
-                panic!("Input register requested, but it is a constant")
+                // Constants don't need register allocation
+                Err(Error::NotARegister)
             }
         }
     }
