@@ -1733,7 +1733,7 @@ impl<'a> DirectiveTracer<'a> {
         mut self,
         interpreter: &mut Interpreter<'a, E>,
     ) -> String {
-        // In order to relative accesses to work, we temporarily set the fp of before the instruction being executed
+        // In order for relative accesses to work, we temporarily set the fp before the instruction being executed
         std::mem::swap(&mut interpreter.fp, &mut self.fp);
 
         let (inputs_regs, outputs_regs): (Cow<[Range<u32>]>, Cow<[Range<u32>]>) = match &self
