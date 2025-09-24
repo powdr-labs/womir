@@ -15,7 +15,7 @@ WOMIR was initially designed for [PetraVM](https://github.com/PetraProver/PetraV
 ## Targets
 
 WOMIR can target ISAs for WOM machines that have arbitrarily many general-purpose registers,
-a special frame pointer (FP) register, and instructions thatoperate on registers relative to
+a special frame pointer (FP) register, and instructions that operate on registers relative to
 the frame pointer. It also enforces that no register is written more than once in the same frame.
 
 In addition to WOM-specific operations, the IR preserves most WebAssembly operations. Therefore, the
