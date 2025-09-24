@@ -460,7 +460,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 let constants_collapsed =
                     dag::const_collapse::constant_collapse(settings, &mut dag);
                 if let Some(stats) = stats {
-                    stats.constants_deduplicated += constants_collapsed;
+                    stats.constants_collapsed += constants_collapsed;
                 }
                 FunctionProcessingStage::ConstCollapsedDag(dag)
             }
