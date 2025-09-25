@@ -63,9 +63,26 @@ pub enum MaybeConstant {
     },
 }
 
+#[derive(Debug, Clone)]
 pub enum WasmOpInput {
     Register(Range<u32>),
     Constant(WasmValue),
+}
+
+impl WasmOpInput {
+    pub fn as_register(&self) -> Option<&Range<u32>> {
+        match self {
+            WasmOpInput::Register(r) => Some(r),
+            WasmOpInput::Constant(_) => None,
+        }
+    }
+
+    pub fn as_constant(&self) -> Option<&WasmValue> {
+        match self {
+            WasmOpInput::Register(_) => None,
+            WasmOpInput::Constant(c) => Some(c),
+        }
+    }
 }
 
 /// Trait controlling the behavior of the flattening process.
