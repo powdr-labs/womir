@@ -8,7 +8,7 @@ use wasmparser::Operator as Op;
 
 use crate::loader::{
     BlockKind,
-    dag::{Dag, Node, Operation, ValueOrigin},
+    dag::{Dag, Node, NodeInput, Operation, ValueOrigin},
 };
 
 #[derive(Default, Debug)]
@@ -83,7 +83,10 @@ fn _print_nodes(indent: usize, nodes: &[Node<'_>]) {
                 "{spaces}{node_idx:4}: {} --",
                 node.inputs
                     .iter()
-                    .map(|o| format!("({}, {})", o.node, o.output_idx))
+                    .map(|input| match input {
+                        NodeInput::Reference(o) => format!("({}, {})", o.node, o.output_idx),
+                        NodeInput::Constant(_) => "(const)".to_string(),
+                    })
                     .format(", "),
             );
             _print_nodes(indent + 2, &sub_dag.nodes);
@@ -98,7 +101,10 @@ fn _print_nodes(indent: usize, nodes: &[Node<'_>]) {
                 "{spaces}{node_idx:4}: {} -> {}",
                 node.inputs
                     .iter()
-                    .map(|o| format!("({}, {})", o.node, o.output_idx))
+                    .map(|input| match input {
+                        NodeInput::Reference(o) => format!("({}, {})", o.node, o.output_idx),
+                        NodeInput::Constant(_) => "(const)".to_string(),
+                    })
                     .format(", "),
                 (0..node.output_types.len())
                     .map(|i| format!("({}, {})", node_idx, i))
@@ -163,8 +169,11 @@ fn recursive_removal(
 
             if !to_be_removed {
                 // If the node is not to be removed, mark its inputs as used.
-                for node in node.inputs.iter() {
-                    used_outputs.insert(*node);
+                for input in node.inputs.iter() {
+                    if let NodeInput::Reference(origin) = input {
+                        used_outputs.insert(*origin);
+                    }
+                    // Constants don't reference other nodes, so we ignore them
                 }
                 None
             } else {
@@ -213,12 +222,15 @@ fn recursive_removal(
 
             // Fix the node index for all the inputs of a node that is not being removed.
             for input in node.inputs.iter_mut() {
-                // If this refers to a node whose output has been removed, we need to remap it.
-                if let Some(offset_map) = nodes_outputs_offsets.get(&input.node) {
-                    input.output_idx -= offset_map.get(&input.output_idx);
-                }
+                if let NodeInput::Reference(origin) = input {
+                    // If this refers to a node whose output has been removed, we need to remap it.
+                    if let Some(offset_map) = nodes_outputs_offsets.get(&origin.node) {
+                        origin.output_idx -= offset_map.get(&origin.output_idx);
+                    }
 
-                input.node -= offset_map.get(&input.node);
+                    origin.node -= offset_map.get(&origin.node);
+                }
+                // Constants don't need remapping
             }
             true
         }

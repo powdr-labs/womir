@@ -13,6 +13,7 @@ use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::BlockKind;
 
+pub use super::dag::NodeInput;
 use super::dag::{self, Dag, ValueOrigin};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,7 +71,7 @@ pub struct BrTableTarget {
 #[derive(Debug)]
 pub struct Node<'a> {
     pub operation: Operation<'a>,
-    pub inputs: Vec<ValueOrigin>,
+    pub inputs: Vec<NodeInput>,
     pub output_types: Vec<ValType>,
 }
 
@@ -249,7 +250,12 @@ fn process_nodes<'a>(
                         // The inputs are resolved statically during the traversal.
                         std::mem::take(&mut node.inputs)
                             .into_iter()
-                            .map(|input| outputs_map[&input])
+                            .map(|input| match input {
+                                NodeInput::Reference(origin) => outputs_map[&origin],
+                                NodeInput::Constant(_) => {
+                                    panic!("Constants not expected in block inputs")
+                                }
+                            })
                             .collect(),
                     );
 
@@ -274,7 +280,10 @@ fn process_nodes<'a>(
 
         let mut inputs = node.inputs;
         for input in inputs.iter_mut() {
-            *input = outputs_map[input];
+            if let NodeInput::Reference(origin) = input {
+                *origin = outputs_map[origin];
+            }
+            // Constants pass through unchanged
         }
 
         for output_idx in 0..node.output_types.len() {

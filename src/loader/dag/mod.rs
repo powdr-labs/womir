@@ -1,3 +1,4 @@
+pub mod const_collapse;
 pub mod const_dedup;
 pub mod dangling_removal;
 
@@ -7,7 +8,7 @@ use std::{
 };
 
 use itertools::Itertools;
-use wasmparser::{FuncType, Operator as Op, RefType, ValType};
+use wasmparser::{FuncType, Ieee32, Ieee64, Operator as Op, RefType, V128, ValType};
 
 use crate::loader::Global;
 
@@ -44,10 +45,63 @@ impl ValueOrigin {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WasmValue {
+    I32(i32),
+    I64(i64),
+    F32(Ieee32),
+    F64(Ieee64),
+    V128(V128),
+    RefNull,
+    RefFunc(u32),
+}
+
+impl WasmValue {
+    fn value_type(&self) -> ValType {
+        match self {
+            WasmValue::RefNull | WasmValue::RefFunc { .. } => ValType::Ref(RefType::FUNCREF),
+            WasmValue::I32(_) => ValType::I32,
+            WasmValue::I64(_) => ValType::I64,
+            WasmValue::F32(_) => ValType::F32,
+            WasmValue::F64(_) => ValType::F64,
+            WasmValue::V128(_) => ValType::V128,
+        }
+    }
+}
+
+impl TryFrom<&Op<'_>> for WasmValue {
+    type Error = ();
+
+    fn try_from(value: &Op<'_>) -> Result<Self, Self::Error> {
+        match value {
+            Op::I32Const { value } => Ok(WasmValue::I32(*value)),
+            Op::I64Const { value } => Ok(WasmValue::I64(*value)),
+            Op::F32Const { value } => Ok(WasmValue::F32(*value)),
+            Op::F64Const { value } => Ok(WasmValue::F64(*value)),
+            Op::V128Const { value } => Ok(WasmValue::V128(*value)),
+            Op::RefNull { .. } => Ok(WasmValue::RefNull),
+            Op::RefFunc { function_index } => Ok(WasmValue::RefFunc(*function_index)),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum NodeInput {
+    Reference(ValueOrigin),
+    Constant(WasmValue),
+}
+
+impl From<ValueOrigin> for NodeInput {
+    fn from(origin: ValueOrigin) -> Self {
+        NodeInput::Reference(origin)
+    }
+}
+
 #[derive(Debug)]
 pub struct Node<'a> {
     pub operation: Operation<'a>,
-    pub inputs: Vec<ValueOrigin>,
+    pub inputs: Vec<NodeInput>,
     pub output_types: Vec<ValType>,
 }
 
@@ -185,13 +239,13 @@ fn build_dag<'a>(
                     let target = &block_stack[relative_depth as usize];
 
                     // The stack part of the input
-                    let mut inputs = t.stack.split_off(t.stack.len() - target.stack.len());
+                    let mut inputs = t.stack_pop_many(target.stack.len());
                     assert!(types_matches(&t.nodes, &target.stack, &inputs));
 
                     // The locals part of the input
                     for local_index in target.locals.iter() {
                         let value = local_getter(&mut t.nodes, &mut locals, *local_index);
-                        inputs.push(value);
+                        inputs.push(value.into());
                     }
 
                     t.nodes.push(Node {
@@ -221,17 +275,20 @@ fn build_dag<'a>(
 
                     // The stack part of the input
                     // BrIf[Zero] does not consume the stack.
-                    let mut inputs = t.stack[t.stack.len() - target.stack.len()..].to_vec();
+                    let mut inputs: Vec<NodeInput> = t.stack[t.stack.len() - target.stack.len()..]
+                        .iter()
+                        .map(|&v| v.into())
+                        .collect();
                     assert!(types_matches(&t.nodes, &target.stack, &inputs));
 
                     // The locals part of the input
                     for local_index in target.locals.iter() {
                         let value = local_getter(&mut t.nodes, &mut locals, *local_index);
-                        inputs.push(value);
+                        inputs.push(value.into());
                     }
 
                     // Push the condition back to the inputs
-                    inputs.push(cond);
+                    inputs.push(cond.into());
 
                     t.nodes.push(Node {
                         operation,
@@ -259,7 +316,7 @@ fn build_dag<'a>(
                         .unwrap();
 
                     // The stack part of the input
-                    let mut inputs = t.stack.split_off(t.stack.len() - largest_stack.len());
+                    let mut inputs = t.stack_pop_many(largest_stack.len());
                     assert!(types_matches(&t.nodes, largest_stack, &inputs));
 
                     // The locals part of the input is the union of the locals inputs
@@ -276,11 +333,11 @@ fn build_dag<'a>(
                         locals_inputs_map.insert(*local_index, inputs.len() as u32);
 
                         let value = local_getter(&mut t.nodes, &mut locals, *local_index);
-                        inputs.push(value);
+                        inputs.push(value.into());
                     }
 
                     // Push the choice back to the inputs
-                    inputs.push(choice);
+                    inputs.push(choice.into());
 
                     // Only a subset of the inputs are passed to each target.
                     // We need to calculate the permutation of the inputs for each target.
@@ -319,7 +376,7 @@ fn build_dag<'a>(
                 // that consumes some inputs and produces some outputs.
                 Ins::WASMOp(op) => {
                     let (inputs_types, output_types) = t.get_operator_type(&op).unwrap();
-                    let inputs = t.stack.split_off(t.stack.len() - inputs_types.len());
+                    let inputs = t.stack_pop_many(inputs_types.len());
                     assert!(types_matches(&t.nodes, &inputs_types, &inputs));
 
                     let node_idx = t.nodes.len();
@@ -343,9 +400,7 @@ fn build_dag<'a>(
                 // values from the locals and the stack.
 
                 // Block inputs are the concatenation of the stack inputs and the locals inputs.
-                let mut inputs = t
-                    .stack
-                    .split_off(t.stack.len() - block.interface_type.ty.params().len());
+                let mut inputs = t.stack_pop_many(block.interface_type.ty.params().len());
 
                 // Sanity check the types
                 assert!(types_matches(
@@ -355,10 +410,9 @@ fn build_dag<'a>(
                 ));
 
                 inputs.extend(
-                    block
-                        .input_locals
-                        .iter()
-                        .map(|local_idx| local_getter(&mut t.nodes, &mut locals, *local_idx)),
+                    block.input_locals.iter().map(|local_idx| {
+                        local_getter(&mut t.nodes, &mut locals, *local_idx).into()
+                    }),
                 );
 
                 // Of the outputs, the first ones goes to the stack.
@@ -394,7 +448,7 @@ fn build_dag<'a>(
 fn build_dag_for_block<'a>(
     module: &Module<'a>,
     locals_types: &[ValType],
-    inputs: Vec<ValueOrigin>,
+    inputs: Vec<NodeInput>,
     block_stack: &mut VecDeque<BreakArgs>,
     block: Block<'a>,
 ) -> wasmparser::Result<Node<'a>> {
@@ -536,13 +590,17 @@ fn get_local_or_default(
     }
 }
 
-fn types_matches(nodes: &[Node], expected_types: &[ValType], inputs: &[ValueOrigin]) -> bool {
+fn types_matches(nodes: &[Node], expected_types: &[ValType], inputs: &[NodeInput]) -> bool {
     if inputs.len() != expected_types.len() {
         return false;
     }
     for (input, expected_type) in inputs.iter().zip(expected_types.iter()) {
-        let node = &nodes[input.node];
-        if node.output_types[input.output_idx as usize] != *expected_type {
+        let NodeInput::Reference(origin) = input else {
+            // Constants will be created in another compilation pass
+            unreachable!("NodeInput::Constant not expected at this stage")
+        };
+        let node = &nodes[origin.node];
+        if node.output_types[origin.output_idx as usize] != *expected_type {
             return false;
         }
     }
@@ -585,6 +643,15 @@ impl StackTracker<'_, '_> {
         let val_type = &self.stack[idx];
         let node = &self.nodes[val_type.node];
         node.output_types[val_type.output_idx as usize]
+    }
+
+    /// Takes the last `count` elements from the end of the stack, converts them to NodeInput,
+    /// and truncates the stack. More efficient than split_off as it avoids one allocation.
+    fn stack_pop_many(&mut self, count: usize) -> Vec<NodeInput> {
+        let start = self.stack.len() - count;
+        let inputs: Vec<NodeInput> = self.stack[start..].iter().map(|&v| v.into()).collect();
+        self.stack.truncate(start);
+        inputs
     }
 
     /// Returns the list of input types and output types of an operator.
