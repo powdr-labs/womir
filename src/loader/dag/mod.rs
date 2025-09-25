@@ -239,7 +239,7 @@ fn build_dag<'a>(
                     let target = &block_stack[relative_depth as usize];
 
                     // The stack part of the input
-                    let mut inputs = t.take_from_stack(target.stack.len());
+                    let mut inputs = t.stack_pop_many(target.stack.len());
                     assert!(types_matches(&t.nodes, &target.stack, &inputs));
 
                     // The locals part of the input
@@ -316,7 +316,7 @@ fn build_dag<'a>(
                         .unwrap();
 
                     // The stack part of the input
-                    let mut inputs = t.take_from_stack(largest_stack.len());
+                    let mut inputs = t.stack_pop_many(largest_stack.len());
                     assert!(types_matches(&t.nodes, largest_stack, &inputs));
 
                     // The locals part of the input is the union of the locals inputs
@@ -376,7 +376,7 @@ fn build_dag<'a>(
                 // that consumes some inputs and produces some outputs.
                 Ins::WASMOp(op) => {
                     let (inputs_types, output_types) = t.get_operator_type(&op).unwrap();
-                    let inputs = t.take_from_stack(inputs_types.len());
+                    let inputs = t.stack_pop_many(inputs_types.len());
                     assert!(types_matches(&t.nodes, &inputs_types, &inputs));
 
                     let node_idx = t.nodes.len();
@@ -400,7 +400,7 @@ fn build_dag<'a>(
                 // values from the locals and the stack.
 
                 // Block inputs are the concatenation of the stack inputs and the locals inputs.
-                let mut inputs = t.take_from_stack(block.interface_type.ty.params().len());
+                let mut inputs = t.stack_pop_many(block.interface_type.ty.params().len());
 
                 // Sanity check the types
                 assert!(types_matches(
@@ -645,9 +645,9 @@ impl StackTracker<'_, '_> {
         node.output_types[val_type.output_idx as usize]
     }
 
-    /// Takes the last `count` elements from the stack, converts them to NodeInput,
+    /// Takes the last `count` elements from the end of the stack, converts them to NodeInput,
     /// and truncates the stack. More efficient than split_off as it avoids one allocation.
-    fn take_from_stack(&mut self, count: usize) -> Vec<NodeInput> {
+    fn stack_pop_many(&mut self, count: usize) -> Vec<NodeInput> {
         let start = self.stack.len() - count;
         let inputs: Vec<NodeInput> = self.stack[start..].iter().map(|&v| v.into()).collect();
         self.stack.truncate(start);
