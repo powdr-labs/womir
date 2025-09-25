@@ -40,15 +40,25 @@ pub struct ReturnInfosToCopy<'a> {
     pub dest: &'a ReturnInfo,
 }
 
-/// Indicates whether a Wasm input is a constant, and if so, its value.
+/// Indicates whether the input for a Wasm node is a constant, and if so, its value.
 ///
-/// The `must_collapse` cell can be mutated to indicate that the constant
-/// should be collapsed into the instruction, if the ISA supports it.
+/// This is part of the interface for constant collapsing optimization.
 pub enum MaybeConstant {
+    /// The corresponding input is a reference to a non-constant node,
+    /// and we don't know the value at compile time.
     NonConstant,
+    /// The corresponding input is a constant already set to be collapsed into the instruction.
+    /// Can not happen in the default Womir pipeline, as the constant collapsing optimization
+    /// pass is executed only once. This is defined for completeness.
     CollapsedConstant(WasmValue),
+    /// The corresponding input is a reference to a constant node,
+    /// and we know its value at compile time. The user may choose to collapse
+    /// the value into the node, severing the dependency on the constant node.
     ReferenceConstant {
         value: WasmValue,
+        /// This Cell value can be mutated to true indicate that the constant
+        /// should be collapsed into the instruction, and the ISA supports it.
+        /// Initially false.
         must_collapse: Cell<bool>,
     },
 }
@@ -83,7 +93,8 @@ pub trait Settings<'a> {
     /// This can be used for ISAs that support immediate operands on
     /// certain instructions.
     ///
-    /// Default implementation returns None, meaning no constant collapsing.
+    /// Default implementation returns None, meaning no constant collapsing
+    /// is performed.
     fn get_const_collapse_processor(&self) -> Option<impl Fn(&Op, &[MaybeConstant])> {
         None::<fn(&Op, &[MaybeConstant])>
     }
