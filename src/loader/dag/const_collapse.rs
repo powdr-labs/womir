@@ -50,10 +50,10 @@ fn recursive_constant_collapse(
                     const_block_inputs.clone(),
                 );
                 if has_constant {
-                    // Call the user-provided processor to potentially modify the input constants.
+                    // Call the user-provided processor to potentially mark constants to be collapsed.
                     processor(operator, input_constants);
 
-                    // Collapse any inputs that were marked for collapsing.
+                    // Collapse any inputs that were marked.
                     for (input, maybe_const) in node.inputs.iter_mut().zip(input_constants) {
                         if let MaybeConstant::ReferenceConstant {
                             value,
@@ -149,7 +149,7 @@ impl ConstantInputFinder {
                     // This refers to the input of the block, we need to check if it's a constant.
                     const_block_inputs.get(&origin.output_idx).cloned()
                 }
-                Operation::WASMOp(op) => op.try_into().ok(),
+                Operation::WASMOp(op) => WasmValue::try_from(op).ok(),
                 _ => None,
             }
             .map_or(MaybeConstant::NonConstant, |value| {
