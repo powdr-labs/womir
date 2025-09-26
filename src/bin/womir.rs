@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufWriter, Write},
 };
@@ -31,9 +32,13 @@ impl ExternalFunctions for DataInput {
             ("env", "abort") => {
                 panic!("Abort called with args: {:?}", args);
             }
+            ("gojs", fname) => {
+                println!("Calling syscall {fname} with args: {:?}", args);
+                vec![]
+            }
             _ => {
                 panic!(
-                    "External function not implemented: {module}.{function} with args: {:?}",
+                    "External function not implemented: module: {module}, function: {function} with args: {:?}",
                     args
                 );
             }
