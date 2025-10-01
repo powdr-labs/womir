@@ -39,7 +39,7 @@ pub struct Interpreter<'a, E: ExternalFunctions> {
     future_counter: u32,
     future_assignments: HashMap<u32, u32>,
     vrom: Vec<VRomValue>,
-    ram: HashMap<u32, u32>,
+    ram: Ram,
     program: Program<'a, S>,
     external_functions: E,
     flat_program: Vec<Directive<'a>>,
@@ -50,6 +50,22 @@ pub trait ExternalFunctions {
     fn call(&mut self, module: &str, func: &str, args: &[u32], mem: MemoryAccessor<'_>) -> Vec<u32>
     where
         Self: std::marker::Sized;
+}
+
+struct Ram(HashMap<u32, u32>);
+
+impl Ram {
+    fn get(&self, byte_addr: u32) -> u32 {
+        *self.0.get(&byte_addr).unwrap_or(&0)
+    }
+
+    fn set(&mut self, byte_addr: u32, value: u32) {
+        if value == 0 {
+            self.0.remove(&byte_addr);
+        } else {
+            self.0.insert(byte_addr, value);
+        }
+    }
 }
 
 impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
@@ -92,7 +108,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             future_assignments: HashMap::new(),
             // We leave 0 unused for convention = successful termination.
             vrom: vec![VRomValue::Unassigned],
-            ram,
+            ram: Ram(ram),
             program,
             external_functions,
             flat_program,
@@ -1044,7 +1060,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(size, output.len() as u32);
 
                         let value = (0..size)
-                            .map(|i| self.get_ram(global_info.address + 4 * i))
+                            .map(|i| self.ram.get(global_info.address + 4 * i))
                             .collect_vec();
                         self.set_vrom_relative_range(output, &value);
                     }
@@ -1066,7 +1082,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let value = self.get_vrom_relative_range(origin).collect_vec();
                         for (i, value) in value.into_iter().enumerate() {
-                            self.set_ram(global_info.address + 4 * i as u32, value);
+                            self.ram.set(global_info.address + 4 * i as u32, value);
                         }
                     }
                     Op::I32Store8 { memarg }
@@ -1599,18 +1615,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         }
     }
 
-    fn get_ram(&self, byte_addr: u32) -> u32 {
-        *self.ram.get(&byte_addr).unwrap_or(&0)
-    }
-
-    fn set_ram(&mut self, byte_addr: u32, value: u32) {
-        if value == 0 {
-            self.ram.remove(&byte_addr);
-        } else {
-            self.ram.insert(byte_addr, value);
-        }
-    }
-
     fn get_vrom_absolute_u32(&mut self, addr: u32) -> u32 {
         let value = &mut self.get_vrom_absolute(addr);
         match *value {
@@ -1750,13 +1754,13 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
 struct MemoryAccessor<'a> {
     segment: Segment,
-    ram: &'a mut HashMap<u32, u32>,
+    ram: &'a mut Ram,
     byte_size: u32,
 }
 
 impl<'a> MemoryAccessor<'a> {
-    fn new(segment: Segment, ram: &'a mut HashMap<u32, u32>) -> Self {
-        let byte_size = ram.get(&segment.start).unwrap_or(&0) * WASM_PAGE_SIZE;
+    fn new(segment: Segment, ram: &'a mut Ram) -> Self {
+        let byte_size = ram.get(segment.start) * WASM_PAGE_SIZE;
         MemoryAccessor {
             segment,
             ram,
@@ -1764,24 +1768,12 @@ impl<'a> MemoryAccessor<'a> {
         }
     }
 
-    fn get_ram(&self, byte_addr: u32) -> u32 {
-        *self.ram.get(&byte_addr).unwrap_or(&0)
-    }
-
-    fn set_ram(&mut self, byte_addr: u32, value: u32) {
-        if value == 0 {
-            self.ram.remove(&byte_addr);
-        } else {
-            self.ram.insert(byte_addr, value);
-        }
-    }
-
     fn get_max_num_pages(&self) -> u32 {
-        self.get_ram(self.segment.start + 4)
+        self.ram.get(self.segment.start + 4)
     }
 
     fn set_num_pages(&mut self, num_pages: u32) {
-        self.set_ram(self.segment.start, num_pages);
+        self.ram.set(self.segment.start, num_pages);
         self.byte_size = num_pages * WASM_PAGE_SIZE;
     }
 
@@ -1795,7 +1787,7 @@ impl<'a> MemoryAccessor<'a> {
             return Err(());
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
-        let value = self.get_ram(ram_addr);
+        let value = self.ram.get(ram_addr);
         log::trace!("Reading Memory word at {ram_addr}: {value}");
         Ok(value)
     }
@@ -1806,7 +1798,7 @@ impl<'a> MemoryAccessor<'a> {
             return Err(());
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
-        self.set_ram(ram_addr, value);
+        self.ram.set(ram_addr, value);
         log::trace!("Writing Memory word at {ram_addr}: {value}");
         Ok(())
     }
@@ -1916,7 +1908,7 @@ struct TableAccessor<'a, 'b, E: ExternalFunctions> {
 
 impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
     fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
-        let size = interpreter.get_ram(segment.start);
+        let size = interpreter.ram.get(segment.start);
         TableAccessor {
             segment,
             interpreter,
@@ -1930,7 +1922,7 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
     }
 
     fn _get_max_size(&self) -> u32 {
-        self.interpreter.get_ram(self.segment.start + 4)
+        self.interpreter.ram.get(self.segment.start + 4)
     }
 
     fn get_entry(&self, index: u32) -> Result<[u32; 3], ()> {
@@ -1938,9 +1930,9 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
             return Err(());
         }
         let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
-        let type_idx = self.interpreter.get_ram(base_addr);
-        let frame_size = self.interpreter.get_ram(base_addr + 4);
-        let pc = self.interpreter.get_ram(base_addr + 8);
+        let type_idx = self.interpreter.ram.get(base_addr);
+        let frame_size = self.interpreter.ram.get(base_addr + 4);
+        let pc = self.interpreter.ram.get(base_addr + 8);
         Ok([type_idx, frame_size, pc])
     }
 
@@ -1949,9 +1941,9 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
             return Err(());
         }
         let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
-        self.interpreter.set_ram(base_addr, value[0]);
-        self.interpreter.set_ram(base_addr + 4, value[1]);
-        self.interpreter.set_ram(base_addr + 8, value[2]);
+        self.interpreter.ram.set(base_addr, value[0]);
+        self.interpreter.ram.set(base_addr + 4, value[1]);
+        self.interpreter.ram.set(base_addr + 8, value[2]);
         Ok(())
     }
 }
