@@ -47,9 +47,13 @@ pub struct Interpreter<'a, E: ExternalFunctions> {
 }
 
 pub trait ExternalFunctions {
-    fn call(&mut self, module: &str, func: &str, args: &[u32], mem: MemoryAccessor<'_>) -> Vec<u32>
-    where
-        Self: std::marker::Sized;
+    fn call(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[u32],
+        mem: &mut MemoryAccessor<'_>,
+    ) -> Vec<u32>;
 }
 
 struct Ram(HashMap<u32, u32>);
@@ -1546,19 +1550,21 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     inputs,
                     outputs,
                 } => {
-                    let args = inputs
-                        .into_iter()
-                        .flatten()
-                        .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
-                        .collect_vec();
-                    let accessor =
-                        MemoryAccessor::new(self.program.m.memory.unwrap(), &mut self.ram);
-                    let result = self
-                        .external_functions
-                        .call(module, function, &args, accessor);
-                    for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
-                    {
-                        self.set_vrom_relative_u32(output..output + 1, value);
+                    if let Some(mem) = self.program.m.memory {
+                        let args = inputs
+                            .into_iter()
+                            .flatten()
+                            .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
+                            .collect_vec();
+                        let mut accessor = MemoryAccessor::new(mem, &mut self.ram);
+                        let result =
+                            self.external_functions
+                                .call(module, function, &args, &mut accessor);
+                        for (value, output) in
+                            result.into_iter().zip_eq(outputs.into_iter().flatten())
+                        {
+                            self.set_vrom_relative_u32(output..output + 1, value);
+                        }
                     }
                 }
                 Directive::JumpAndActivateFrame {
@@ -1757,7 +1763,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 }
 
-struct MemoryAccessor<'a> {
+pub struct MemoryAccessor<'a> {
     segment: Segment,
     ram: &'a mut Ram,
     byte_size: u32,
@@ -1786,7 +1792,7 @@ impl<'a> MemoryAccessor<'a> {
         self.byte_size
     }
 
-    fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
+    pub fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
         assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
         if byte_addr >= self.get_size() {
             return Err(());
@@ -1797,7 +1803,7 @@ impl<'a> MemoryAccessor<'a> {
         Ok(value)
     }
 
-    fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
+    pub fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
         assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
         if byte_addr >= self.get_size() {
             return Err(());

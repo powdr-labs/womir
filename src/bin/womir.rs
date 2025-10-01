@@ -7,7 +7,7 @@ use std::{
 use itertools::Itertools;
 use womir::{
     generic_ir::GenericIrSetting,
-    interpreter::{ExternalFunctions, Interpreter},
+    interpreter::{ExternalFunctions, Interpreter, MemoryAccessor},
     loader::Program,
 };
 
@@ -23,20 +23,13 @@ impl DataInput {
     }
 }
 
-fn read_u32_le(ram: &HashMap<u32, u32>, addr: u32) -> u32 {
-    let word = ram[&addr];
-    let bytes = word.to_le_bytes();
-
-    u32::from_le_bytes(bytes)
-}
-
 impl ExternalFunctions for DataInput {
     fn call(
         &mut self,
         module: &str,
         function: &str,
         args: &[u32],
-        mem: MemoryAccessor<'_>,
+        mem: &mut MemoryAccessor<'_>,
     ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
@@ -50,11 +43,11 @@ impl ExternalFunctions for DataInput {
                 if "runtime.getRandomData" == fname {
                     let sp = args[0];
 
-                    let dst = read_u32_le(ram, sp + 8);
-                    let len = read_u32_le(ram, sp + 12);
+                    let dst = mem.get_word(sp + 8).unwrap();
+                    let len = mem.get_word(sp + 12).unwrap();
 
-                    for i in 0..(len / 4) {
-                        ram.insert(dst + i * 4, rand::random::<u32>());
+                    for i in 0..len.div_ceil(4) {
+                        mem.set_word(dst + i * 4, rand::random::<u32>()).unwrap();
                     }
                 }
                 vec![]
@@ -420,7 +413,7 @@ mod tests {
             module: &str,
             function: &str,
             args: &[u32],
-            mem: MemoryAccessor<'_>,
+            _mem: &mut MemoryAccessor<'_>,
         ) -> Vec<u32> {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
