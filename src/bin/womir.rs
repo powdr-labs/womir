@@ -23,8 +23,21 @@ impl DataInput {
     }
 }
 
+fn read_u32_le(ram: &HashMap<u32, u32>, addr: u32) -> u32 {
+    let word = ram[&addr];
+    let bytes = word.to_le_bytes();
+
+    u32::from_le_bytes(bytes)
+}
+
 impl ExternalFunctions for DataInput {
-    fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
+    fn call(
+        &mut self,
+        module: &str,
+        function: &str,
+        args: &[u32],
+        mem: MemoryAccessor<'_, '_, Self>,
+    ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
                 vec![self.values.next().expect("Not enough input values")]
@@ -34,6 +47,16 @@ impl ExternalFunctions for DataInput {
             }
             ("gojs", fname) => {
                 println!("Calling syscall {fname} with args: {:?}", args);
+                if "runtime.getRandomData" == fname {
+                    let sp = args[0];
+
+                    let dst = read_u32_le(ram, sp + 8);
+                    let len = read_u32_le(ram, sp + 12);
+
+                    for i in 0..(len / 4) {
+                        ram.insert(dst + i * 4, rand::random::<u32>());
+                    }
+                }
                 vec![]
             }
             _ => {
@@ -392,7 +415,13 @@ mod tests {
     struct SpectestExternalFunctions;
 
     impl ExternalFunctions for SpectestExternalFunctions {
-        fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
+        fn call(
+            &mut self,
+            module: &str,
+            function: &str,
+            args: &[u32],
+            mem: MemoryAccessor<'_, '_, Self>,
+        ) -> Vec<u32> {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
             (func (export "print_i32") (param i32))
