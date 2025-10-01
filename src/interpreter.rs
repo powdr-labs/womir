@@ -52,7 +52,7 @@ pub trait ExternalFunctions {
         module: &str,
         func: &str,
         args: &[u32],
-        mem: &mut MemoryAccessor<'_>,
+        mem: &mut Option<MemoryAccessor<'_>>,
     ) -> Vec<u32>;
 }
 
@@ -1550,21 +1550,22 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     inputs,
                     outputs,
                 } => {
-                    if let Some(mem) = self.program.m.memory {
-                        let args = inputs
-                            .into_iter()
-                            .flatten()
-                            .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
-                            .collect_vec();
-                        let mut accessor = MemoryAccessor::new(mem, &mut self.ram);
-                        let result =
-                            self.external_functions
-                                .call(module, function, &args, &mut accessor);
-                        for (value, output) in
-                            result.into_iter().zip_eq(outputs.into_iter().flatten())
-                        {
-                            self.set_vrom_relative_u32(output..output + 1, value);
-                        }
+                    let args = inputs
+                        .into_iter()
+                        .flatten()
+                        .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
+                        .collect_vec();
+                    let mut accessor = if let Some(mem) = self.program.m.memory {
+                        Some(MemoryAccessor::new(mem, &mut self.ram))
+                    } else {
+                        None
+                    };
+                    let result =
+                        self.external_functions
+                            .call(module, function, &args, &mut accessor);
+                    for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
+                    {
+                        self.set_vrom_relative_u32(output..output + 1, value);
                     }
                 }
                 Directive::JumpAndActivateFrame {

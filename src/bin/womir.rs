@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fs::File,
     io::{BufWriter, Write},
 };
@@ -29,7 +28,7 @@ impl ExternalFunctions for DataInput {
         module: &str,
         function: &str,
         args: &[u32],
-        mem: &mut MemoryAccessor<'_>,
+        mem: &mut Option<MemoryAccessor<'_>>,
     ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
@@ -41,6 +40,7 @@ impl ExternalFunctions for DataInput {
             ("gojs", fname) => {
                 println!("Calling syscall {fname} with args: {:?}", args);
                 if "runtime.getRandomData" == fname {
+                    let mem = mem.as_mut().unwrap();
                     let sp = args[0];
 
                     let dst = mem.get_word(sp + 8).unwrap();
@@ -413,7 +413,7 @@ mod tests {
             module: &str,
             function: &str,
             args: &[u32],
-            _mem: &mut MemoryAccessor<'_>,
+            _mem: &mut Option<MemoryAccessor<'_>>,
         ) -> Vec<u32> {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
