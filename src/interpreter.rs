@@ -47,13 +47,7 @@ pub struct Interpreter<'a, E: ExternalFunctions> {
 }
 
 pub trait ExternalFunctions {
-    fn call(
-        &mut self,
-        module: &str,
-        func: &str,
-        args: &[u32],
-        mem: MemoryAccessor<'_, '_, Self>,
-    ) -> Vec<u32>
+    fn call(&mut self, module: &str, func: &str, args: &[u32], mem: MemoryAccessor<'_>) -> Vec<u32>
     where
         Self: std::marker::Sized;
 }
@@ -113,8 +107,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         interpreter
     }
 
-    fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b, 'a, E> {
-        MemoryAccessor::new(self.program.m.memory.unwrap(), self)
+    fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b> {
+        MemoryAccessor::new(self.program.m.memory.unwrap(), &mut self.ram)
     }
 
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
@@ -1536,9 +1530,11 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         .flatten()
                         .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
                         .collect_vec();
-                    let result =
-                        self.external_functions
-                            .call(module, function, &args, self.get_mem());
+                    let accessor =
+                        MemoryAccessor::new(self.program.m.memory.unwrap(), &mut self.ram);
+                    let result = self
+                        .external_functions
+                        .call(module, function, &args, accessor);
                     for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
                     {
                         self.set_vrom_relative_u32(output..output + 1, value);
@@ -1752,28 +1748,40 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 }
 
-struct MemoryAccessor<'a, 'b, E: ExternalFunctions> {
+struct MemoryAccessor<'a> {
     segment: Segment,
-    interpreter: &'a mut Interpreter<'b, E>,
+    ram: &'a mut HashMap<u32, u32>,
     byte_size: u32,
 }
 
-impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
-    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
-        let byte_size = interpreter.get_ram(segment.start) * WASM_PAGE_SIZE;
+impl<'a> MemoryAccessor<'a> {
+    fn new(segment: Segment, ram: &'a mut HashMap<u32, u32>) -> Self {
+        let byte_size = ram.get(&segment.start).unwrap_or(&0) * WASM_PAGE_SIZE;
         MemoryAccessor {
             segment,
-            interpreter,
+            ram,
             byte_size,
         }
     }
 
+    fn get_ram(&self, byte_addr: u32) -> u32 {
+        *self.ram.get(&byte_addr).unwrap_or(&0)
+    }
+
+    fn set_ram(&mut self, byte_addr: u32, value: u32) {
+        if value == 0 {
+            self.ram.remove(&byte_addr);
+        } else {
+            self.ram.insert(byte_addr, value);
+        }
+    }
+
     fn get_max_num_pages(&self) -> u32 {
-        self.interpreter.get_ram(self.segment.start + 4)
+        self.get_ram(self.segment.start + 4)
     }
 
     fn set_num_pages(&mut self, num_pages: u32) {
-        self.interpreter.set_ram(self.segment.start, num_pages);
+        self.set_ram(self.segment.start, num_pages);
         self.byte_size = num_pages * WASM_PAGE_SIZE;
     }
 
@@ -1787,7 +1795,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             return Err(());
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
-        let value = self.interpreter.get_ram(ram_addr);
+        let value = self.get_ram(ram_addr);
         log::trace!("Reading Memory word at {ram_addr}: {value}");
         Ok(value)
     }
@@ -1798,7 +1806,7 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
             return Err(());
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
-        self.interpreter.set_ram(ram_addr, value);
+        self.set_ram(ram_addr, value);
         log::trace!("Writing Memory word at {ram_addr}: {value}");
         Ok(())
     }

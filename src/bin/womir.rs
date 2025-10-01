@@ -36,7 +36,7 @@ impl ExternalFunctions for DataInput {
         module: &str,
         function: &str,
         args: &[u32],
-        mem: MemoryAccessor<'_, '_, Self>,
+        mem: MemoryAccessor<'_>,
     ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
@@ -420,7 +420,7 @@ mod tests {
             module: &str,
             function: &str,
             args: &[u32],
-            mem: MemoryAccessor<'_, '_, Self>,
+            mem: MemoryAccessor<'_>,
         ) -> Vec<u32> {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
