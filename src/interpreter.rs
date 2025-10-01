@@ -47,7 +47,15 @@ pub struct Interpreter<'a, E: ExternalFunctions> {
 }
 
 pub trait ExternalFunctions {
-    fn call(&mut self, module: &str, func: &str, args: &[u32]) -> Vec<u32>;
+    fn call(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[u32],
+        mem: MemoryAccessor<'_, '_, Self>,
+    ) -> Vec<u32>
+    where
+        Self: std::marker::Sized;
 }
 
 impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
@@ -1528,7 +1536,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         .flatten()
                         .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
                         .collect_vec();
-                    let result = self.external_functions.call(module, function, &args);
+                    let result =
+                        self.external_functions
+                            .call(module, function, &args, self.get_mem());
                     for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
                     {
                         self.set_vrom_relative_u32(output..output + 1, value);
