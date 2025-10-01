@@ -1416,7 +1416,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(inputs[0].len(), 1);
                         let index = self.get_vrom_relative_u32(inputs[0].clone());
 
-                        let table = TableAccessor::new(self.program.m.tables[table as usize], self);
+                        let table = TableAccessor::new(
+                            self.program.m.tables[table as usize],
+                            &mut self.ram,
+                        );
                         let entry = table
                             .get_entry(index)
                             .expect("TableGet: index out of bounds");
@@ -1432,8 +1435,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .collect_array()
                             .unwrap();
 
-                        let mut table =
-                            TableAccessor::new(self.program.m.tables[table as usize], self);
+                        let mut table = TableAccessor::new(
+                            self.program.m.tables[table as usize],
+                            &mut self.ram,
+                        );
                         table
                             .set_entry(index, value)
                             .expect("TableSet: index out of bounds");
