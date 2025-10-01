@@ -1900,20 +1900,16 @@ impl<'a> MemoryAccessor<'a> {
     }
 }
 
-struct TableAccessor<'a, 'b, E: ExternalFunctions> {
+struct TableAccessor<'a> {
     segment: Segment,
-    interpreter: &'a mut Interpreter<'b, E>,
+    ram: &'a mut Ram,
     size: u32,
 }
 
-impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
-    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
-        let size = interpreter.ram.get(segment.start);
-        TableAccessor {
-            segment,
-            interpreter,
-            size,
-        }
+impl<'a> TableAccessor<'a> {
+    fn new(segment: Segment, ram: &'a mut Ram) -> Self {
+        let size = ram.get(segment.start);
+        TableAccessor { segment, ram, size }
     }
 
     /// Returns the size of the table in number of elements.
@@ -1922,7 +1918,7 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
     }
 
     fn _get_max_size(&self) -> u32 {
-        self.interpreter.ram.get(self.segment.start + 4)
+        self.ram.get(self.segment.start + 4)
     }
 
     fn get_entry(&self, index: u32) -> Result<[u32; 3], ()> {
@@ -1930,9 +1926,9 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
             return Err(());
         }
         let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
-        let type_idx = self.interpreter.ram.get(base_addr);
-        let frame_size = self.interpreter.ram.get(base_addr + 4);
-        let pc = self.interpreter.ram.get(base_addr + 8);
+        let type_idx = self.ram.get(base_addr);
+        let frame_size = self.ram.get(base_addr + 4);
+        let pc = self.ram.get(base_addr + 8);
         Ok([type_idx, frame_size, pc])
     }
 
@@ -1941,9 +1937,9 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
             return Err(());
         }
         let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
-        self.interpreter.ram.set(base_addr, value[0]);
-        self.interpreter.ram.set(base_addr + 4, value[1]);
-        self.interpreter.ram.set(base_addr + 8, value[2]);
+        self.ram.set(base_addr, value[0]);
+        self.ram.set(base_addr + 4, value[1]);
+        self.ram.set(base_addr + 8, value[2]);
         Ok(())
     }
 }
