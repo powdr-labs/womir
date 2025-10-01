@@ -43,12 +43,22 @@ impl ExternalFunctions for DataInput {
                     let mem = mem.as_mut().unwrap();
                     let sp = args[0];
 
-                    let dst = mem.get_word(sp + 8).unwrap();
-                    let len = mem.get_word(sp + 12).unwrap();
+                    let dst_lo = mem.get_word(sp + 8).unwrap();
+                    let dst_hi = mem.get_word(sp + 12).unwrap();
+                    let dst: u64 = (dst_lo as u64) | ((dst_hi as u64) << 32);
+                    let len_lo = mem.get_word(sp + 16).unwrap();
+                    let len_hi = mem.get_word(sp + 20).unwrap();
+                    let len: u64 = len_lo as u64 | ((len_hi as u64) << 32);
 
-                    for i in 0..len.div_ceil(4) {
-                        mem.set_word(dst + i * 4, rand::random::<u32>()).unwrap();
-                    }
+                    println!("Writing random data of len {len} to {dst}");
+
+                    assert_eq!(len % 4, 0);
+
+                    let v = vec![4; len as usize];
+                    v.chunks(4).enumerate().for_each(|(i, chunk)| {
+                        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+                        mem.set_word((dst + (i as u64) * 4) as u32, val).unwrap();
+                    });
                 }
                 vec![]
             }

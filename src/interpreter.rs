@@ -1163,9 +1163,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         assert_eq!(memarg.memory, 0);
                         let memory = self.get_mem();
-                        let value = memory
-                            .read_contiguous_bytes(addr, word_len * 4)
-                            .expect("Out of bounds read");
+                        let value = memory.read_contiguous_bytes(addr, word_len * 4);
+
+                        if value.is_err() {
+                            println!(
+                                "Out of bounds read addr {addr} len {}, input: {:?}, offset: {}",
+                                word_len * 4,
+                                inputs[0],
+                                memarg.offset
+                            );
+                            panic!();
+                        }
+                        let value = value.unwrap();
 
                         self.set_vrom_relative_range(output_reg, &value);
                     }
@@ -1805,6 +1814,10 @@ impl<'a> MemoryAccessor<'a> {
     }
 
     pub fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
+        println!(
+            "Set word at addr {byte_addr}: {value}, memsize: {}",
+            self.get_size()
+        );
         assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
         if byte_addr >= self.get_size() {
             return Err(());
