@@ -780,8 +780,13 @@ fn translate_single_node<'a, S: Settings<'a>>(
             )?;
 
             vec![
-                s.emit_table_get(ctx, table_index, entry_idx, func_ref_reg)
-                    .into(),
+                s.emit_wasm_op(
+                    ctx,
+                    Op::TableGet { table: table_index },
+                    vec![WasmOpInput::Register(entry_idx)],
+                    Some(func_ref_reg),
+                )
+                .into(),
                 s.emit_conditional_jump_cmp_immediate(
                     ctx,
                     ComparisonFunction::Equal,
