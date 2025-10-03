@@ -81,8 +81,9 @@ impl<T> From<Vec<Tree<T>>> for Tree<T> {
 
 impl<T> Tree<T> {
     fn flatten(self) -> Vec<T> {
-        fn flatten_rec<T>(dnode: Tree<T>, flat: &mut Vec<T>) {
-            match dnode {
+        #[inline]
+        fn flatten_node<T>(node: Tree<T>, flat: &mut Vec<T>) {
+            match node {
                 Tree::Empty => {}
                 Tree::Leaf(x) => {
                     flat.push(x);
@@ -91,15 +92,19 @@ impl<T> Tree<T> {
                     flat.extend(vec);
                 }
                 Tree::Node(children) => {
-                    for child in children {
-                        flatten_rec(child, flat);
-                    }
+                    flatten_vec(children, flat);
                 }
             }
         }
 
+        fn flatten_vec<T>(nodes: Vec<Tree<T>>, flat: &mut Vec<T>) {
+            for node in nodes {
+                flatten_node(node, flat);
+            }
+        }
+
         let mut flat = Vec::new();
-        flatten_rec(self, &mut flat);
+        flatten_node(self, &mut flat);
         flat
     }
 }
