@@ -293,20 +293,6 @@ impl<'a> Settings<'a> for GenericIrSetting {
         }
     }
 
-    fn emit_table_get(
-        &self,
-        _c: &mut Ctx,
-        table_idx: u32,
-        entry_idx_ptr: Range<u32>,
-        dest_ptr: Range<u32>,
-    ) -> Directive<'a> {
-        Directive::WASMOp {
-            op: Op::TableGet { table: table_idx },
-            inputs: vec![entry_idx_ptr],
-            output: Some(dest_ptr),
-        }
-    }
-
     fn emit_wasm_op(
         &self,
         _c: &mut Ctx,

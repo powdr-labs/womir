@@ -328,15 +328,6 @@ pub trait Settings<'a> {
         saved_caller_fp_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
 
-    /// Emits the instructions to retrieve a function pointer from a table entry.
-    fn emit_table_get(
-        &self,
-        c: &mut Context<'a, '_, Self>,
-        table_idx: u32,
-        entry_idx_ptr: Range<u32>,
-        dest_ptr: Range<u32>,
-    ) -> impl Into<Tree<Self::Directive>>;
-
     /// Emits the equivalent set of instructions to a WASM operation.
     fn emit_wasm_op(
         &self,
