@@ -25,12 +25,13 @@ use itertools::Itertools;
 use std::{
     collections::{BTreeSet, VecDeque},
     marker::PhantomData,
-    ops::{Range, RangeFrom},
+    ops::Range,
+    sync::atomic::AtomicU32,
 };
 use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
-    FunctionRef, Module,
+    FunctionRef, LabelGenerator, Module,
     blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
     flattening::allocate_registers::Error,
@@ -123,12 +124,12 @@ pub enum TrapReason {
 pub struct Context<'a, 'b, S: Settings<'a> + ?Sized> {
     pub program: &'b Module<'a>,
     pub register_gen: RegisterGenerator<'a, S>,
-    label_gen: &'b mut RangeFrom<u32>,
+    label_gen: &'b AtomicU32,
 }
 
 impl<'a, S: Settings<'a> + ?Sized> Context<'a, '_, S> {
     pub fn new_label(&mut self, label_type: LabelType) -> String {
-        format_label(self.label_gen.next().unwrap(), label_type)
+        format_label(self.label_gen.next(), label_type)
     }
 }
 
@@ -190,7 +191,7 @@ struct LoopStackEntry {
 pub fn flatten_dag<'a, S: Settings<'a>>(
     s: &S,
     prog: &Module<'a>,
-    label_gen: &mut RangeFrom<u32>,
+    label_gen: &AtomicU32,
     dag: BlocklessDag<'a>,
     func_idx: u32,
 ) -> (WriteOnceAsm<S::Directive>, usize) {
