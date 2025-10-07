@@ -66,8 +66,8 @@ fn main() -> wasmparser::Result<()> {
 
     let wasm_file = std::fs::read(wasm_file_path).unwrap();
 
-    let program =
-        womir::loader::load_wasm(GenericIrSetting, &wasm_file)?.process_all_functions()?;
+    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?
+        .default_par_process_all_functions()?;
 
     if let Err(err) = dump_ir(&program) {
         log::error!("Failed to dump IR: {err}");
@@ -120,7 +120,7 @@ mod tests {
         let wasm_file = std::fs::read(path).unwrap();
         let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
             .unwrap()
-            .process_all_functions()
+            .default_process_all_functions()
             .unwrap();
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
@@ -434,7 +434,7 @@ mod tests {
                     let wasm_file = std::fs::read(mod_name).unwrap();
                     let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
                         .unwrap()
-                        .process_all_functions()
+                        .default_par_process_all_functions()
                         .unwrap();
                     let mut interpreter = Interpreter::new(program, SpectestExternalFunctions);
 

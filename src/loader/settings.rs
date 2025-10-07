@@ -89,8 +89,8 @@ impl WasmOpInput {
 ///
 /// TODO: find a way to make calling conventions and interface registers allocation
 /// part of this trait.
-pub trait Settings<'a>: Send + Sync {
-    type Directive: Send + Sync;
+pub trait Settings<'a> {
+    type Directive;
 
     fn bytes_per_word() -> u32;
 

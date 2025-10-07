@@ -639,7 +639,51 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
         Ok((op, words))
     }
 
-    pub fn process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
+    /// Processes all the functions sequentially, returning a fully processed program.
+    ///
+    /// Prefer to use `default_par_process_all_functions()` if your Settings is `Send + Sync`.
+    pub fn default_process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
+        let label_gen = AtomicU32::new(0);
+        let mut stats = Statistics::default();
+        let functions = self
+            .functions
+            .into_iter()
+            .enumerate()
+            .map(|(i, func)| {
+                func.advance_all_stages(&self.s, &self.m, i as u32, &label_gen, Some(&mut stats))
+            })
+            .collect::<wasmparser::Result<Vec<_>>>()?;
+
+        log::info!("{}", stats);
+
+        Ok(Program {
+            m: self.m,
+            functions,
+        })
+    }
+}
+
+impl<'a, S> PartiallyParsedProgram<'a, S>
+where
+    S: Settings<'a> + Send + Sync,
+    S::Directive: Send + Sync,
+{
+    pub fn parallel_process_all_functions<P>(
+        self,
+        processor: P,
+    ) -> wasmparser::Result<Program<'a, S>>
+    where
+        P: Fn(
+                u32,
+                FunctionProcessingStage<'a, S>,
+                &S,
+                &Module<'a>,
+                &AtomicU32,
+                Option<&mut Statistics>,
+            ) -> WriteOnceAsm<S::Directive>
+            + Send
+            + Sync,
+    {
         let label_gen = AtomicU32::new(0);
         let global_stats = Mutex::new(Statistics::default());
         let unprocessed_funcs = Mutex::new(self.functions.into_iter().enumerate());
@@ -657,15 +701,15 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
                 let label_gen = &label_gen;
                 let s = &self.s;
                 let m = &self.m;
+                let processor = &processor;
                 scope.spawn(move || {
                     let mut stats = Statistics::default();
                     while let Some((func_idx, func)) = {
                         // This extra scope is needed to release the lock before processing the function.
                         unprocessed_funcs.lock().unwrap().next()
                     } {
-                        let func = func
-                            .advance_all_stages(s, m, func_idx as u32, label_gen, Some(&mut stats))
-                            .unwrap();
+                        let func =
+                            processor(func_idx as u32, func, s, m, label_gen, Some(&mut stats));
 
                         processed_funcs_sender.send((func_idx, func)).unwrap();
                     }
@@ -685,6 +729,14 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
         Ok(Program {
             m: self.m,
             functions,
+        })
+    }
+
+    /// Processes all the functions in parallel, returning a fully processed program.
+    pub fn default_par_process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
+        self.parallel_process_all_functions(|func_idx, func, settings, ctx, label_gen, stats| {
+            func.advance_all_stages(settings, ctx, func_idx, label_gen, stats)
+                .unwrap()
         })
     }
 }
