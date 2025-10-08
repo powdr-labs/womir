@@ -671,6 +671,7 @@ where
     pub fn parallel_process_all_functions<P>(
         self,
         processor: P,
+        stats: Option<&mut Statistics>,
     ) -> wasmparser::Result<Program<'a, S>>
     where
         P: Fn(
@@ -685,7 +686,7 @@ where
             + Sync,
     {
         let label_gen = AtomicU32::new(0);
-        let global_stats = Mutex::new(Statistics::default());
+        let global_stats = stats.map(Mutex::new);
         let unprocessed_funcs = Mutex::new(self.functions.into_iter().enumerate());
 
         // Create a scoped thread pool to process the functions in parallel.
@@ -703,17 +704,20 @@ where
                 let m = &self.m;
                 let processor = &processor;
                 scope.spawn(move || {
-                    let mut stats = Statistics::default();
+                    let mut stats = global_stats.is_some().then(Statistics::default);
                     while let Some((func_idx, func)) = {
                         // This extra scope is needed to release the lock before processing the function.
                         unprocessed_funcs.lock().unwrap().next()
                     } {
                         let func =
-                            processor(func_idx as u32, func, s, m, label_gen, Some(&mut stats));
+                            processor(func_idx as u32, func, s, m, label_gen, stats.as_mut());
 
                         processed_funcs_sender.send((func_idx, func)).unwrap();
                     }
-                    *global_stats.lock().unwrap() += stats;
+
+                    if let Some(global_stats) = global_stats {
+                        **global_stats.lock().unwrap() += stats.unwrap();
+                    }
                 });
             }
             // Must drop this, otherwise the receiver hangs forever.
@@ -724,8 +728,6 @@ where
         functions.sort_unstable_by_key(|(idx, _)| *idx);
         let functions = functions.into_iter().map(|(_, f)| f).collect();
 
-        log::info!("{}", global_stats.into_inner().unwrap());
-
         Ok(Program {
             m: self.m,
             functions,
@@ -734,10 +736,18 @@ where
 
     /// Processes all the functions in parallel, returning a fully processed program.
     pub fn default_par_process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
-        self.parallel_process_all_functions(|func_idx, func, settings, ctx, label_gen, stats| {
-            func.advance_all_stages(settings, ctx, func_idx, label_gen, stats)
-                .unwrap()
-        })
+        let mut stats = Statistics::default();
+        let funcs = self.parallel_process_all_functions(
+            |func_idx, func, settings, ctx, label_gen, stats| {
+                func.advance_all_stages(settings, ctx, func_idx, label_gen, stats)
+                    .unwrap()
+            },
+            Some(&mut stats),
+        );
+
+        log::info!("{}", stats);
+
+        funcs
     }
 }
 
