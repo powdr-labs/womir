@@ -7,12 +7,13 @@
 use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    ops::RangeFrom,
+    sync::atomic::AtomicU32,
 };
 use wasmparser::{Operator as Op, ValType};
 
-use crate::loader::BlockKind;
+use crate::loader::{BlockKind, LabelGenerator};
 
+pub use super::dag::NodeInput;
 use super::dag::{self, Dag, ValueOrigin};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,7 +71,7 @@ pub struct BrTableTarget {
 #[derive(Debug)]
 pub struct Node<'a> {
     pub operation: Operation<'a>,
-    pub inputs: Vec<ValueOrigin>,
+    pub inputs: Vec<NodeInput>,
     pub output_types: Vec<ValType>,
 }
 
@@ -80,7 +81,7 @@ pub struct BlocklessDag<'a> {
 }
 
 impl<'a> BlocklessDag<'a> {
-    pub fn new(dag: Dag<'a>, label_generator: &mut RangeFrom<u32>) -> Self {
+    pub fn new(dag: Dag<'a>, label_generator: &AtomicU32) -> Self {
         let mut new_nodes = Vec::new();
 
         let mut ctrl_stack = VecDeque::from([BlockStack {
@@ -110,7 +111,7 @@ struct BlockStack {
 
 fn process_nodes<'a>(
     orig_nodes: Vec<dag::Node<'a>>,
-    label_generator: &mut RangeFrom<u32>,
+    label_generator: &AtomicU32,
     new_nodes: &mut Vec<Node<'a>>,
     ctrl_stack: &mut VecDeque<BlockStack>,
     break_targets: &mut HashSet<BreakTarget>,
@@ -237,7 +238,7 @@ fn process_nodes<'a>(
                 BlockKind::Block => {
                     // Blocks are merged into the current frame.
 
-                    let label = label_generator.next().unwrap();
+                    let label = label_generator.next();
                     ctrl_stack.push_front(BlockStack {
                         target_type: TargetType::Label(label),
                         frame_level: ctrl_stack[0].frame_level,
@@ -249,7 +250,12 @@ fn process_nodes<'a>(
                         // The inputs are resolved statically during the traversal.
                         std::mem::take(&mut node.inputs)
                             .into_iter()
-                            .map(|input| outputs_map[&input])
+                            .map(|input| match input {
+                                NodeInput::Reference(origin) => outputs_map[&origin],
+                                NodeInput::Constant(_) => {
+                                    panic!("Constants not expected in block inputs")
+                                }
+                            })
                             .collect(),
                     );
 
@@ -274,7 +280,10 @@ fn process_nodes<'a>(
 
         let mut inputs = node.inputs;
         for input in inputs.iter_mut() {
-            *input = outputs_map[input];
+            if let NodeInput::Reference(origin) = input {
+                *origin = outputs_map[origin];
+            }
+            // Constants pass through unchanged
         }
 
         for output_idx in 0..node.output_types.len() {

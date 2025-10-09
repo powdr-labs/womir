@@ -1,8 +1,8 @@
 use crate::{
     linker,
-    loader::flattening::{
-        Context, TrapReason, Tree,
-        settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings},
+    loader::{
+        flattening::{Context, TrapReason, Tree},
+        settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings, WasmOpInput},
     },
 };
 use std::{fmt::Display, ops::Range};
@@ -293,28 +293,25 @@ impl<'a> Settings<'a> for GenericIrSetting {
         }
     }
 
-    fn emit_table_get(
-        &self,
-        _c: &mut Ctx,
-        table_idx: u32,
-        entry_idx_ptr: Range<u32>,
-        dest_ptr: Range<u32>,
-    ) -> Directive<'a> {
-        Directive::WASMOp {
-            op: Op::TableGet { table: table_idx },
-            inputs: vec![entry_idx_ptr],
-            output: Some(dest_ptr),
-        }
-    }
-
     fn emit_wasm_op(
         &self,
         _c: &mut Ctx,
         op: Op<'a>,
-        inputs: Vec<Range<u32>>,
+        inputs: Vec<WasmOpInput>,
         output: Option<Range<u32>>,
     ) -> Directive<'a> {
-        Directive::WASMOp { op, inputs, output }
+        Directive::WASMOp {
+            op,
+            inputs: inputs.into_iter().map(unwrap_register).collect(),
+            output,
+        }
+    }
+}
+
+fn unwrap_register(input: WasmOpInput) -> Range<u32> {
+    match input {
+        WasmOpInput::Register(r) => r,
+        WasmOpInput::Constant(_) => panic!("Expected register, got constant"),
     }
 }
 

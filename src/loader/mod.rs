@@ -4,15 +4,16 @@ pub mod dag;
 pub mod dumb_jump_removal;
 pub mod flattening;
 pub mod locals_data_flow;
+pub mod settings;
 
 use core::panic;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt::{Display, Formatter},
     marker::PhantomData,
-    ops::RangeFrom,
-    rc::Rc,
-    vec,
+    ops::AddAssign,
+    sync::{Arc, Mutex, atomic::AtomicU32, mpsc::channel},
+    thread, vec,
 };
 
 use block_tree::BlockTree;
@@ -27,9 +28,9 @@ use wasmparser::{
 
 use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget},
-    dag::ValueOrigin,
-    flattening::settings::Settings,
+    dag::{NodeInput, ValueOrigin},
     locals_data_flow::LiftedBlockTree,
+    settings::Settings,
 };
 
 pub use flattening::{func_idx_to_label, word_count_type};
@@ -281,7 +282,7 @@ pub struct FuncType {
 
 #[derive(Debug, Clone)]
 pub struct Module<'a> {
-    types: Vec<Rc<FuncType>>,
+    types: Vec<Arc<FuncType>>,
     func_types: Vec<u32>,
     table_types: Vec<RefType>,
 
@@ -318,7 +319,7 @@ impl<'a> Module<'a> {
             .unwrap_or_else(|| {
                 // Create a new type.
                 let type_idx = self.types.len();
-                self.types.push(Rc::new(FuncType {
+                self.types.push(Arc::new(FuncType {
                     unique_id: type_idx as u32,
                     ty: wasmparser::FuncType::new(inputs.iter().cloned(), outputs.iter().cloned()),
                 }));
@@ -336,7 +337,7 @@ impl<'a> Module<'a> {
         &self.types[type_idx as usize]
     }
 
-    fn get_type_rc(&self, type_idx: u32) -> Rc<FuncType> {
+    fn get_type_arc(&self, type_idx: u32) -> Arc<FuncType> {
         self.types[type_idx as usize].clone()
     }
 
@@ -412,11 +413,22 @@ pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
         tree: LiftedBlockTree<'a>,
     },
     PlainDag(Dag<'a>),
+    ConstCollapsedDag(Dag<'a>),
     ConstDedupDag(Dag<'a>),
     DanglingOptDag(Dag<'a>),
     BlocklessDag(BlocklessDag<'a>),
     PlainFlatAsm(WriteOnceAsm<S::Directive>),
     DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
+}
+
+pub trait LabelGenerator {
+    fn next(&self) -> u32;
+}
+
+impl LabelGenerator for AtomicU32 {
+    fn next(&self) -> u32 {
+        self.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
@@ -425,7 +437,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
         settings: &S,
         ctx: &Module<'a>,
         func_idx: u32,
-        label_gen: &mut RangeFrom<u32>,
+        label_gen: &AtomicU32,
         stats: Option<&mut Statistics>,
     ) -> wasmparser::Result<FunctionProcessingStage<'a, S>> {
         Ok(match self {
@@ -454,6 +466,15 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 FunctionProcessingStage::PlainDag(dag)
             }
             FunctionProcessingStage::PlainDag(mut dag) => {
+                // Optimization pass: collapse constants into instructions that use them, if possible.
+                let constants_collapsed =
+                    dag::const_collapse::constant_collapse(settings, &mut dag);
+                if let Some(stats) = stats {
+                    stats.constants_collapsed += constants_collapsed;
+                }
+                FunctionProcessingStage::ConstCollapsedDag(dag)
+            }
+            FunctionProcessingStage::ConstCollapsedDag(mut dag) => {
                 // Optimization pass: deduplicate const definitions in the DAG.
                 let constants_deduplicated = dag::const_dedup::deduplicate_constants(&mut dag);
                 if let Some(stats) = stats {
@@ -514,7 +535,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
         settings: &S,
         ctx: &Module<'a>,
         func_idx: u32,
-        label_gen: &mut RangeFrom<u32>,
+        label_gen: &AtomicU32,
         mut stats: Option<&mut Statistics>,
     ) -> wasmparser::Result<WriteOnceAsm<S::Directive>> {
         loop {
@@ -618,21 +639,18 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
         Ok((op, words))
     }
 
-    pub fn process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
-        let mut label_gen = 0..;
+    /// Processes all the functions sequentially, returning a fully processed program.
+    ///
+    /// Prefer to use `default_par_process_all_functions()` if your Settings is `Send + Sync`.
+    pub fn default_process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
+        let label_gen = AtomicU32::new(0);
         let mut stats = Statistics::default();
         let functions = self
             .functions
             .into_iter()
             .enumerate()
             .map(|(i, func)| {
-                func.advance_all_stages(
-                    &self.s,
-                    &self.m,
-                    i as u32,
-                    &mut label_gen,
-                    Some(&mut stats),
-                )
+                func.advance_all_stages(&self.s, &self.m, i as u32, &label_gen, Some(&mut stats))
             })
             .collect::<wasmparser::Result<Vec<_>>>()?;
 
@@ -642,6 +660,94 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
             m: self.m,
             functions,
         })
+    }
+}
+
+impl<'a, S> PartiallyParsedProgram<'a, S>
+where
+    S: Settings<'a> + Send + Sync,
+    S::Directive: Send + Sync,
+{
+    pub fn parallel_process_all_functions<P>(
+        self,
+        processor: P,
+        stats: Option<&mut Statistics>,
+    ) -> wasmparser::Result<Program<'a, S>>
+    where
+        P: Fn(
+                u32,
+                FunctionProcessingStage<'a, S>,
+                &S,
+                &Module<'a>,
+                &AtomicU32,
+                Option<&mut Statistics>,
+            ) -> WriteOnceAsm<S::Directive>
+            + Send
+            + Sync,
+    {
+        let label_gen = AtomicU32::new(0);
+        let global_stats = stats.map(Mutex::new);
+        let unprocessed_funcs = Mutex::new(self.functions.into_iter().enumerate());
+
+        // Create a scoped thread pool to process the functions in parallel.
+        let mut functions = thread::scope(|scope| {
+            let (processed_funcs_sender, processed_funcs_receiver) = channel();
+
+            let num_threads = num_cpus::get().max(1);
+            log::info!("Processing functions using {num_threads} threads");
+            for _ in 0..num_threads {
+                let processed_funcs_sender = processed_funcs_sender.clone();
+                let unprocessed_funcs = &unprocessed_funcs;
+                let global_stats = &global_stats;
+                let label_gen = &label_gen;
+                let s = &self.s;
+                let m = &self.m;
+                let processor = &processor;
+                scope.spawn(move || {
+                    let mut stats = global_stats.is_some().then(Statistics::default);
+                    while let Some((func_idx, func)) = {
+                        // This extra scope is needed to release the lock before processing the function.
+                        unprocessed_funcs.lock().unwrap().next()
+                    } {
+                        let func =
+                            processor(func_idx as u32, func, s, m, label_gen, stats.as_mut());
+
+                        processed_funcs_sender.send((func_idx, func)).unwrap();
+                    }
+
+                    if let Some(global_stats) = global_stats {
+                        **global_stats.lock().unwrap() += stats.unwrap();
+                    }
+                });
+            }
+            // Must drop this, otherwise the receiver hangs forever.
+            drop(processed_funcs_sender);
+
+            processed_funcs_receiver.into_iter().collect_vec()
+        });
+        functions.sort_unstable_by_key(|(idx, _)| *idx);
+        let functions = functions.into_iter().map(|(_, f)| f).collect();
+
+        Ok(Program {
+            m: self.m,
+            functions,
+        })
+    }
+
+    /// Processes all the functions in parallel, returning a fully processed program.
+    pub fn default_par_process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
+        let mut stats = Statistics::default();
+        let funcs = self.parallel_process_all_functions(
+            |func_idx, func, settings, ctx, label_gen, stats| {
+                func.advance_all_stages(settings, ctx, func_idx, label_gen, stats)
+                    .unwrap()
+            },
+            Some(&mut stats),
+        );
+
+        log::info!("{}", stats);
+
+        funcs
     }
 }
 
@@ -691,6 +797,8 @@ fn pack_bytes_into_words(bytes: &[u8], mut alignment: u32) -> Vec<MemoryEntry> {
 pub struct Statistics {
     /// Number of register copies saved by the "smart" register allocation.
     pub register_copies_saved: usize,
+    /// Number of constants collapsed into instructions.
+    pub constants_collapsed: usize,
     /// Number of constants deduplicated in the DAG.
     pub constants_deduplicated: usize,
     /// Number of dangling nodes removed from the DAG.
@@ -701,12 +809,24 @@ pub struct Statistics {
     pub useless_jumps_removed: usize,
 }
 
+impl AddAssign for Statistics {
+    fn add_assign(&mut self, other: Self) {
+        self.register_copies_saved += other.register_copies_saved;
+        self.constants_collapsed += other.constants_collapsed;
+        self.constants_deduplicated += other.constants_deduplicated;
+        self.dangling_nodes_removed += other.dangling_nodes_removed;
+        self.block_outputs_removed += other.block_outputs_removed;
+        self.useless_jumps_removed += other.useless_jumps_removed;
+    }
+}
+
 impl Display for Statistics {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
-            "Optimization statistics:\n - {} register copies saved\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed\n - {} useless jumps removed",
+            "Optimization statistics:\n - {} register copies saved\n - {} constants collapsed\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed\n - {} useless jumps removed",
             self.register_copies_saved,
+            self.constants_collapsed,
             self.constants_deduplicated,
             self.dangling_nodes_removed,
             self.block_outputs_removed,
@@ -826,7 +946,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                     if unique_id == u32::MAX {
                         panic!("Too many unique function types!");
                     }
-                    initial.push((unique_id, Rc::new(FuncType { unique_id, ty })));
+                    initial.push((unique_id, Arc::new(FuncType { unique_id, ty })));
 
                     // I tried doing this with itertools' `chunk_by()`, but lifetimes didn't let me.
                     let mut unique_types = types.fold(initial, |mut acc, (type_idx, ty)| {
@@ -836,7 +956,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                         } else {
                             acc.push((
                                 type_idx,
-                                Rc::new(FuncType {
+                                Arc::new(FuncType {
                                     unique_id: type_idx,
                                     ty,
                                 }),
@@ -1369,9 +1489,11 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                     function_index: function_idx,
                 }),
                 inputs: (0..func_type.params().len() as u32)
-                    .map(|i| ValueOrigin {
-                        node: 0,
-                        output_idx: i,
+                    .map(|i| {
+                        NodeInput::Reference(ValueOrigin {
+                            node: 0,
+                            output_idx: i,
+                        })
                     })
                     .collect(),
                 output_types: func_type.results().to_vec(),
@@ -1382,9 +1504,11 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                     kind: blockless_dag::TargetType::FunctionOrLoop,
                 }),
                 inputs: (0..func_type.results().len() as u32)
-                    .map(|i| ValueOrigin {
-                        node: 1,
-                        output_idx: i,
+                    .map(|i| {
+                        NodeInput::Reference(ValueOrigin {
+                            node: 1,
+                            output_idx: i,
+                        })
                     })
                     .collect(),
                 output_types: Vec::new(),
@@ -1435,7 +1559,7 @@ pub enum BlockKind {
 #[derive(Debug)]
 pub struct Block<'a> {
     block_kind: BlockKind,
-    interface_type: Rc<FuncType>,
+    interface_type: Arc<FuncType>,
     elements: Vec<Element<'a>>,
 
     input_locals: BTreeSet<u32>,

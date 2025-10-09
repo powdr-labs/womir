@@ -17,7 +17,6 @@
 //! break inputs are explicitly marked.
 
 mod allocate_registers;
-pub mod settings;
 
 use derive_where::derive_where;
 
@@ -26,23 +25,23 @@ use itertools::Itertools;
 use std::{
     collections::{BTreeSet, VecDeque},
     marker::PhantomData,
-    ops::{Range, RangeFrom},
+    ops::Range,
+    sync::atomic::AtomicU32,
 };
 use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
-    FunctionRef, Module,
+    FunctionRef, LabelGenerator, Module,
     blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
-    flattening::{
-        allocate_registers::NotAllocatedError,
-        settings::{
-            ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
-        },
+    flattening::allocate_registers::Error,
+    settings::{
+        ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
+        WasmOpInput,
     },
 };
 
-use super::blockless_dag::{BlocklessDag, Operation};
+use super::blockless_dag::{BlocklessDag, NodeInput, Operation};
 
 /// An assembly-like representation for a write-once memory machine.
 #[derive(Debug, Clone)]
@@ -83,8 +82,9 @@ impl<T> From<Vec<Tree<T>>> for Tree<T> {
 
 impl<T> Tree<T> {
     fn flatten(self) -> Vec<T> {
-        fn flatten_rec<T>(dnode: Tree<T>, flat: &mut Vec<T>) {
-            match dnode {
+        #[inline]
+        fn flatten_node<T>(node: Tree<T>, flat: &mut Vec<T>) {
+            match node {
                 Tree::Empty => {}
                 Tree::Leaf(x) => {
                     flat.push(x);
@@ -93,15 +93,19 @@ impl<T> Tree<T> {
                     flat.extend(vec);
                 }
                 Tree::Node(children) => {
-                    for child in children {
-                        flatten_rec(child, flat);
-                    }
+                    flatten_vec(children, flat);
                 }
             }
         }
 
+        fn flatten_vec<T>(nodes: Vec<Tree<T>>, flat: &mut Vec<T>) {
+            for node in nodes {
+                flatten_node(node, flat);
+            }
+        }
+
         let mut flat = Vec::new();
-        flatten_rec(self, &mut flat);
+        flatten_node(self, &mut flat);
         flat
     }
 }
@@ -120,12 +124,12 @@ pub enum TrapReason {
 pub struct Context<'a, 'b, S: Settings<'a> + ?Sized> {
     pub program: &'b Module<'a>,
     pub register_gen: RegisterGenerator<'a, S>,
-    label_gen: &'b mut RangeFrom<u32>,
+    label_gen: &'b AtomicU32,
 }
 
 impl<'a, S: Settings<'a> + ?Sized> Context<'a, '_, S> {
     pub fn new_label(&mut self, label_type: LabelType) -> String {
-        format_label(self.label_gen.next().unwrap(), label_type)
+        format_label(self.label_gen.next(), label_type)
     }
 }
 
@@ -187,7 +191,7 @@ struct LoopStackEntry {
 pub fn flatten_dag<'a, S: Settings<'a>>(
     s: &S,
     prog: &Module<'a>,
-    label_gen: &mut RangeFrom<u32>,
+    label_gen: &AtomicU32,
     dag: BlocklessDag<'a>,
     func_idx: u32,
 ) -> (WriteOnceAsm<S::Directive>, usize) {
@@ -309,10 +313,13 @@ fn flatten_frame_tree<'a, S: Settings<'a>>(
                 directives.push(flat_result.tree);
                 number_of_saved_copies += flat_result.saved_copies;
             }
-            Err(NotAllocatedError) => {
+            Err(Error::NotAllocated) => {
                 // Some required input for this node was not found in the allocation.
                 // This means that the node is unreachable, and we should emit a trap.
                 directives.push(s.emit_trap(ctx, TrapReason::RegisterAllocatorBug).into());
+            }
+            Err(Error::NotARegister) => {
+                panic!("Input register needed, but it is a constant");
             }
         }
     }
@@ -345,7 +352,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
     ret_info: &Option<ReturnInfo>,
     node_idx: usize,
     node: Node<'a>,
-) -> Result<FlatteningResult<S::Directive>, NotAllocatedError> {
+) -> Result<FlatteningResult<S::Directive>, Error> {
     let mut number_of_saved_copies = 0;
     let res = Ok(match node.operation {
         Operation::Inputs => {
@@ -484,7 +491,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // Get the conditional variable from the inputs.
             let mut inputs = node.inputs;
             let cond_origin = inputs.pop().unwrap();
-            let cond_reg = curr_entry.allocation.get(&cond_origin)?;
+            let cond_reg = curr_entry.allocation.get_as_reg(&cond_origin)?;
             assert_reg::<S>(&cond_reg, ValType::I32);
 
             // Emit the jump to the target label.
@@ -556,7 +563,9 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let curr_entry = ctrl_stack.front().unwrap();
 
             let mut node_inputs = node.inputs;
-            let selector = curr_entry.allocation.get(&node_inputs.pop().unwrap())?;
+            let selector = curr_entry
+                .allocation
+                .get_as_reg(&node_inputs.pop().unwrap())?;
 
             let mut jump_instructions = targets
                 .into_iter()
@@ -566,7 +575,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     let inputs = target
                         .input_permutation
                         .iter()
-                        .map(|&idx| node_inputs[idx as usize])
+                        .map(|&idx| node_inputs[idx as usize].clone())
                         .collect_vec();
 
                     // Emit the jump to the target label.
@@ -692,10 +701,12 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 let inputs = map_input_into_regs(node.inputs, curr_entry)?;
                 let outputs = (0..node.output_types.len())
                     .map(|output_idx| {
-                        curr_entry.allocation.get(&ValueOrigin {
-                            node: node_idx,
-                            output_idx: output_idx as u32,
-                        })
+                        curr_entry
+                            .allocation
+                            .get_as_reg(&NodeInput::Reference(ValueOrigin {
+                                node: node_idx,
+                                output_idx: output_idx as u32,
+                            }))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -710,7 +721,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 let inputs = node
                     .inputs
                     .into_iter()
-                    .map(|origin| curr_entry.allocation.get(&origin))
+                    .map(|origin| curr_entry.allocation.get_as_reg(&origin))
                     .collect::<Result<Vec<_>, _>>()?;
                 let call = prepare_function_call(
                     s,
@@ -775,8 +786,13 @@ fn translate_single_node<'a, S: Settings<'a>>(
             )?;
 
             vec![
-                s.emit_table_get(ctx, table_index, entry_idx, func_ref_reg)
-                    .into(),
+                s.emit_wasm_op(
+                    ctx,
+                    Op::TableGet { table: table_index },
+                    vec![WasmOpInput::Register(entry_idx)],
+                    Some(func_ref_reg),
+                )
+                .into(),
                 s.emit_conditional_jump_cmp_immediate(
                     ctx,
                     ComparisonFunction::Equal,
@@ -813,7 +829,18 @@ fn translate_single_node<'a, S: Settings<'a>>(
         Operation::WASMOp(op) => {
             // Normal WASM operations are handled by the ISA emmiter directly.
             let curr_entry = ctrl_stack.front().unwrap();
-            let inputs = map_input_into_regs(node.inputs, curr_entry)?;
+            let inputs = node
+                .inputs
+                .into_iter()
+                .map(|input| {
+                    Ok(match input {
+                        NodeInput::Constant(c) => WasmOpInput::Constant(c),
+                        NodeInput::Reference(origin) => {
+                            WasmOpInput::Register(curr_entry.allocation.get(&origin)?)
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
             let output = match node.output_types.len() {
                 0 => None,
                 1 => Some(curr_entry.allocation.get(&ValueOrigin {
@@ -840,12 +867,12 @@ fn assert_reg<'a, S: Settings<'a>>(reg: &Range<u32>, ty: ValType) {
 }
 
 fn map_input_into_regs(
-    node_inputs: Vec<ValueOrigin>,
+    node_inputs: Vec<NodeInput>,
     curr_entry: &CtrlStackEntry,
-) -> Result<Vec<Range<u32>>, NotAllocatedError> {
+) -> Result<Vec<Range<u32>>, Error> {
     node_inputs
         .into_iter()
-        .map(|origin| curr_entry.allocation.get(&origin))
+        .map(|input| curr_entry.allocation.get_as_reg(&input))
         .collect()
 }
 
@@ -903,7 +930,7 @@ fn prepare_function_call<'a, S: Settings<'a>>(
     num_outputs: usize,
     curr_entry: &CtrlStackEntry,
     frame_ptr: Range<u32>,
-) -> Result<FunctionCall<S::Directive>, NotAllocatedError> {
+) -> Result<FunctionCall<S::Directive>, Error> {
     let mut prefix_directives = Vec::new();
     let mut suffix_directives = Vec::new();
 
@@ -920,10 +947,12 @@ fn prepare_function_call<'a, S: Settings<'a>>(
             .push(copy_into_frame(s, ctx, src_reg, frame_ptr.clone(), dest_reg).into());
     }
     for output_idx in 0..num_outputs {
-        let caller_reg = curr_entry.allocation.get(&ValueOrigin {
-            node: node_idx,
-            output_idx: output_idx as u32,
-        })?;
+        let caller_reg = curr_entry
+            .allocation
+            .get_as_reg(&NodeInput::Reference(ValueOrigin {
+                node: node_idx,
+                output_idx: output_idx as u32,
+            }))?;
         let callee_reg = fn_reg_gen.allocate_words(caller_reg.len() as u32);
 
         if S::use_non_deterministic_function_outputs() {
@@ -946,10 +975,10 @@ fn emit_jump<'a, S: Settings<'a>>(
     s: &S,
     ctx: &mut Context<'a, '_, S>,
     ret_info: Option<&ReturnInfo>,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     target: &BreakTarget,
     ctrl_stack: &mut VecDeque<CtrlStackEntry>,
-) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
+) -> Result<Vec<Tree<S::Directive>>, Error> {
     // There are 5 different kinds of jumps, depending on the target:
     //
     // 1. Jump to a label in the current frame. We need to check if the break arguments have
@@ -1041,13 +1070,13 @@ fn copy_local_jump_args<'a, S: Settings<'a>>(
     s: &S,
     ctx: &mut Context<'a, '_, S>,
     allocation: &Allocation,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     output_regs: &[Range<u32>],
-) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
+) -> Result<Vec<Tree<S::Directive>>, Error> {
     // Copy the node inputs into the output registers, if they are not already assigned.
     let mut directives = Vec::new();
     for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
-        let src_reg = &allocation.get(origin)?;
+        let src_reg = &allocation.get_as_reg(origin)?;
         if src_reg != dest_reg {
             // Explicit rebind to avoid lifetime issues when moving `ctx` into the closure.
             let ctx = &mut *ctx;
@@ -1067,8 +1096,8 @@ fn local_jump<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_, S>,
     label_id: u32,
     allocation: &Allocation,
-    node_inputs: &[ValueOrigin],
-) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
+    node_inputs: &[NodeInput],
+) -> Result<Vec<Tree<S::Directive>>, Error> {
     // Copy the node inputs into the output registers, if they are not already assigned.
     let output_regs = &allocation.labels[&label_id];
     let mut directives = copy_local_jump_args(s, ctx, allocation, node_inputs, output_regs)?;
@@ -1084,9 +1113,9 @@ fn top_level_return<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_, S>,
     ret_info: &ReturnInfo,
     allocation: &Allocation,
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     output_regs: &[Range<u32>],
-) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
+) -> Result<Vec<Tree<S::Directive>>, Error> {
     // Copy the node inputs into the output registers, if they are not already assigned.
     let mut directives = copy_local_jump_args(s, ctx, allocation, node_inputs, output_regs)?;
 
@@ -1106,10 +1135,10 @@ fn return_from_loop<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_, S>,
     ctrl_stack_len: usize,
     output_regs: &[Range<u32>],
-    node_inputs: &[ValueOrigin],
+    node_inputs: &[NodeInput],
     allocation: &Allocation,
     curr_entry: &LoopStackEntry,
-) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
+) -> Result<Vec<Tree<S::Directive>>, Error> {
     let mut directives = Vec::new();
 
     if !output_regs.is_empty() {
@@ -1118,7 +1147,7 @@ fn return_from_loop<'a, S: Settings<'a>>(
 
         // Issue the copy directives.
         for (origin, dest_reg) in node_inputs.iter().zip_eq(output_regs.iter()) {
-            let src_reg = allocation.get(origin)?;
+            let src_reg = allocation.get_as_reg(origin)?;
             directives.extend(copy_into_frame(
                 s,
                 ctx,
@@ -1148,8 +1177,8 @@ fn jump_out_of_loop<'a, S: Settings<'a>>(
     depth: u32,
     label_id: u32,
     ctrl_stack: &VecDeque<CtrlStackEntry>,
-    node_inputs: &[ValueOrigin],
-) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
+    node_inputs: &[NodeInput],
+) -> Result<Vec<Tree<S::Directive>>, Error> {
     let caller_entry = ctrl_stack.front().unwrap();
     let outer_fps = if let CtrlStackType::Loop(curr_entry) = &caller_entry.entry_type {
         &curr_entry.layout.saved_fps
@@ -1164,7 +1193,7 @@ fn jump_out_of_loop<'a, S: Settings<'a>>(
 
     let mut directives = Vec::new();
     for (origin, dest_reg) in node_inputs.iter().zip_eq(target_inputs.iter()) {
-        let src_reg = caller_entry.allocation.get(origin)?;
+        let src_reg = caller_entry.allocation.get_as_reg(origin)?;
         directives.push(copy_into_frame(s, ctx, src_reg, dest_fp.clone(), dest_reg.clone()).into());
     }
 
@@ -1188,8 +1217,8 @@ fn jump_into_loop<'a, S: Settings<'a>>(
     depth_offset: i64,
     ret_info: Option<&ReturnInfo>,
     caller_stack_entry: &CtrlStackEntry,
-    node_inputs: &[ValueOrigin],
-) -> Result<Vec<Tree<S::Directive>>, NotAllocatedError> {
+    node_inputs: &[NodeInput],
+) -> Result<Vec<Tree<S::Directive>>, Error> {
     let mut directives: Vec<Tree<S::Directive>> = Vec::new();
 
     // We start by allocating the frame.
@@ -1260,7 +1289,7 @@ fn jump_into_loop<'a, S: Settings<'a>>(
 
     // Copy the loop inputs into the loop frame.
     for (origin, input_reg) in node_inputs.iter().zip_eq(loop_entry.input_regs.iter()) {
-        let src_reg = caller_stack_entry.allocation.get(origin)?;
+        let src_reg = caller_stack_entry.allocation.get_as_reg(origin)?;
         directives.extend(copy_into_frame(
             s,
             ctx,
