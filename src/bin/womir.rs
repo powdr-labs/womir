@@ -6,7 +6,7 @@ use std::{
 use itertools::Itertools;
 use womir::{
     generic_ir::GenericIrSetting,
-    interpreter::{ExternalFunctions, Interpreter},
+    interpreter::{ExternalFunctions, Interpreter, MemoryAccessor},
     loader::Program,
 };
 
@@ -23,7 +23,13 @@ impl DataInput {
 }
 
 impl ExternalFunctions for DataInput {
-    fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
+    fn call(
+        &mut self,
+        module: &str,
+        function: &str,
+        args: &[u32],
+        _mem: &mut Option<MemoryAccessor<'_>>,
+    ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
                 vec![self.values.next().expect("Not enough input values")]
@@ -33,7 +39,7 @@ impl ExternalFunctions for DataInput {
             }
             _ => {
                 panic!(
-                    "External function not implemented: {module}.{function} with args: {:?}",
+                    "External function not implemented: module: {module}, function: {function} with args: {:?}",
                     args
                 );
             }
@@ -387,7 +393,13 @@ mod tests {
     struct SpectestExternalFunctions;
 
     impl ExternalFunctions for SpectestExternalFunctions {
-        fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
+        fn call(
+            &mut self,
+            module: &str,
+            function: &str,
+            args: &[u32],
+            _mem: &mut Option<MemoryAccessor<'_>>,
+        ) -> Vec<u32> {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
             (func (export "print_i32") (param i32))
