@@ -1,6 +1,6 @@
 use wasmparser::ValType;
 
-use crate::loader::{flattening::settings::Settings, word_count_type};
+use crate::loader::{settings::Settings, word_count_type};
 
 pub mod generic_ir;
 pub mod interpreter;

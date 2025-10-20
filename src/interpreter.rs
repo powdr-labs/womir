@@ -1166,13 +1166,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let value = memory.read_contiguous_bytes(addr, word_len * 4);
 
                         if value.is_err() {
-                            println!(
+                            panic!(
                                 "Out of bounds read addr {addr} len {}, input: {:?}, offset: {}",
                                 word_len * 4,
                                 inputs[0],
                                 memarg.offset
                             );
-                            panic!();
                         }
                         let value = value.unwrap();
 
@@ -1779,6 +1778,12 @@ pub struct MemoryAccessor<'a> {
     byte_size: u32,
 }
 
+#[derive(Debug)]
+pub enum MemoryAccessError {
+    // accessed address and current memory size
+    OutOfBounds(u32, u32),
+}
+
 impl<'a> MemoryAccessor<'a> {
     fn new(segment: Segment, ram: &'a mut Ram) -> Self {
         let byte_size = ram.get(segment.start) * WASM_PAGE_SIZE;
@@ -1802,10 +1807,10 @@ impl<'a> MemoryAccessor<'a> {
         self.byte_size
     }
 
-    pub fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
+    pub fn get_word(&self, byte_addr: u32) -> Result<u32, MemoryAccessError> {
         assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
         if byte_addr >= self.get_size() {
-            return Err(());
+            return Err(MemoryAccessError::OutOfBounds(byte_addr, self.get_size()));
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         let value = self.ram.get(ram_addr);
@@ -1813,14 +1818,10 @@ impl<'a> MemoryAccessor<'a> {
         Ok(value)
     }
 
-    pub fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
-        println!(
-            "Set word at addr {byte_addr}: {value}, memsize: {}",
-            self.get_size()
-        );
+    pub fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), MemoryAccessError> {
         assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
         if byte_addr >= self.get_size() {
-            return Err(());
+            return Err(MemoryAccessError::OutOfBounds(byte_addr, self.get_size()));
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         self.ram.set(ram_addr, value);
@@ -1828,7 +1829,7 @@ impl<'a> MemoryAccessor<'a> {
         Ok(())
     }
 
-    fn write_contiguous(&mut self, byte_addr: u32, data: &[u32]) -> Result<(), ()> {
+    fn write_contiguous(&mut self, byte_addr: u32, data: &[u32]) -> Result<(), MemoryAccessError> {
         if byte_addr % 4 == 0 {
             // Simple aligned writes
             for (i, &value) in data.iter().enumerate() {
@@ -1874,7 +1875,11 @@ impl<'a> MemoryAccessor<'a> {
     ///
     /// The high bytes of the last returned word can be anything if `num_bytes` is
     /// not a multiple of 4.
-    fn read_contiguous_bytes(&self, byte_addr: u32, num_bytes: u32) -> Result<Vec<u32>, ()> {
+    fn read_contiguous_bytes(
+        &self,
+        byte_addr: u32,
+        num_bytes: u32,
+    ) -> Result<Vec<u32>, MemoryAccessError> {
         let num_words = num_bytes.div_ceil(4);
         let mut data = Vec::with_capacity(num_words as usize);
         let offset_bytes = byte_addr % 4;

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
+use std::{collections::BTreeSet, iter::Peekable, sync::Arc};
 
 use wasmparser::{BlockType, Operator, OperatorsIterator, OperatorsReader, ValType};
 
@@ -359,10 +359,10 @@ fn increment_outer_br_references(element: &mut Element, minimum_depth: u32) {
     }
 }
 
-fn get_type(ctx: &Module, blockty: BlockType) -> Rc<FuncType> {
+fn get_type(ctx: &Module, blockty: BlockType) -> Arc<FuncType> {
     match blockty {
         BlockType::Empty => new_func_type([], []),
-        BlockType::FuncType(idx) => ctx.get_type_rc(idx),
+        BlockType::FuncType(idx) => ctx.get_type_arc(idx),
         BlockType::Type(t) => new_func_type([], [t]),
     }
 }
@@ -407,8 +407,8 @@ fn discard_dead_code(op_reader: &mut Peekable<OperatorsIterator<'_>>) -> wasmpar
 fn new_func_type(
     params: impl IntoIterator<Item = ValType>,
     results: impl IntoIterator<Item = ValType>,
-) -> Rc<FuncType> {
-    Rc::new(FuncType {
+) -> Arc<FuncType> {
+    Arc::new(FuncType {
         unique_id: u32::MAX, // Placeholder, not used in BlockTree
         ty: wasmparser::FuncType::new(params, results),
     })
