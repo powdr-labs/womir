@@ -1829,7 +1829,11 @@ impl<'a> MemoryAccessor<'a> {
         Ok(())
     }
 
-    fn write_contiguous(&mut self, byte_addr: u32, data: &[u32]) -> Result<(), MemoryAccessError> {
+    pub fn write_contiguous(
+        &mut self,
+        byte_addr: u32,
+        data: &[u32],
+    ) -> Result<(), MemoryAccessError> {
         if byte_addr % 4 == 0 {
             // Simple aligned writes
             for (i, &value) in data.iter().enumerate() {
@@ -1875,7 +1879,7 @@ impl<'a> MemoryAccessor<'a> {
     ///
     /// The high bytes of the last returned word can be anything if `num_bytes` is
     /// not a multiple of 4.
-    fn read_contiguous_bytes(
+    pub fn read_contiguous_bytes(
         &self,
         byte_addr: u32,
         num_bytes: u32,

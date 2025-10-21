@@ -1,6 +1,6 @@
 use std::{
-    fs::File,
-    io::{BufWriter, Write},
+    fs::{self, File},
+    io::{self, BufWriter, Write},
 };
 
 use itertools::Itertools;
@@ -12,12 +12,14 @@ use womir::{
 
 struct DataInput {
     values: <Vec<u32> as IntoIterator>::IntoIter,
+    serialized: <Vec<Vec<u8>> as IntoIterator>::IntoIter,
 }
 
 impl DataInput {
-    fn new(values: Vec<u32>) -> Self {
+    fn new(values: Vec<u32>, serialized: Vec<Vec<u8>>) -> Self {
         Self {
             values: values.into_iter(),
+            serialized: serialized.into_iter(),
         }
     }
 }
@@ -28,7 +30,7 @@ impl ExternalFunctions for DataInput {
         module: &str,
         function: &str,
         args: &[u32],
-        _mem: &mut Option<MemoryAccessor<'_>>,
+        mem: &mut Option<MemoryAccessor<'_>>,
     ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
@@ -37,6 +39,50 @@ impl ExternalFunctions for DataInput {
             ("env", "abort") => {
                 panic!("Abort called with args: {:?}", args);
             }
+            ("env", "println") => {
+                let addr = args[0];
+                let len = args[1];
+                let mem = mem.as_ref().unwrap();
+                let bytes = mem.read_contiguous_bytes(addr, len).unwrap();
+                let bytes: Vec<u8> = bytes.iter().flat_map(|x| x.to_le_bytes()).collect();
+                let bytes = &bytes[..len as usize];
+
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    println!("{s}");
+                } else {
+                    panic!("<invalid utf8 @ {addr:#x}: {bytes:?}>");
+                }
+                vec![]
+            }
+            ("env", "read_data_len") => {
+                println!("read_data_len args: {args:?}");
+
+                let mut p = self.serialized.clone().peekable();
+                let l = p.peek().unwrap().len();
+
+                println!("read_data_len len: {l}");
+
+                vec![l as u32]
+            }
+            ("env", "read_data") => {
+                println!("args: {args:?}");
+                let addr = args[0];
+                println!("Reading serialized data into memory at address {addr}");
+
+                let mem = mem.as_mut().unwrap();
+                let bytes = self
+                    .serialized
+                    .next()
+                    .expect("Not enough serialized input values");
+                let bytes = bytes
+                    .chunks(4)
+                    .map(|x| u32::from_le_bytes(x.try_into().unwrap()))
+                    .collect_vec();
+
+                mem.write_contiguous(addr, &bytes).unwrap();
+                vec![]
+            }
+
             _ => {
                 panic!(
                     "External function not implemented: module: {module}, function: {function} with args: {:?}",
@@ -70,6 +116,15 @@ fn main() -> wasmparser::Result<()> {
         .filter_map(|s| s.parse::<u32>().ok())
         .collect_vec();
 
+    let serialized_inputs = args
+        .get(5)
+        .unwrap_or(&String::new())
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(fs::read)
+        .collect::<Result<Vec<_>, io::Error>>()
+        .unwrap();
+
     let wasm_file = std::fs::read(wasm_file_path).unwrap();
 
     let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?
@@ -80,7 +135,8 @@ fn main() -> wasmparser::Result<()> {
     }
 
     if let Some(func_name) = func_name {
-        let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
+        let mut interpreter =
+            Interpreter::new(program, DataInput::new(data_inputs, serialized_inputs));
         log::info!("Executing function: {func_name}");
         let outputs = interpreter.run(func_name, &func_inputs);
         log::info!("Outputs: {:?}", outputs);
@@ -118,6 +174,7 @@ mod tests {
         main_function: &str,
         func_inputs: &[u32],
         data_inputs: Vec<u32>,
+        serialized_inputs: Vec<Vec<u8>>,
         outputs: &[u32],
     ) {
         println!(
@@ -128,7 +185,8 @@ mod tests {
             .unwrap()
             .default_process_all_functions()
             .unwrap();
-        let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
+        let mut interpreter =
+            Interpreter::new(program, DataInput::new(data_inputs, serialized_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
         assert_eq!(got_output, outputs);
     }
@@ -138,10 +196,18 @@ mod tests {
         main_function: &str,
         func_inputs: &[u32],
         data_inputs: Vec<u32>,
+        serialized_inputs: Vec<Vec<u8>>,
         outputs: &[u32],
     ) {
         let path = format!("{}/sample-programs/{path}", env!("CARGO_MANIFEST_DIR"));
-        test_interpreter(&path, main_function, func_inputs, data_inputs, outputs);
+        test_interpreter(
+            &path,
+            main_function,
+            func_inputs,
+            data_inputs,
+            serialized_inputs,
+            outputs,
+        );
     }
 
     /// This test requires the directory and the package name to be the same in `case`.
@@ -150,12 +216,20 @@ mod tests {
         main_function: &str,
         func_inputs: &[u32],
         data_inputs: Vec<u32>,
+        serialized_inputs: Vec<Vec<u8>>,
         outputs: &[u32],
     ) {
         let path = format!("{}/sample-programs/{case}", env!("CARGO_MANIFEST_DIR"));
         build_wasm(&PathBuf::from(&path));
         let wasm_path = format!("{path}/target/wasm32-unknown-unknown/release/{case}.wasm",);
-        test_interpreter(&wasm_path, main_function, func_inputs, data_inputs, outputs);
+        test_interpreter(
+            &wasm_path,
+            main_function,
+            func_inputs,
+            data_inputs,
+            serialized_inputs,
+            outputs,
+        );
     }
 
     fn build_wasm(path: &PathBuf) {
@@ -180,12 +254,12 @@ mod tests {
 
     #[test]
     fn test_sqrt() {
-        test_interpreter_rust("sqrt", "main", &[0, 0], vec![9, 3], &[0]);
+        test_interpreter_rust("sqrt", "main", &[0, 0], vec![9, 3], vec![], &[0]);
     }
 
     #[test]
     fn test_vec_grow() {
-        test_interpreter_rust("vec_grow", "vec_grow", &[5], vec![], &[]);
+        test_interpreter_rust("vec_grow", "vec_grow", &[5], vec![], vec![], &[]);
     }
 
     #[test]
@@ -195,26 +269,55 @@ mod tests {
             "vec_median",
             &[],
             vec![5, 11, 15, 75, 6, 5, 1, 4, 7, 3, 2, 9, 2],
+            vec![],
             &[],
         );
     }
 
     #[test]
     fn test_keccak() {
-        test_interpreter_rust("keccak", "main", &[0, 0], vec![], &[0]);
+        test_interpreter_rust("keccak", "main", &[0, 0], vec![], vec![], &[0]);
     }
 
     #[test]
     fn test_keccak_with_inputs() {
-        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![1, 0x29], &[0]);
-        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![2, 0x51], &[0]);
-        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![5, 0xf2], &[0]);
-        test_interpreter_rust("keccak_with_inputs", "main", &[0, 0], vec![10, 0x9b], &[0]);
+        test_interpreter_rust(
+            "keccak_with_inputs",
+            "main",
+            &[0, 0],
+            vec![1, 0x29],
+            vec![],
+            &[0],
+        );
+        test_interpreter_rust(
+            "keccak_with_inputs",
+            "main",
+            &[0, 0],
+            vec![2, 0x51],
+            vec![],
+            &[0],
+        );
+        test_interpreter_rust(
+            "keccak_with_inputs",
+            "main",
+            &[0, 0],
+            vec![5, 0xf2],
+            vec![],
+            &[0],
+        );
+        test_interpreter_rust(
+            "keccak_with_inputs",
+            "main",
+            &[0, 0],
+            vec![10, 0x9b],
+            vec![],
+            &[0],
+        );
     }
 
     #[test]
     fn test_fib() {
-        test_interpreter_from_sample_programs("fib_loop.wasm", "fib", &[10], vec![], &[55]);
+        test_interpreter_from_sample_programs("fib_loop.wasm", "fib", &[10], vec![], vec![], &[55]);
     }
 
     #[test]
@@ -224,20 +327,42 @@ mod tests {
             "add",
             &[666, (-624_i32) as u32],
             vec![],
+            vec![],
             &[42],
         );
     }
 
     #[test]
     fn test_collatz() {
-        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[1 << 22], vec![], &[22]);
-        test_interpreter_from_sample_programs("collatz.wasm", "collatz", &[310], vec![], &[86]);
+        test_interpreter_from_sample_programs(
+            "collatz.wasm",
+            "collatz",
+            &[1 << 22],
+            vec![],
+            vec![],
+            &[22],
+        );
+        test_interpreter_from_sample_programs(
+            "collatz.wasm",
+            "collatz",
+            &[310],
+            vec![],
+            vec![],
+            &[86],
+        );
     }
 
     #[test]
     fn test_merkle_tree() {
         // Judging by the binary, this program comes from Rust, but I don't have its source code.
-        test_interpreter_from_sample_programs("merkle-tree.wasm", "main", &[0, 0], vec![], &[0]);
+        test_interpreter_from_sample_programs(
+            "merkle-tree.wasm",
+            "main",
+            &[0, 0],
+            vec![],
+            vec![],
+            &[0],
+        );
     }
 
     #[test]
