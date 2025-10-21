@@ -60,6 +60,7 @@ pub struct Interpreter<'a, E> {
     // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
+    fn_call_depth: u32,
     future_counter: u32,
     future_assignments: HashMap<u32, u32>,
     vrom: Vec<VRomValue>,
@@ -134,6 +135,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             fp: 0,
             future_counter: 0,
             future_assignments: HashMap::new(),
+            fn_call_depth: 0,
             // We leave 0 unused for convention = successful termination.
             vrom: vec![VRomValue::Unassigned],
             ram: Ram(ram),
@@ -210,6 +212,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.fp = fp;
                     }
                     should_inc_pc = false;
+                    // Must subtract after the check for pc == 0,
+                    // otherwise we would underflow when returning from entry function.
+                    self.fn_call_depth -= 1;
                 }
                 Directive::WASMOp {
                     op,
@@ -1550,6 +1555,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
+                    self.fn_call_depth += 1;
                     let prev_pc = self.pc;
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
@@ -1566,6 +1572,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
+                    self.fn_call_depth += 1;
                     let prev_pc = self.pc;
                     self.pc = self.get_vrom_relative_u32(target_pc..target_pc + 1);
                     should_inc_pc = false;
@@ -1645,7 +1652,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 }
             }
 
-            trace.trace(self);
+            trace.wasm_interp_trace(self);
 
             if should_inc_pc {
                 self.pc += 1;
@@ -1704,7 +1711,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
     fn get_vrom_absolute(&mut self, addr: u32) -> VRomValue {
         let value = self.vrom[addr as usize];
-        
 
         match value {
             VRomValue::Concrete(_) => value,
@@ -1800,6 +1806,7 @@ struct DirectiveTracer<'a> {
     directive: Directive<'a>,
     pc: u32,
     fp: u32,
+    fn_call_depth: u32,
 }
 
 impl<'a> DirectiveTracer<'a> {
@@ -1809,6 +1816,7 @@ impl<'a> DirectiveTracer<'a> {
             directive: interpreter.flat_program[interpreter.pc as usize].clone(),
             pc: interpreter.pc,
             fp: interpreter.fp,
+            fn_call_depth: interpreter.fn_call_depth,
         }
     }
 
@@ -1957,6 +1965,98 @@ impl<'a> DirectiveTracer<'a> {
             )
         } else {
             Default::default()
+        }
+    }
+
+    /// Alternative trace call, compatible with wasm-iterp tracing format
+    fn wasm_interp_trace<E: ExternalFunctions>(self, interpreter: &mut Interpreter<'a, E>) {
+        let depth = self.fn_call_depth;
+        println!(
+            "#{}. {}",
+            depth,
+            self.trace_directive_wasm_interp(interpreter)
+        );
+    }
+
+    fn trace_directive_wasm_interp<E: ExternalFunctions>(
+        mut self,
+        interpreter: &mut Interpreter<'a, E>,
+    ) -> String {
+        // In order for relative accesses to work, we temporarily set the fp before the instruction being executed
+        std::mem::swap(&mut interpreter.fp, &mut self.fp);
+
+        let inputs_regs: Cow<[Range<u32>]> = match &self.directive {
+            Directive::Label { .. }
+            | Directive::Jump { .. }
+            | Directive::Trap { .. }
+            | Directive::AllocateFrameI { .. } => Default::default(),
+            Directive::AllocateFrameV {
+                frame_size: input, ..
+            }
+            | Directive::Copy {
+                src_word: input, ..
+            }
+            | Directive::JumpOffset { offset: input }
+            | Directive::JumpIf {
+                condition: input, ..
+            }
+            | Directive::JumpIfZero {
+                condition: input, ..
+            }
+            | Directive::Call {
+                new_frame_ptr: input,
+                ..
+            }
+            | Directive::JumpAndActivateFrame {
+                new_frame_ptr: input,
+                ..
+            } => vec![*input..*input + 1].into(),
+            Directive::CopyIntoFrame {
+                src_word,
+                dest_frame,
+                ..
+            } => vec![*src_word..*src_word + 1, *dest_frame..*dest_frame + 1].into(),
+            Directive::Return { ret_pc, ret_fp } => {
+                vec![*ret_pc..*ret_pc + 1, *ret_fp..*ret_fp + 1].into()
+            }
+            Directive::CallIndirect {
+                target_pc,
+                new_frame_ptr,
+                ..
+            } => vec![
+                *target_pc..*target_pc + 1,
+                *new_frame_ptr..*new_frame_ptr + 1,
+            ]
+            .into(),
+            Directive::ImportedCall { inputs, .. } => inputs.into(),
+            Directive::WASMOp { inputs, .. } => inputs.into(),
+        };
+
+        // Load all the regs relative to current frame pointer.
+        let inputs = inputs_regs
+            .iter()
+            .map(|r| {
+                r.clone()
+                    .map(|reg| interpreter.get_vrom_relative(reg))
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        // Restore the interpreter's frame pointer
+        interpreter.fp = self.fp;
+
+        use wasmparser::Operator::*;
+        match &self.directive {
+            Directive::WASMOp { op, .. } => match op {
+                I64Const { value } => format!("i64.const {}", *value as u64),
+                I32WrapI64 => format!("i32.wrap_i64 {}", inputs[0][0]),
+                GlobalSet { global_index } => {
+                    format!("global.set ${global_index} {}", inputs[0][0])
+                }
+                GlobalGet { global_index } => format!("global.get ${global_index}"),
+                _ => "???".to_string(),
+            },
+            _ => "???".to_string(),
         }
     }
 }
