@@ -1,6 +1,9 @@
 use core::panic;
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::ops::Range;
+use std::vec;
 
 use itertools::Itertools;
 use wasmparser::Operator as Op;
@@ -25,6 +28,27 @@ impl From<u32> for VRomValue {
     }
 }
 
+impl TryFrom<VRomValue> for u32 {
+    type Error = ();
+
+    fn try_from(value: VRomValue) -> Result<Self, Self::Error> {
+        match value {
+            VRomValue::Concrete(v) => Ok(v),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Display for VRomValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VRomValue::Unassigned => write!(f, "???"),
+            VRomValue::Future(v) => write!(f, "?{v}"),
+            VRomValue::Concrete(v) => write!(f, "{v}"),
+        }
+    }
+}
+
 // How a null reference is represented in the VROM
 pub const NULL_REF: [u32; 3] = [
     u32::MAX, // Function type: this is an invalid function type, so that calling a null reference will trap
@@ -32,10 +56,11 @@ pub const NULL_REF: [u32; 3] = [
     0,        // Address: 0 is an invalid function address because START_ROM_ADDR > 0
 ];
 
-pub struct Interpreter<'a, E: ExternalFunctions> {
+pub struct Interpreter<'a, E> {
     // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
+    fn_call_depth: u32,
     future_counter: u32,
     future_assignments: HashMap<u32, u32>,
     vrom: Vec<VRomValue>,
@@ -110,6 +135,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             fp: 0,
             future_counter: 0,
             future_assignments: HashMap::new(),
+            fn_call_depth: 0,
             // We leave 0 unused for convention = successful termination.
             vrom: vec![VRomValue::Unassigned],
             ram: Ram(ram),
@@ -167,7 +193,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let mut cycles = 0usize;
         let final_fp = loop {
             let instr = self.flat_program[self.pc as usize].clone();
-            log::trace!("PC: {}, FP: {}, Instr: {instr}", self.pc, self.fp);
+            let trace = DirectiveTracer::new(self);
 
             let mut should_inc_pc = true;
 
@@ -186,6 +212,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         self.fp = fp;
                     }
                     should_inc_pc = false;
+                    // Must subtract after the check for pc == 0,
+                    // otherwise we would underflow when returning from entry function.
+                    self.fn_call_depth -= 1;
                 }
                 Directive::WASMOp {
                     op,
@@ -1526,6 +1555,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
+                    self.fn_call_depth += 1;
                     let prev_pc = self.pc;
                     self.pc = self.labels[&target].pc;
                     should_inc_pc = false;
@@ -1542,6 +1572,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
+                    self.fn_call_depth += 1;
                     let prev_pc = self.pc;
                     self.pc = self.get_vrom_relative_u32(target_pc..target_pc + 1);
                     should_inc_pc = false;
@@ -1621,6 +1652,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 }
             }
 
+            trace.wasm_interp_trace(self);
+
             if should_inc_pc {
                 self.pc += 1;
             }
@@ -1678,7 +1711,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
     fn get_vrom_absolute(&mut self, addr: u32) -> VRomValue {
         let value = self.vrom[addr as usize];
-        let value = match value {
+
+        match value {
             VRomValue::Concrete(_) => value,
             VRomValue::Future(future) => {
                 // Resolve the future if it has been assigned.
@@ -1697,10 +1731,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 self.vrom[addr as usize] = value;
                 value
             }
-        };
-
-        log::trace!("Reading VRom address {addr}: {value:?}");
-        value
+        }
     }
 
     fn set_vrom_relative(&mut self, addr: u32, value: VRomValue) {
@@ -1709,7 +1740,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
     fn set_vrom_absolute(&mut self, addr: u32, value: VRomValue) {
         let slot = &mut self.vrom[addr as usize];
-        log::trace!("Setting VRom address {addr}: {value:?}");
         match (*slot, value) {
             (VRomValue::Unassigned, VRomValue::Unassigned) => {
                 // This is important to catch to prevent bugs.
@@ -1772,6 +1802,265 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 }
 
+struct DirectiveTracer<'a> {
+    directive: Directive<'a>,
+    pc: u32,
+    fp: u32,
+    fn_call_depth: u32,
+}
+
+impl<'a> DirectiveTracer<'a> {
+    /// Call this before the execution of the instruction
+    fn new<E>(interpreter: &Interpreter<'a, E>) -> Self {
+        DirectiveTracer {
+            directive: interpreter.flat_program[interpreter.pc as usize].clone(),
+            pc: interpreter.pc,
+            fp: interpreter.fp,
+            fn_call_depth: interpreter.fn_call_depth,
+        }
+    }
+
+    /// Call this after the execution of the instruction
+    fn trace<E: ExternalFunctions>(self, interpreter: &mut Interpreter<'a, E>) {
+        log::trace!("PC: {}, FP: {}, {}", self.pc, self.fp, self.directive);
+        log::trace!("{}", self.trace_directive_regs(interpreter));
+    }
+
+    fn trace_directive_regs<E: ExternalFunctions>(
+        mut self,
+        interpreter: &mut Interpreter<'a, E>,
+    ) -> String {
+        // In order for relative accesses to work, we temporarily set the fp before the instruction being executed
+        std::mem::swap(&mut interpreter.fp, &mut self.fp);
+
+        let (inputs_regs, outputs_regs): (Cow<[Range<u32>]>, Cow<[Range<u32>]>) = match &self
+            .directive
+        {
+            Directive::Label { .. } | Directive::Jump { .. } | Directive::Trap { .. } => {
+                Default::default()
+            }
+            Directive::AllocateFrameI { result_ptr, .. } => {
+                (Cow::default(), vec![*result_ptr..*result_ptr + 1].into())
+            }
+            Directive::AllocateFrameV {
+                frame_size,
+                result_ptr,
+            } => (
+                vec![*frame_size..*frame_size + 1].into(),
+                vec![*result_ptr..*result_ptr + 1].into(),
+            ),
+            Directive::Copy {
+                src_word,
+                dest_word,
+            } => (
+                vec![*src_word..*src_word + 1].into(),
+                vec![*dest_word..*dest_word + 1].into(),
+            ),
+            Directive::CopyIntoFrame {
+                src_word,
+                dest_frame,
+                ..
+            } => (
+                vec![*src_word..*src_word + 1, *dest_frame..*dest_frame + 1].into(),
+                Cow::default(),
+            ),
+            Directive::JumpOffset { offset } => (vec![*offset..*offset + 1].into(), Cow::default()),
+            Directive::JumpIf { condition, .. } | Directive::JumpIfZero { condition, .. } => {
+                (vec![*condition..*condition + 1].into(), Cow::default())
+            }
+            Directive::JumpAndActivateFrame { new_frame_ptr, .. } => (
+                vec![*new_frame_ptr..*new_frame_ptr + 1].into(),
+                Cow::default(),
+            ),
+            Directive::Return { ret_pc, ret_fp } => (
+                vec![*ret_pc..*ret_pc + 1, *ret_fp..*ret_fp + 1].into(),
+                Cow::default(),
+            ),
+            Directive::Call { new_frame_ptr, .. } => (
+                vec![*new_frame_ptr..*new_frame_ptr + 1].into(),
+                Cow::default(),
+            ),
+            Directive::CallIndirect {
+                target_pc,
+                new_frame_ptr,
+                ..
+            } => (
+                vec![
+                    *target_pc..*target_pc + 1,
+                    *new_frame_ptr..*new_frame_ptr + 1,
+                ]
+                .into(),
+                Cow::default(),
+            ),
+            Directive::ImportedCall {
+                inputs, outputs, ..
+            } => (inputs.into(), outputs.into()),
+            Directive::WASMOp { inputs, output, .. } => {
+                (inputs.into(), output.iter().cloned().collect_vec().into())
+            }
+        };
+
+        // Load all the regs relative to current frame pointer.
+        let [inputs, outputs] = [&inputs_regs, &outputs_regs].map(|regs| {
+            regs.iter()
+                .map(|r| {
+                    r.clone()
+                        .map(|reg| interpreter.get_vrom_relative(reg))
+                        .collect_vec()
+                })
+                .collect_vec()
+        });
+
+        // Load the regs relative to a given frame pointer.
+        let indirect_outputs_regs = match &self.directive {
+            Directive::CopyIntoFrame { dest_word, .. } => vec![*dest_word],
+            Directive::JumpAndActivateFrame {
+                saved_caller_fp, ..
+            } => saved_caller_fp.iter().cloned().collect(),
+            Directive::Call {
+                saved_ret_pc,
+                saved_caller_fp,
+                ..
+            }
+            | Directive::CallIndirect {
+                saved_ret_pc,
+                saved_caller_fp,
+                ..
+            } => vec![*saved_ret_pc, *saved_caller_fp],
+            _ => Vec::new(),
+        };
+
+        let reference_reg =
+            (!indirect_outputs_regs.is_empty()).then(|| inputs_regs.last().unwrap().start);
+        let reference = reference_reg.map(|addr| interpreter.get_vrom_relative_u32(addr..addr + 1));
+        let indirect_outputs = indirect_outputs_regs
+            .iter()
+            .map(|reg| interpreter.get_vrom_absolute(reference.unwrap() + reg))
+            .collect_vec();
+
+        // Restore the interpreter's frame pointer
+        interpreter.fp = self.fp;
+
+        if !inputs.is_empty() || !outputs.is_empty() {
+            format!(
+                "{{{}{}}}",
+                [
+                    inputs_regs.iter().zip(inputs),
+                    outputs_regs.iter().zip(outputs)
+                ]
+                .map(|reg_set| reg_set
+                    .map(|(reg, val)| if reg.len() == 1 {
+                        format!("${} = {}", reg.start, val[0])
+                    } else {
+                        format!("${}..{} = [{}]", reg.start, reg.end, val.iter().format(","))
+                    })
+                    .format(", "))
+                .into_iter()
+                .format("} → {"),
+                indirect_outputs_regs
+                    .into_iter()
+                    .zip(indirect_outputs)
+                    .map(|(reg, val)| { format!("*({}+{}) = {}", reference.unwrap(), reg, val) })
+                    .format(", ")
+            )
+        } else {
+            Default::default()
+        }
+    }
+
+    /// Alternative trace call, compatible with wasm-iterp tracing format
+    fn wasm_interp_trace<E: ExternalFunctions>(self, interpreter: &mut Interpreter<'a, E>) {
+        let depth = self.fn_call_depth;
+        println!(
+            "#{}. {}",
+            depth,
+            self.trace_directive_wasm_interp(interpreter)
+        );
+    }
+
+    fn trace_directive_wasm_interp<E: ExternalFunctions>(
+        mut self,
+        interpreter: &mut Interpreter<'a, E>,
+    ) -> String {
+        // In order for relative accesses to work, we temporarily set the fp before the instruction being executed
+        std::mem::swap(&mut interpreter.fp, &mut self.fp);
+
+        let inputs_regs: Cow<[Range<u32>]> = match &self.directive {
+            Directive::Label { .. }
+            | Directive::Jump { .. }
+            | Directive::Trap { .. }
+            | Directive::AllocateFrameI { .. } => Default::default(),
+            Directive::AllocateFrameV {
+                frame_size: input, ..
+            }
+            | Directive::Copy {
+                src_word: input, ..
+            }
+            | Directive::JumpOffset { offset: input }
+            | Directive::JumpIf {
+                condition: input, ..
+            }
+            | Directive::JumpIfZero {
+                condition: input, ..
+            }
+            | Directive::Call {
+                new_frame_ptr: input,
+                ..
+            }
+            | Directive::JumpAndActivateFrame {
+                new_frame_ptr: input,
+                ..
+            } => vec![*input..*input + 1].into(),
+            Directive::CopyIntoFrame {
+                src_word,
+                dest_frame,
+                ..
+            } => vec![*src_word..*src_word + 1, *dest_frame..*dest_frame + 1].into(),
+            Directive::Return { ret_pc, ret_fp } => {
+                vec![*ret_pc..*ret_pc + 1, *ret_fp..*ret_fp + 1].into()
+            }
+            Directive::CallIndirect {
+                target_pc,
+                new_frame_ptr,
+                ..
+            } => vec![
+                *target_pc..*target_pc + 1,
+                *new_frame_ptr..*new_frame_ptr + 1,
+            ]
+            .into(),
+            Directive::ImportedCall { inputs, .. } => inputs.into(),
+            Directive::WASMOp { inputs, .. } => inputs.into(),
+        };
+
+        // Load all the regs relative to current frame pointer.
+        let inputs = inputs_regs
+            .iter()
+            .map(|r| {
+                r.clone()
+                    .map(|reg| interpreter.get_vrom_relative(reg))
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        // Restore the interpreter's frame pointer
+        interpreter.fp = self.fp;
+
+        use wasmparser::Operator::*;
+        match &self.directive {
+            Directive::WASMOp { op, .. } => match op {
+                I64Const { value } => format!("i64.const {}", *value as u64),
+                I32WrapI64 => format!("i32.wrap_i64 {}", inputs[0][0]),
+                GlobalSet { global_index } => {
+                    format!("global.set ${global_index} {}", inputs[0][0])
+                }
+                GlobalGet { global_index } => format!("global.get ${global_index}"),
+                _ => "???".to_string(),
+            },
+            _ => "???".to_string(),
+        }
+    }
+}
+
 pub struct MemoryAccessor<'a> {
     segment: Segment,
     ram: &'a mut Ram,
@@ -1814,7 +2103,6 @@ impl<'a> MemoryAccessor<'a> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         let value = self.ram.get(ram_addr);
-        log::trace!("Reading Memory word at {ram_addr}: {value}");
         Ok(value)
     }
 
@@ -1825,7 +2113,6 @@ impl<'a> MemoryAccessor<'a> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         self.ram.set(ram_addr, value);
-        log::trace!("Writing Memory word at {ram_addr}: {value}");
         Ok(())
     }
 
