@@ -1704,7 +1704,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
     fn get_vrom_absolute(&mut self, addr: u32) -> VRomValue {
         let value = self.vrom[addr as usize];
-        let value = match value {
+        
+
+        match value {
             VRomValue::Concrete(_) => value,
             VRomValue::Future(future) => {
                 // Resolve the future if it has been assigned.
@@ -1723,9 +1725,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 self.vrom[addr as usize] = value;
                 value
             }
-        };
-
-        value
+        }
     }
 
     fn set_vrom_relative(&mut self, addr: u32, value: VRomValue) {
@@ -1918,7 +1918,7 @@ impl<'a> DirectiveTracer<'a> {
                 saved_ret_pc,
                 saved_caller_fp,
                 ..
-            } => vec![*saved_ret_pc, *saved_caller_fp].into(),
+            } => vec![*saved_ret_pc, *saved_caller_fp],
             _ => Vec::new(),
         };
 
@@ -1937,8 +1937,8 @@ impl<'a> DirectiveTracer<'a> {
             format!(
                 "{{{}{}}}",
                 [
-                    inputs_regs.into_iter().zip(inputs),
-                    outputs_regs.into_iter().zip(outputs)
+                    inputs_regs.iter().zip(inputs),
+                    outputs_regs.iter().zip(outputs)
                 ]
                 .map(|reg_set| reg_set
                     .map(|(reg, val)| if reg.len() == 1 {
