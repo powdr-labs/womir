@@ -6,7 +6,7 @@ use std::{
 use itertools::Itertools;
 use womir::{
     generic_ir::GenericIrSetting,
-    interpreter::{ExternalFunctions, Interpreter},
+    interpreter::{ExternalFunctions, Interpreter, MemoryAccessor},
     loader::Program,
 };
 
@@ -23,7 +23,13 @@ impl DataInput {
 }
 
 impl ExternalFunctions for DataInput {
-    fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
+    fn call(
+        &mut self,
+        module: &str,
+        function: &str,
+        args: &[u32],
+        _mem: &mut Option<MemoryAccessor<'_>>,
+    ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
                 vec![self.values.next().expect("Not enough input values")]
@@ -33,7 +39,7 @@ impl ExternalFunctions for DataInput {
             }
             _ => {
                 panic!(
-                    "External function not implemented: {module}.{function} with args: {:?}",
+                    "External function not implemented: module: {module}, function: {function} with args: {:?}",
                     args
                 );
             }
@@ -66,7 +72,8 @@ fn main() -> wasmparser::Result<()> {
 
     let wasm_file = std::fs::read(wasm_file_path).unwrap();
 
-    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?;
+    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?
+        .default_par_process_all_functions()?;
 
     if let Err(err) = dump_ir(&program) {
         log::error!("Failed to dump IR: {err}");
@@ -117,7 +124,10 @@ mod tests {
             "Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}"
         );
         let wasm_file = std::fs::read(path).unwrap();
-        let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
+        let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+            .unwrap()
+            .default_process_all_functions()
+            .unwrap();
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
         assert_eq!(got_output, outputs);
@@ -205,6 +215,17 @@ mod tests {
     #[test]
     fn test_fib() {
         test_interpreter_from_sample_programs("fib_loop.wasm", "fib", &[10], vec![], &[55]);
+    }
+
+    #[test]
+    fn test_add() {
+        test_interpreter_from_sample_programs(
+            "add.wasm",
+            "add",
+            &[666, (-624_i32) as u32],
+            vec![],
+            &[42],
+        );
     }
 
     #[test]
@@ -320,6 +341,11 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_memory_fill() {
+        test_wasm("wasm_testsuite/memory_fill.wast", None);
+    }
+
+    #[test]
     fn test_wasm_ref_is_null() {
         test_wasm("wasm_testsuite/ref_is_null.wast", None);
     }
@@ -367,7 +393,13 @@ mod tests {
     struct SpectestExternalFunctions;
 
     impl ExternalFunctions for SpectestExternalFunctions {
-        fn call(&mut self, module: &str, function: &str, args: &[u32]) -> Vec<u32> {
+        fn call(
+            &mut self,
+            module: &str,
+            function: &str,
+            args: &[u32],
+            _mem: &mut Option<MemoryAccessor<'_>>,
+        ) -> Vec<u32> {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
             (func (export "print_i32") (param i32))
@@ -412,7 +444,10 @@ mod tests {
                 for (mod_name, line, asserts) in modules {
                     println!("Testing module: {} at line {line}", mod_name.display());
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file).unwrap();
+                    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+                        .unwrap()
+                        .default_par_process_all_functions()
+                        .unwrap();
                     let mut interpreter = Interpreter::new(program, SpectestExternalFunctions);
 
                     asserts

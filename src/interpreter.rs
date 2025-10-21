@@ -63,7 +63,7 @@ pub struct Interpreter<'a, E> {
     future_counter: u32,
     future_assignments: HashMap<u32, u32>,
     vrom: Vec<VRomValue>,
-    ram: HashMap<u32, u32>,
+    ram: Ram,
     program: Program<'a, S>,
     external_functions: E,
     flat_program: Vec<Directive<'a>>,
@@ -71,7 +71,29 @@ pub struct Interpreter<'a, E> {
 }
 
 pub trait ExternalFunctions {
-    fn call(&mut self, module: &str, func: &str, args: &[u32]) -> Vec<u32>;
+    fn call(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[u32],
+        mem: &mut Option<MemoryAccessor<'_>>,
+    ) -> Vec<u32>;
+}
+
+struct Ram(HashMap<u32, u32>);
+
+impl Ram {
+    fn get(&self, byte_addr: u32) -> u32 {
+        *self.0.get(&byte_addr).unwrap_or(&0)
+    }
+
+    fn set(&mut self, byte_addr: u32, value: u32) {
+        if value == 0 {
+            self.0.remove(&byte_addr);
+        } else {
+            self.0.insert(byte_addr, value);
+        }
+    }
 }
 
 impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
@@ -80,7 +102,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let (flat_program, labels) = linker::link(&program.functions, START_ROM_ADDR);
 
         let ram = program
-            .c
+            .m
             .initial_memory
             .iter()
             .filter_map(|(addr, value)| {
@@ -114,14 +136,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             future_assignments: HashMap::new(),
             // We leave 0 unused for convention = successful termination.
             vrom: vec![VRomValue::Unassigned],
-            ram,
+            ram: Ram(ram),
             program,
             external_functions,
             flat_program,
             labels,
         };
 
-        if let Some(start_function) = interpreter.program.c.start_function {
+        if let Some(start_function) = interpreter.program.m.start_function {
             let label = func_idx_to_label(start_function);
             interpreter.run(&label, &[]);
         }
@@ -129,8 +151,8 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         interpreter
     }
 
-    fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b, 'a, E> {
-        MemoryAccessor::new(self.program.c.memory.unwrap(), self)
+    fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b> {
+        MemoryAccessor::new(self.program.m.memory.unwrap(), &mut self.ram)
     }
 
     pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
@@ -138,7 +160,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
         let func_type = &self
             .program
-            .c
+            .m
             .get_func_type(func_label.func_idx.unwrap())
             .ty;
         let n_inputs: u32 = word_count_types::<S>(func_type.params());
@@ -1056,7 +1078,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     }
                     Op::GlobalGet { global_index } => {
                         let Global::Mutable(global_info) =
-                            self.program.c.globals[global_index as usize]
+                            self.program.m.globals[global_index as usize]
                         else {
                             panic!("immutable GlobalGet should have been resolved at compile time");
                         };
@@ -1066,13 +1088,13 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(size, output.len() as u32);
 
                         let value = (0..size)
-                            .map(|i| self.get_ram(global_info.address + 4 * i))
+                            .map(|i| self.ram.get(global_info.address + 4 * i))
                             .collect_vec();
                         self.set_vrom_relative_range(output, &value);
                     }
                     Op::GlobalSet { global_index } => {
                         let Global::Mutable(global_info) =
-                            self.program.c.globals[global_index as usize]
+                            self.program.m.globals[global_index as usize]
                         else {
                             panic!("GlobalSet expects a mutable global");
                         };
@@ -1088,7 +1110,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let value = self.get_vrom_relative_range(origin).collect_vec();
                         for (i, value) in value.into_iter().enumerate() {
-                            self.set_ram(global_info.address + 4 * i as u32, value);
+                            self.ram.set(global_info.address + 4 * i as u32, value);
                         }
                     }
                     Op::I32Store8 { memarg }
@@ -1165,9 +1187,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         assert_eq!(memarg.memory, 0);
                         let memory = self.get_mem();
-                        let value = memory
-                            .read_contiguous_bytes(addr, word_len * 4)
-                            .expect("Out of bounds read");
+                        let value = memory.read_contiguous_bytes(addr, word_len * 4);
+
+                        if value.is_err() {
+                            panic!(
+                                "Out of bounds read addr {addr} len {}, input: {:?}, offset: {}",
+                                word_len * 4,
+                                inputs[0],
+                                memarg.offset
+                            );
+                        }
+                        let value = value.unwrap();
 
                         self.set_vrom_relative_range(output_reg, &value);
                     }
@@ -1283,6 +1313,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let value = [signed as u32, (signed >> 32) as u32];
                         self.set_vrom_relative_range(output_reg, &value);
                     }
+                    Op::MemorySize { mem } => {
+                        assert_eq!(mem, 0, "Only memory 0 is supported in this interpreter");
+                        let memory = self.get_mem();
+                        let num_pages = memory.get_size() / WASM_PAGE_SIZE;
+                        self.set_vrom_relative_u32(output.unwrap(), num_pages);
+                    }
                     Op::MemoryGrow { mem } => {
                         let extra_pages = self.get_vrom_relative_u32(inputs[0].clone());
 
@@ -1300,6 +1336,59 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         };
 
                         self.set_vrom_relative_u32(output.unwrap(), result);
+                    }
+                    Op::MemoryFill { mem } => {
+                        assert_eq!(mem, 0);
+
+                        let dst = self.get_vrom_relative_u32(inputs[0].clone());
+                        let value = self.get_vrom_relative_u32(inputs[1].clone()) as u8;
+                        let mut byte_size = self.get_vrom_relative_u32(inputs[2].clone());
+
+                        let mut memory = self.get_mem();
+
+                        // write the first misaligned bytes
+                        let misalignment = dst & 3;
+                        let mut dst_word = dst & !3;
+                        if misalignment != 0 {
+                            let mut word = memory
+                                .get_word(dst_word)
+                                .expect("Out of bounds read")
+                                .to_le_bytes();
+                            for i in misalignment..4 {
+                                if byte_size == 0 {
+                                    break;
+                                }
+                                word[i as usize] = value;
+                                byte_size -= 1;
+                            }
+                            memory
+                                .set_word(dst_word, u32::from_le_bytes(word))
+                                .expect("Out of bounds write");
+                            dst_word += 4;
+                        }
+
+                        // write the middle aligned words
+                        let num_full_words = byte_size / 4;
+                        let full_word = u32::from_le_bytes([value; 4]);
+                        memory
+                            .write_contiguous(dst_word, &vec![full_word; num_full_words as usize])
+                            .expect("Out of bounds write");
+                        byte_size -= num_full_words * 4;
+                        dst_word += num_full_words * 4;
+
+                        // write the last misaligned bytes
+                        if byte_size > 0 {
+                            let mut word = memory
+                                .get_word(dst_word)
+                                .expect("Out of bounds read")
+                                .to_le_bytes();
+                            for i in 0..byte_size {
+                                word[i as usize] = value;
+                            }
+                            memory
+                                .set_word(dst_word, u32::from_le_bytes(word))
+                                .expect("Out of bounds write");
+                        }
                     }
                     Op::MemoryCopy { dst_mem, src_mem } => {
                         assert_eq!(dst_mem, 0);
@@ -1363,7 +1452,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(inputs[0].len(), 1);
                         let index = self.get_vrom_relative_u32(inputs[0].clone());
 
-                        let table = TableAccessor::new(self.program.c.tables[table as usize], self);
+                        let table = TableAccessor::new(
+                            self.program.m.tables[table as usize],
+                            &mut self.ram,
+                        );
                         let entry = table
                             .get_entry(index)
                             .expect("TableGet: index out of bounds");
@@ -1379,14 +1471,16 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             .collect_array()
                             .unwrap();
 
-                        let mut table =
-                            TableAccessor::new(self.program.c.tables[table as usize], self);
+                        let mut table = TableAccessor::new(
+                            self.program.m.tables[table as usize],
+                            &mut self.ram,
+                        );
                         table
                             .set_entry(index, value)
                             .expect("TableSet: index out of bounds");
                     }
                     Op::RefFunc { function_index } => {
-                        let func_type = self.program.c.get_func_type(function_index).unique_id;
+                        let func_type = self.program.m.get_func_type(function_index).unique_id;
                         let frame_size = self.program.functions[function_index as usize].frame_size;
                         let addr = self.labels[&func_idx_to_label(function_index)].pc;
 
@@ -1493,7 +1587,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         .flatten()
                         .map(|addr| self.get_vrom_relative_u32(addr..addr + 1))
                         .collect_vec();
-                    let result = self.external_functions.call(module, function, &args);
+                    let mut accessor = if let Some(mem) = self.program.m.memory {
+                        Some(MemoryAccessor::new(mem, &mut self.ram))
+                    } else {
+                        None
+                    };
+                    let result =
+                        self.external_functions
+                            .call(module, function, &args, &mut accessor);
                     for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
                     {
                         self.set_vrom_relative_u32(output..output + 1, value);
@@ -1557,18 +1658,6 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             log::info!("Program terminated successfully with cycles: {cycles}.");
         } else {
             log::info!("Program terminated with cycles: {cycles}, final frame pointer: {final_fp}");
-        }
-    }
-
-    fn get_ram(&self, byte_addr: u32) -> u32 {
-        *self.ram.get(&byte_addr).unwrap_or(&0)
-    }
-
-    fn set_ram(&mut self, byte_addr: u32, value: u32) {
-        if value == 0 {
-            self.ram.remove(&byte_addr);
-        } else {
-            self.ram.insert(byte_addr, value);
         }
     }
 
@@ -1872,28 +1961,34 @@ impl<'a> DirectiveTracer<'a> {
     }
 }
 
-struct MemoryAccessor<'a, 'b, E: ExternalFunctions> {
+pub struct MemoryAccessor<'a> {
     segment: Segment,
-    interpreter: &'a mut Interpreter<'b, E>,
+    ram: &'a mut Ram,
     byte_size: u32,
 }
 
-impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
-    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
-        let byte_size = interpreter.get_ram(segment.start) * WASM_PAGE_SIZE;
+#[derive(Debug)]
+pub enum MemoryAccessError {
+    // accessed address and current memory size
+    OutOfBounds(u32, u32),
+}
+
+impl<'a> MemoryAccessor<'a> {
+    fn new(segment: Segment, ram: &'a mut Ram) -> Self {
+        let byte_size = ram.get(segment.start) * WASM_PAGE_SIZE;
         MemoryAccessor {
             segment,
-            interpreter,
+            ram,
             byte_size,
         }
     }
 
     fn get_max_num_pages(&self) -> u32 {
-        self.interpreter.get_ram(self.segment.start + 4)
+        self.ram.get(self.segment.start + 4)
     }
 
     fn set_num_pages(&mut self, num_pages: u32) {
-        self.interpreter.set_ram(self.segment.start, num_pages);
+        self.ram.set(self.segment.start, num_pages);
         self.byte_size = num_pages * WASM_PAGE_SIZE;
     }
 
@@ -1901,27 +1996,27 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
         self.byte_size
     }
 
-    fn get_word(&self, byte_addr: u32) -> Result<u32, ()> {
+    pub fn get_word(&self, byte_addr: u32) -> Result<u32, MemoryAccessError> {
         assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
         if byte_addr >= self.get_size() {
-            return Err(());
+            return Err(MemoryAccessError::OutOfBounds(byte_addr, self.get_size()));
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
-        let value = self.interpreter.get_ram(ram_addr);
+        let value = self.ram.get(ram_addr);
         Ok(value)
     }
 
-    fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), ()> {
+    pub fn set_word(&mut self, byte_addr: u32, value: u32) -> Result<(), MemoryAccessError> {
         assert_eq!(byte_addr % 4, 0, "Address must be word-aligned");
         if byte_addr >= self.get_size() {
-            return Err(());
+            return Err(MemoryAccessError::OutOfBounds(byte_addr, self.get_size()));
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
-        self.interpreter.set_ram(ram_addr, value);
+        self.ram.set(ram_addr, value);
         Ok(())
     }
 
-    fn write_contiguous(&mut self, byte_addr: u32, data: &[u32]) -> Result<(), ()> {
+    fn write_contiguous(&mut self, byte_addr: u32, data: &[u32]) -> Result<(), MemoryAccessError> {
         if byte_addr % 4 == 0 {
             // Simple aligned writes
             for (i, &value) in data.iter().enumerate() {
@@ -1967,8 +2062,12 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     ///
     /// The high bytes of the last returned word can be anything if `num_bytes` is
     /// not a multiple of 4.
-    fn read_contiguous_bytes(&self, byte_addr: u32, num_bytes: u32) -> Result<Vec<u32>, ()> {
-        let num_words = (num_bytes + 3) / 4;
+    fn read_contiguous_bytes(
+        &self,
+        byte_addr: u32,
+        num_bytes: u32,
+    ) -> Result<Vec<u32>, MemoryAccessError> {
+        let num_words = num_bytes.div_ceil(4);
         let mut data = Vec::with_capacity(num_words as usize);
         let offset_bytes = byte_addr % 4;
         if offset_bytes == 0 {
@@ -2018,20 +2117,16 @@ impl<'a, 'b, E: ExternalFunctions> MemoryAccessor<'a, 'b, E> {
     }
 }
 
-struct TableAccessor<'a, 'b, E: ExternalFunctions> {
+struct TableAccessor<'a> {
     segment: Segment,
-    interpreter: &'a mut Interpreter<'b, E>,
+    ram: &'a mut Ram,
     size: u32,
 }
 
-impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
-    fn new(segment: Segment, interpreter: &'a mut Interpreter<'b, E>) -> Self {
-        let size = interpreter.get_ram(segment.start);
-        TableAccessor {
-            segment,
-            interpreter,
-            size,
-        }
+impl<'a> TableAccessor<'a> {
+    fn new(segment: Segment, ram: &'a mut Ram) -> Self {
+        let size = ram.get(segment.start);
+        TableAccessor { segment, ram, size }
     }
 
     /// Returns the size of the table in number of elements.
@@ -2040,7 +2135,7 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
     }
 
     fn _get_max_size(&self) -> u32 {
-        self.interpreter.get_ram(self.segment.start + 4)
+        self.ram.get(self.segment.start + 4)
     }
 
     fn get_entry(&self, index: u32) -> Result<[u32; 3], ()> {
@@ -2048,9 +2143,9 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
             return Err(());
         }
         let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
-        let type_idx = self.interpreter.get_ram(base_addr);
-        let frame_size = self.interpreter.get_ram(base_addr + 4);
-        let pc = self.interpreter.get_ram(base_addr + 8);
+        let type_idx = self.ram.get(base_addr);
+        let frame_size = self.ram.get(base_addr + 4);
+        let pc = self.ram.get(base_addr + 8);
         Ok([type_idx, frame_size, pc])
     }
 
@@ -2059,9 +2154,9 @@ impl<'a, 'b, E: ExternalFunctions> TableAccessor<'a, 'b, E> {
             return Err(());
         }
         let base_addr = self.segment.start + 8 + index * 12; // Each entry is 3 u32s (12 bytes)
-        self.interpreter.set_ram(base_addr, value[0]);
-        self.interpreter.set_ram(base_addr + 4, value[1]);
-        self.interpreter.set_ram(base_addr + 8, value[2]);
+        self.ram.set(base_addr, value[0]);
+        self.ram.set(base_addr + 4, value[1]);
+        self.ram.set(base_addr + 8, value[2]);
         Ok(())
     }
 }

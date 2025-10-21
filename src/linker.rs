@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::loader::flattening::WriteOnceASM;
+use crate::loader::flattening::WriteOnceAsm;
 
 pub struct Label<'a> {
     pub id: &'a str,
@@ -9,7 +9,7 @@ pub struct Label<'a> {
 
 pub trait Directive: Clone {
     fn nop() -> Self;
-    fn as_label(&self) -> Option<Label>;
+    fn as_label(&self) -> Option<Label<'_>>;
 }
 
 #[derive(Debug)]
@@ -20,7 +20,7 @@ pub struct LabelValue {
 }
 
 pub fn link<D: Directive>(
-    program: &[WriteOnceASM<D>],
+    program: &[WriteOnceAsm<D>],
     init_pc: u32,
 ) -> (Vec<D>, HashMap<String, LabelValue>) {
     let mut pc: u32 = init_pc;

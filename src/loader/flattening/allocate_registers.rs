@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap, btree_map},
-    marker::PhantomData,
     ops::Range,
 };
 
@@ -9,7 +8,7 @@ use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::loader::{
-    blockless_dag::{BlocklessDag, BreakTarget, Operation, TargetType},
+    blockless_dag::{BlocklessDag, BreakTarget, NodeInput, Operation, TargetType},
     dag::ValueOrigin,
     flattening::Settings,
 };
@@ -65,7 +64,7 @@ impl AssignmentSet {
         }
 
         if let Some(w2r) = w2r {
-            // Both are writer and registers are free, so we can assign the register to the writer.
+            // Both the writer and registers are free, so we can assign the register to the writer.
             for r in reg_range.clone() {
                 self.reg_to_writers.entry(r).or_default().push(*w2r.key());
             }
@@ -144,7 +143,10 @@ impl AssignmentSet {
     }
 }
 
-pub struct NotAllocatedError;
+pub enum Error {
+    NotAllocated,
+    NotARegister,
+}
 
 /// One possible register allocation for a given DAG.
 pub struct Allocation {
@@ -157,11 +159,21 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    pub fn get(&self, origin: &ValueOrigin) -> Result<Range<u32>, NotAllocatedError> {
+    pub fn get(&self, origin: &ValueOrigin) -> Result<Range<u32>, Error> {
         self.nodes_outputs
             .get(origin)
             .cloned()
-            .ok_or(NotAllocatedError)
+            .ok_or(Error::NotAllocated)
+    }
+
+    pub fn get_as_reg(&self, input: &NodeInput) -> Result<Range<u32>, Error> {
+        match input {
+            NodeInput::Reference(origin) => self.get(origin),
+            NodeInput::Constant(_) => {
+                // Constants don't need register allocation
+                Err(Error::NotARegister)
+            }
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&ValueOrigin, &Range<u32>)> {
@@ -188,6 +200,7 @@ impl Allocation {
 pub fn optimistic_allocation<'a, S: Settings<'a>>(
     dag: &BlocklessDag<'_>,
     reg_gen: &mut RegisterGenerator<'a, S>,
+    top_level_return_regs: Option<&[Range<u32>]>,
 ) -> (Allocation, usize) {
     let mut number_of_saved_copies = 0;
 
@@ -242,20 +255,46 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
     let handle_break = |active_path: &mut PerPathData<'a, S>,
                         target: &BreakTarget,
                         labels: &mut HashMap<u32, LabelAllocation<'a, S>>,
-                        inputs: Option<&[ValueOrigin]>,
+                        inputs: Option<&[NodeInput]>,
                         current_node_idx: usize| {
-        // First, we merge the path from the target label
-        let Some(target_label) =
+        // First, we try to merge the path from the target label
+        let regs = if let Some(target_label) =
             merge_path_from_target(active_path, target, labels, current_node_idx)
-        else {
+        {
+            // We are breaking to a local label, who has registers in the active frame.
+            &target_label.regs
+        } else if let Some(regs) = top_level_return_regs {
+            // We are breaking out of the function from the top level frame, so
+            // the return arguments are on the active frame, and we can still optmize.
+            regs
+        } else {
+            // The break inputs must be copied into another frame, so we can't
+            // try optimistic allocation.
             return;
         };
 
         // Now we must optimistically assign the expected registers to all
         // the inputs of the break, or at least leave the registers reserved in case of
         // conflicts.
-        for (input_idx, reg) in target_label.regs.iter().enumerate() {
-            let origin = inputs.map(|inputs| inputs[input_idx]);
+        for (input_idx, reg) in regs.iter().enumerate() {
+            let origin = inputs.and_then(|inputs| {
+                match &inputs[input_idx] {
+                    NodeInput::Reference(origin) => {
+                        if origin.node == 0 && target.kind == TargetType::FunctionOrLoop {
+                            // The target is the function output and the origin is the function
+                            // input, due to calling convention they must necessarily be different
+                            // registers, so we can't do optimistic allocation.
+                            None
+                        } else {
+                            Some(*origin)
+                        }
+                    }
+                    NodeInput::Constant(_) => {
+                        // Constants don't need register allocation
+                        None
+                    }
+                }
+            });
 
             active_path
                 .assignments
@@ -318,7 +357,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
                     let inputs = target
                         .input_permutation
                         .iter()
-                        .map(|input_idx| node.inputs[*input_idx as usize])
+                        .map(|input_idx| node.inputs[*input_idx as usize].clone())
                         .collect_vec();
                     handle_break(
                         &mut active_path,
@@ -342,6 +381,8 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
                                 kind: *kind,
                             },
                             &mut labels,
+                            // The inputs to this break comes from the loop's frame,
+                            // so it can't be optimistically assigned.
                             None,
                             node_idx,
                         );
@@ -414,12 +455,12 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
 }
 
 /// A permutation of a given allocation, so that the input registers are the given ones, and all the others
-/// begin at a given address.
+/// begin at a given address and are shifted back to fill the holes left by the moved inputs.
 ///
 /// Assumes the original allocation is tightly packed starting at 0.
-struct InputPermutation(Vec<(u32, i64)>);
+struct RepackPermutation(Vec<(u32, i64)>);
 
-impl InputPermutation {
+impl RepackPermutation {
     fn new(
         required_inputs: Vec<Range<u32>>,
         current_inputs: impl Iterator<Item = Range<u32>>,
@@ -472,16 +513,15 @@ impl InputPermutation {
     }
 }
 
-/// Permutes the allocation so that the input registers are the given ones,
-/// and all the others begin at a given address.
-pub fn permute_allocation<'a, S: Settings<'a>>(
+/// Reorders the allocation so that the input registers are the given ones,
+/// and all the others begin at a given address, and are tightly repacked to
+/// fill the holes left by the moved inputs.
+pub fn reorder_allocation(
     allocation: &mut Allocation,
     inputs: Vec<Range<u32>>,
     first_non_reserved_addr: u32,
-) -> RegisterGenerator<'a, S> {
-    let mut last_used_addr = first_non_reserved_addr;
-
-    let map = InputPermutation::new(
+) {
+    let map = RepackPermutation::new(
         inputs,
         allocation
             .nodes_outputs
@@ -494,9 +534,6 @@ pub fn permute_allocation<'a, S: Settings<'a>>(
     // Permute the nodes outputs
     for reg in allocation.nodes_outputs.values_mut() {
         map.permute_range(reg);
-        if reg.end > last_used_addr {
-            last_used_addr = reg.end;
-        }
     }
 
     // Now we need to permute the labels
@@ -506,11 +543,6 @@ pub fn permute_allocation<'a, S: Settings<'a>>(
             // There is no need to update last_used_addr, because
             // all the labels are also represented as nodes.
         }
-    }
-
-    RegisterGenerator {
-        next_available: last_used_addr,
-        settings: PhantomData,
     }
 }
 
@@ -525,7 +557,7 @@ mod tests {
         let current_inputs = vec![5..15, 25..35].into_iter();
         let first_non_reserved = 50;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         // Check offsets are correctly computed
         assert_eq!(map.permute(0), 50);
@@ -551,7 +583,7 @@ mod tests {
         let current_inputs = vec![0..10].into_iter();
         let first_non_reserved = 20;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 10);
         assert_eq!(map.permute(9), 19);
@@ -565,7 +597,7 @@ mod tests {
         let current_inputs = vec![].into_iter();
         let first_non_reserved = 100;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 100);
         assert_eq!(map.permute(10), 110);
@@ -577,7 +609,7 @@ mod tests {
         let current_inputs = vec![].into_iter();
         let first_non_reserved = 0;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 0);
         assert_eq!(map.permute(10), 10);
@@ -589,7 +621,7 @@ mod tests {
         let current_inputs = vec![10..20, 30..40, 50..60].into_iter();
         let first_non_reserved = 100;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         assert_eq!(map.permute(0), 100);
         assert_eq!(map.permute(9), 109);
@@ -609,7 +641,7 @@ mod tests {
         let current_inputs = vec![25..35, 5..15].into_iter();
         let first_non_reserved = 50;
 
-        let map = InputPermutation::new(required_inputs, current_inputs, first_non_reserved);
+        let map = RepackPermutation::new(required_inputs, current_inputs, first_non_reserved);
 
         // "Fixed" addresses
         // 25 -> 10

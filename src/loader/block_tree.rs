@@ -1,10 +1,10 @@
-use std::{collections::BTreeSet, iter::Peekable, rc::Rc};
+use std::{collections::BTreeSet, iter::Peekable, sync::Arc};
 
 use wasmparser::{BlockType, Operator, OperatorsIterator, OperatorsReader, ValType};
 
 use crate::loader::{FuncType, Global};
 
-use super::{Block, BlockKind, CommonProgram, Element, Instruction};
+use super::{Block, BlockKind, Element, Instruction, Module};
 
 /// BlockTree is a simplified representation of a WASM function.
 ///
@@ -54,7 +54,7 @@ pub struct BlockTree<'a> {
 
 impl<'a> BlockTree<'a> {
     pub fn load_function(
-        ctx: &CommonProgram<'a>,
+        ctx: &Module<'a>,
         op_reader: OperatorsReader<'a>,
     ) -> wasmparser::Result<Self> {
         let mut op_reader = op_reader.into_iter().peekable();
@@ -79,7 +79,7 @@ enum Ending {
 }
 
 fn parse_contents<'a>(
-    ctx: &CommonProgram<'a>,
+    ctx: &Module<'a>,
     op_reader: &mut Peekable<OperatorsIterator<'a>>,
     stack_level: u32,
     output_elements: &mut Vec<Element<'a>>,
@@ -359,10 +359,10 @@ fn increment_outer_br_references(element: &mut Element, minimum_depth: u32) {
     }
 }
 
-fn get_type(ctx: &CommonProgram, blockty: BlockType) -> Rc<FuncType> {
+fn get_type(ctx: &Module, blockty: BlockType) -> Arc<FuncType> {
     match blockty {
         BlockType::Empty => new_func_type([], []),
-        BlockType::FuncType(idx) => ctx.get_type_rc(idx),
+        BlockType::FuncType(idx) => ctx.get_type_arc(idx),
         BlockType::Type(t) => new_func_type([], [t]),
     }
 }
@@ -407,8 +407,8 @@ fn discard_dead_code(op_reader: &mut Peekable<OperatorsIterator<'_>>) -> wasmpar
 fn new_func_type(
     params: impl IntoIterator<Item = ValType>,
     results: impl IntoIterator<Item = ValType>,
-) -> Rc<FuncType> {
-    Rc::new(FuncType {
+) -> Arc<FuncType> {
+    Arc::new(FuncType {
         unique_id: u32::MAX, // Placeholder, not used in BlockTree
         ty: wasmparser::FuncType::new(params, results),
     })
