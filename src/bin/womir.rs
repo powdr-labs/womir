@@ -38,7 +38,7 @@ impl ExternalFunctions for DataInput {
                 panic!("Abort called with args: {:?}", args);
             }
             ("gojs", fname) => {
-                println!("Calling syscall {fname} with args: {:?}", args);
+                log::trace!("Calling syscall {fname} with args: {:?}", args);
                 if "runtime.getRandomData" == fname {
                     let mem = mem.as_mut().unwrap();
                     let sp = args[0];
@@ -50,7 +50,7 @@ impl ExternalFunctions for DataInput {
                     let len_hi = mem.get_word(sp + 20).unwrap();
                     let len: u64 = len_lo as u64 | ((len_hi as u64) << 32);
 
-                    println!("Writing random data of len {len} to {dst}");
+                    log::trace!("Writing random data of len {len} to {dst}");
 
                     assert_eq!(len % 4, 0);
 
