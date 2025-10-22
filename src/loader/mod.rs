@@ -150,9 +150,6 @@ impl InitialMemory {
             mask |= 0xFF << bit_offset;
         }
 
-        word <<= start_byte * 8;
-        mask <<= start_byte * 8;
-
         match self.0.entry(address) {
             Entry::Vacant(entry) => {
                 if word != 0 {
@@ -1387,9 +1384,13 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                                 panic!("Offset is not a u32 value");
                             };
 
+                            if offset == 3150065 {
+                                log::info!("Breakpoint for data segment at 3150065");
+                            }
+
                             let MemoryEntry::Value(mem_size) = initial_memory.get(memory.start)
                             else {
-                                panic!("Memory size is a label");
+                                panic!("Memory size is not a concrete value");
                             };
                             let mem_size = mem_size * WASM_PAGE_SIZE;
                             assert!(offset + data_segment.data.len() as u32 <= mem_size);

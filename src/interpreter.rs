@@ -107,6 +107,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             .initial_memory
             .iter()
             .filter_map(|(addr, value)| {
+                /*if *addr == 3150064 + program.m.memory.unwrap().start + 8 {
+                    panic!("aaaa: {value:?}");
+                }*/
                 let value = match value {
                     MemoryEntry::Value(v) => *v,
                     MemoryEntry::FuncAddr(idx) => {
@@ -1203,6 +1206,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             );
                         }
                         let value = value.unwrap();
+                        /*if addr == 3150064 {
+                            panic!("aaaa: {value:?}");
+                        }*/
 
                         self.set_vrom_relative_range(output_reg, &value);
                     }
@@ -1652,7 +1658,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 }
             }
 
-            trace.wasm_interp_trace(self);
+            //trace.wasm_interp_trace(self);
 
             if should_inc_pc {
                 self.pc += 1;
@@ -2047,16 +2053,78 @@ impl<'a> DirectiveTracer<'a> {
 
         use wasmparser::Operator::*;
         match &self.directive {
+            Directive::Call { target, .. } => {
+                let target = interpreter.labels[target].func_idx.unwrap();
+                format!("call ${target}")
+            }
+            Directive::Jump { .. } => "br @???".to_string(),
+            Directive::JumpIfZero { .. } => format!("br_unless @???, {}", inputs[0][0]),
+            Directive::JumpIf { .. } => format!("br_if @???, {}", inputs[0][0]),
+            Directive::Return { .. } => "return".to_string(),
             Directive::WASMOp { op, .. } => match op {
+                I32Const { value } => format!("i32.const {}", *value as u32),
                 I64Const { value } => format!("i64.const {}", *value as u64),
-                I32WrapI64 => format!("i32.wrap_i64 {}", inputs[0][0]),
+                I64ExtendI32U => format!("i64.extend_i32_u {}", inputs[0][0]),
+                I32WrapI64 => format!("i32.wrap_i64 {}", AsU64(&inputs[0])),
+                I32Store { memarg } => format!(
+                    "i32.store $0:{}+${}, {}",
+                    &inputs[0][0], memarg.offset, &inputs[1][0]
+                ),
+                I64Store { memarg } => format!(
+                    "i64.store $0:{}+${}, {}",
+                    &inputs[0][0],
+                    memarg.offset,
+                    AsU64(&inputs[1])
+                ),
+                I64Store32 { memarg } => format!(
+                    "i64.store32 $0:{}+${}, {}",
+                    &inputs[0][0],
+                    memarg.offset,
+                    AsU64(&inputs[1])
+                ),
+                I32Load { memarg } => format!("i32.load $0:{}+${}", &inputs[0][0], memarg.offset),
+                I64Load { memarg } => {
+                    format!("i64.load $0:{}+${}", &inputs[0][0], memarg.offset)
+                }
+                I64Load32U { memarg } => {
+                    format!("i64.load32_u $0:{}+${}", &inputs[0][0], memarg.offset)
+                }
+                I64Load32S { memarg } => {
+                    format!("i64.load32_s $0:{}+${}", &inputs[0][0], memarg.offset)
+                }
+                I32Sub => format!("i32.sub {}, {}", inputs[0][0], inputs[1][0]),
+                I64Sub => format!("i64.sub {}, {}", AsU64(&inputs[0]), AsU64(&inputs[1])),
+                I32Add => format!("i32.add {}, {}", inputs[0][0], inputs[1][0]),
+                I64Add => format!("i64.add {}, {}", AsU64(&inputs[0]), AsU64(&inputs[1])),
+                I32LeU => format!("i32.le_u {}, {}", inputs[0][0], inputs[1][0]),
+                I64LeU => format!("i64.le_u {}, {}", AsU64(&inputs[0]), AsU64(&inputs[1])),
+                I32LeS => format!("i32.le_s {}, {}", inputs[0][0], inputs[1][0]),
+                I64LeS => format!("i64.le_s {}, {}", AsU64(&inputs[0]), AsU64(&inputs[1])),
+                I32Shl => format!("i32.shl {}, {}", inputs[0][0], inputs[1][0]),
+                I64Shl => format!("i64.shl {}, {}", AsU64(&inputs[0]), inputs[1][0]),
+                I32Eqz => format!("i32.eqz {}", inputs[0][0]),
+                I64Eqz => format!("i64.eqz {}", AsU64(&inputs[0])),
                 GlobalSet { global_index } => {
-                    format!("global.set ${global_index} {}", inputs[0][0])
+                    format!("global.set ${global_index}, {}", inputs[0][0])
                 }
                 GlobalGet { global_index } => format!("global.get ${global_index}"),
                 _ => "???".to_string(),
             },
             _ => "???".to_string(),
+        }
+    }
+}
+
+struct AsU64<'a>(&'a [VRomValue]);
+
+impl Display for AsU64<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        assert_eq!(self.0.len(), 2, "Expected two VRomValues to form u64");
+        match self.0 {
+            [VRomValue::Concrete(low), VRomValue::Concrete(high)] => {
+                write!(f, "{}", *low as u64 + ((*high as u64) << 32))
+            }
+            _ => write!(f, "???"),
         }
     }
 }

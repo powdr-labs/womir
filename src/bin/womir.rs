@@ -266,6 +266,12 @@ mod tests {
     }
 
     #[test]
+    fn test_keeper_js() {
+        // This is program is a stripped down version of geth, compiled for Go's js target.
+        test_interpreter_from_sample_programs("keeper_js.wasm", "run", &[0, 0], vec![], &[0]);
+    }
+
+    #[test]
     fn test_wasm_address() {
         test_wasm("wasm_testsuite/address.wast", None);
     }
