@@ -144,14 +144,11 @@ impl InitialMemory {
     fn insert_bytes(&mut self, address: u32, start_byte: u32, value: &[u8]) {
         let mut word = 0;
         let mut mask = 0;
-        for (i, byte) in value.iter().take(4).enumerate() {
-            let bit_offset = (start_byte + i as u32) * 8;
+        for (byte_offset, byte) in (start_byte..).zip(value.iter()).take(4) {
+            let bit_offset = byte_offset * 8;
             word |= (*byte as u32) << bit_offset;
             mask |= 0xFF << bit_offset;
         }
-
-        word <<= start_byte * 8;
-        mask <<= start_byte * 8;
 
         match self.0.entry(address) {
             Entry::Vacant(entry) => {
