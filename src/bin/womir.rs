@@ -43,6 +43,7 @@ impl ExternalFunctions for DataInput {
                     let mem = mem.as_mut().unwrap();
                     let sp = args[0];
 
+                    // Interpret the arguments from the stack:
                     let dst_lo = mem.get_word(sp + 8).unwrap();
                     let dst_hi = mem.get_word(sp + 12).unwrap();
                     let dst: u64 = (dst_lo as u64) | ((dst_hi as u64) << 32);
@@ -54,11 +55,15 @@ impl ExternalFunctions for DataInput {
 
                     assert_eq!(len % 4, 0);
 
-                    let v = vec![4; len as usize];
-                    v.chunks(4).enumerate().for_each(|(i, chunk)| {
-                        let val = u32::from_le_bytes(chunk.try_into().unwrap());
-                        mem.set_word((dst + (i as u64) * 4) as u32, val).unwrap();
-                    });
+                    // The meaning of a random number in ZK is not well defined.
+                    // Either it is a prover provided value, or it is derived from
+                    // the input. Regardless, it is not the same thing we expect
+                    // in normal computing. So, for lack of a better alternative,
+                    // we just write a constant pattern here.
+                    const RAND_VAL: u32 = 0;
+                    for i in 0..(len / 4) {
+                        mem.set_word((dst + i * 4) as u32, RAND_VAL).unwrap();
+                    }
                 }
                 vec![]
             }
