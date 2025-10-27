@@ -285,7 +285,7 @@ pub struct Module<'a> {
 
     /// The module and name of the imported functions.
     ///
-    /// Function idices overlaps with `functions` up to `imported_functions` length.
+    /// Function indices overlaps with `functions` up to `imported_functions` length.
     pub imported_functions: Vec<(&'a str, &'a str)>,
     /// The start function, if any.
     pub start_function: Option<u32>,
@@ -556,7 +556,7 @@ pub struct PartiallyParsedProgram<'a, S: Settings<'a>> {
 
     /// The functions defined in the module.
     ///
-    /// Function idices overlaps with `imported_functions` up to its length.
+    /// Function indices overlaps with `imported_functions` up to its length.
     ///
     /// Indices `[0..imported_functions.len()]` refers to generated wrappers around the imported
     /// functions, which can be used for indirect calls, and indices [imported_functions.len()..]
