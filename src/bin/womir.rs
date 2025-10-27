@@ -28,7 +28,7 @@ impl ExternalFunctions for DataInput {
         module: &str,
         function: &str,
         args: &[u32],
-        _mem: &mut Option<MemoryAccessor<'_>>,
+        mem: &mut Option<MemoryAccessor<'_>>,
     ) -> Vec<u32> {
         match (module, function) {
             ("env", "read_u32") => {
@@ -36,6 +36,36 @@ impl ExternalFunctions for DataInput {
             }
             ("env", "abort") => {
                 panic!("Abort called with args: {:?}", args);
+            }
+            ("gojs", fname) => {
+                log::trace!("Calling syscall {fname} with args: {:?}", args);
+                if "runtime.getRandomData" == fname {
+                    let mem = mem.as_mut().unwrap();
+                    let sp = args[0];
+
+                    // Interpret the arguments from the stack:
+                    let dst_lo = mem.get_word(sp + 8).unwrap();
+                    let dst_hi = mem.get_word(sp + 12).unwrap();
+                    let dst: u64 = (dst_lo as u64) | ((dst_hi as u64) << 32);
+                    let len_lo = mem.get_word(sp + 16).unwrap();
+                    let len_hi = mem.get_word(sp + 20).unwrap();
+                    let len: u64 = len_lo as u64 | ((len_hi as u64) << 32);
+
+                    log::trace!("Writing random data of len {len} to {dst}");
+
+                    assert_eq!(len % 4, 0);
+
+                    // The meaning of a random number in ZK is not well defined.
+                    // Either it is a prover provided value, or it is derived from
+                    // the input. Regardless, it is not the same thing we expect
+                    // in normal computing. So, for lack of a better alternative,
+                    // we just write a constant pattern here.
+                    const RAND_VAL: u32 = 0;
+                    for i in 0..(len / 4) {
+                        mem.set_word((dst + i * 4) as u32, RAND_VAL).unwrap();
+                    }
+                }
+                vec![]
             }
             _ => {
                 panic!(
@@ -238,6 +268,15 @@ mod tests {
     fn test_merkle_tree() {
         // Judging by the binary, this program comes from Rust, but I don't have its source code.
         test_interpreter_from_sample_programs("merkle-tree.wasm", "main", &[0, 0], vec![], &[0]);
+    }
+
+    #[test]
+    fn test_keeper_js() {
+        // This is program is a stripped down version of geth, compiled for Go's js target.
+        // Source: https://github.com/ethereum/go-ethereum/tree/master/cmd/keeper
+        // Compile command:
+        //   GOOS=js GOARCH=wasm go -gcflags=all=-d=softfloat build -tags "example" -o keeper.wasm
+        test_interpreter_from_sample_programs("keeper_js.wasm", "run", &[0, 0], vec![], &[]);
     }
 
     #[test]
