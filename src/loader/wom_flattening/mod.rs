@@ -34,11 +34,11 @@ use crate::loader::{
     FunctionRef, LabelGenerator, Module,
     blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
-    flattening::allocate_registers::Error,
     settings::{
         ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
         WasmOpInput,
     },
+    wom_flattening::allocate_registers::Error,
 };
 
 use super::blockless_dag::{BlocklessDag, NodeInput, Operation};

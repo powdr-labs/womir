@@ -2,7 +2,7 @@ use wasmparser::Operator as Op;
 
 use crate::loader::{
     dag::WasmValue,
-    flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree},
+    wom_flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree},
 };
 use std::{
     cell::Cell,

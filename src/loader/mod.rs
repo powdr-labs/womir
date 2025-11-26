@@ -2,10 +2,10 @@ pub mod block_tree;
 pub mod blockless_dag;
 pub mod dag;
 pub mod dumb_jump_removal;
-pub mod flattening;
 pub mod liveness_dag;
 pub mod locals_data_flow;
 pub mod settings;
+pub mod wom_flattening;
 
 use core::panic;
 use std::{
@@ -19,13 +19,13 @@ use std::{
 
 use block_tree::BlockTree;
 use dag::Dag;
-use flattening::WriteOnceAsm;
 use itertools::Itertools;
 use wasmparser::{
     CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, LocalsReader,
     MemoryType, Operator, Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator,
     WasmFeatures,
 };
+use wom_flattening::WriteOnceAsm;
 
 use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget},
@@ -34,7 +34,7 @@ use crate::loader::{
     settings::Settings,
 };
 
-pub use flattening::{func_idx_to_label, word_count_type};
+pub use wom_flattening::{func_idx_to_label, word_count_type};
 
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
@@ -507,7 +507,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
             FunctionProcessingStage::BlocklessDag(blockless_dag) => {
                 // Flatten the blockless DAG into assembly-like representation.
                 let (flat_asm, copies_saved) =
-                    flattening::flatten_dag(settings, ctx, label_gen, blockless_dag, func_idx);
+                    wom_flattening::flatten_dag(settings, ctx, label_gen, blockless_dag, func_idx);
                 if let Some(stats) = stats {
                     stats.register_copies_saved += copies_saved;
                 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::loader::flattening::WriteOnceAsm;
+use crate::loader::wom_flattening::WriteOnceAsm;
 
 pub struct Label<'a> {
     pub id: &'a str,
