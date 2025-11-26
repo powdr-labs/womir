@@ -308,7 +308,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
         match &node.operation {
             Operation::Label { id } => {
                 let regs = node
-                    .output_types
+                    .outputs
                     .iter()
                     .map(|ty| active_path.reg_gen.allocate_type(*ty))
                     .collect_vec();
@@ -392,7 +392,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
             _ => {
                 // On most nodes, we simply assign the registers to outputs that still
                 // don't have them, making it final.
-                for (output_idx, output_type) in node.output_types.iter().enumerate() {
+                for (output_idx, output_type) in node.outputs.iter().enumerate() {
                     let origin = ValueOrigin {
                         node: node_idx,
                         output_idx: output_idx as u32,

@@ -31,7 +31,7 @@ pub enum TargetType {
 }
 
 #[derive(Debug)]
-pub enum Operation<'a> {
+pub enum Operation<'a, T> {
     Inputs,
     WASMOp(Op<'a>),
 
@@ -42,7 +42,7 @@ pub enum Operation<'a> {
     },
 
     Loop {
-        sub_dag: BlocklessDag<'a>,
+        sub_dag: GenericBlocklessDag<'a, T>,
         /// The possible break targets for this loop, relative to the parent frame.
         /// (i.e. depth 0 is the frame before entering the loop, 1 is the frame above it, etc).
         ///
@@ -69,16 +69,20 @@ pub struct BrTableTarget {
 }
 
 #[derive(Debug)]
-pub struct Node<'a> {
-    pub operation: Operation<'a>,
+pub struct GenericNode<'a, T> {
+    pub operation: Operation<'a, T>,
     pub inputs: Vec<NodeInput>,
-    pub output_types: Vec<ValType>,
+    pub outputs: Vec<T>,
 }
 
+pub type Node<'a> = GenericNode<'a, ValType>;
+
 #[derive(Debug)]
-pub struct BlocklessDag<'a> {
-    pub nodes: Vec<Node<'a>>,
+pub struct GenericBlocklessDag<'a, T> {
+    pub nodes: Vec<GenericNode<'a, T>>,
 }
+
+pub type BlocklessDag<'a> = GenericBlocklessDag<'a, ValType>;
 
 impl<'a> BlocklessDag<'a> {
     pub fn new(dag: Dag<'a>, label_generator: &AtomicU32) -> Self {
@@ -296,7 +300,7 @@ fn process_nodes<'a>(
         new_nodes.push(Node {
             operation,
             inputs,
-            output_types: node.output_types,
+            outputs: node.output_types,
         });
     }
 }

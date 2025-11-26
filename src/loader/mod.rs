@@ -3,6 +3,7 @@ pub mod blockless_dag;
 pub mod dag;
 pub mod dumb_jump_removal;
 pub mod flattening;
+pub mod liveness_dag;
 pub mod locals_data_flow;
 pub mod settings;
 
@@ -1479,7 +1480,7 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
             blockless_dag::Node {
                 operation: blockless_dag::Operation::Inputs,
                 inputs: Vec::new(),
-                output_types: func_type.params().to_vec(),
+                outputs: func_type.params().to_vec(),
             },
             blockless_dag::Node {
                 operation: blockless_dag::Operation::WASMOp(Operator::Call {
@@ -1493,7 +1494,7 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                         })
                     })
                     .collect(),
-                output_types: func_type.results().to_vec(),
+                outputs: func_type.results().to_vec(),
             },
             blockless_dag::Node {
                 operation: blockless_dag::Operation::Br(BreakTarget {
@@ -1508,7 +1509,7 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                         })
                     })
                     .collect(),
-                output_types: Vec::new(),
+                outputs: Vec::new(),
             },
         ],
     }
