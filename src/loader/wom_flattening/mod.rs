@@ -428,7 +428,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             number_of_saved_copies += saved_copies;
 
             // Sanity check: loops have no outputs:
-            assert!(node.outputs.is_empty());
+            assert!(node.output_types.is_empty());
 
             // This struct contains everything we need to fill in order to jump into the loop.
             let loop_entry = LoopStackEntry {
@@ -700,7 +700,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 // the implementation can access the input and output registers directly,
                 // so we just have to emit the call directive.
                 let inputs = map_input_into_regs(node.inputs, curr_entry)?;
-                let outputs = (0..node.outputs.len())
+                let outputs = (0..node.output_types.len())
                     .map(|output_idx| {
                         curr_entry
                             .allocation
@@ -729,7 +729,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     ctx,
                     inputs,
                     node_idx,
-                    node.outputs.len(),
+                    node.output_types.len(),
                     curr_entry,
                     func_frame_ptr.clone(),
                 )?;
@@ -781,7 +781,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 ctx,
                 inputs,
                 node_idx,
-                node.outputs.len(),
+                node.output_types.len(),
                 curr_entry,
                 func_frame_ptr.clone(),
             )?;
@@ -842,7 +842,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
                     })
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            let output = match node.outputs.len() {
+            let output = match node.output_types.len() {
                 0 => None,
                 1 => Some(curr_entry.allocation.get(&ValueOrigin {
                     node: node_idx,

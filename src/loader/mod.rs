@@ -1481,7 +1481,7 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
             blockless_dag::Node {
                 operation: blockless_dag::Operation::Inputs,
                 inputs: Vec::new(),
-                outputs: func_type.params().to_vec(),
+                output_types: func_type.params().to_vec(),
             },
             blockless_dag::Node {
                 operation: blockless_dag::Operation::WASMOp(Operator::Call {
@@ -1495,7 +1495,7 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                         })
                     })
                     .collect(),
-                outputs: func_type.results().to_vec(),
+                output_types: func_type.results().to_vec(),
             },
             blockless_dag::Node {
                 operation: blockless_dag::Operation::Br(BreakTarget {
@@ -1510,9 +1510,10 @@ fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
                         })
                     })
                     .collect(),
-                outputs: Vec::new(),
+                output_types: Vec::new(),
             },
         ],
+        block_data: (),
     }
 }
 
