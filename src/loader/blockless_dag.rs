@@ -72,17 +72,18 @@ pub struct BrTableTarget {
 pub struct GenericNode<'a, T> {
     pub operation: Operation<'a, T>,
     pub inputs: Vec<NodeInput>,
-    pub outputs: Vec<T>,
+    pub output_types: Vec<ValType>,
 }
 
-pub type Node<'a> = GenericNode<'a, ValType>;
+pub type Node<'a> = GenericNode<'a, ()>;
 
 #[derive(Debug)]
 pub struct GenericBlocklessDag<'a, T> {
     pub nodes: Vec<GenericNode<'a, T>>,
+    pub block_data: T,
 }
 
-pub type BlocklessDag<'a> = GenericBlocklessDag<'a, ValType>;
+pub type BlocklessDag<'a> = GenericBlocklessDag<'a, ()>;
 
 impl<'a> BlocklessDag<'a> {
     pub fn new(dag: Dag<'a>, label_generator: &AtomicU32) -> Self {
@@ -102,7 +103,10 @@ impl<'a> BlocklessDag<'a> {
             None,
         );
 
-        BlocklessDag { nodes: new_nodes }
+        BlocklessDag {
+            nodes: new_nodes,
+            block_data: (),
+        }
     }
 }
 
@@ -235,7 +239,10 @@ fn process_nodes<'a>(
                         .collect_vec();
 
                     Operation::Loop {
-                        sub_dag: BlocklessDag { nodes: loop_nodes },
+                        sub_dag: BlocklessDag {
+                            nodes: loop_nodes,
+                            block_data: (),
+                        },
                         break_targets: loop_break_targets,
                     }
                 }
@@ -300,7 +307,7 @@ fn process_nodes<'a>(
         new_nodes.push(Node {
             operation,
             inputs,
-            outputs: node.output_types,
+            output_types: node.output_types,
         });
     }
 }
