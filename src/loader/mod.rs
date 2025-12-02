@@ -4,6 +4,7 @@ pub mod dag;
 pub mod dumb_jump_removal;
 pub mod liveness_dag;
 pub mod locals_data_flow;
+pub mod rw_flattening;
 pub mod settings;
 pub mod wom_flattening;
 
