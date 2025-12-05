@@ -1,4 +1,4 @@
-This is my proposed calling convention for "stacked read-write infinite registers" execution model.
+This is a calling convention proposal for "stacked read-write infinite registers" execution model.
 
 The frame of a function is contained inside the caller's frame (which is infinite), being the caller
 responsibe for choosing where the new function frame starts.
@@ -10,7 +10,7 @@ frame data, which might hold the frame for other functions called by this new fu
 When a function returns, the "interface" section will contain the values returned by the function,
 from where the caller can read them.
 
-So, if a function has 3 words inputs and 1 word outputs, we get:
+So, if a function has 3 words inputs and 1 word output, we get:
 
  | FP offset | Role                          |
  |-----------|-------------------------------|
@@ -32,7 +32,7 @@ Similarly, if there are 2 word inputs and 3 word outputs, we get:
  | 4         | caller's frame pointer        |
  | 5...      | function local frame data     |
 
-The way a caller performs the call is this:
+The way a function call happens is this:
 - the caller chooses an FP offset where the callee frame will start at the end of its own frame, i.e. after the last offset that must not be
   overwritten by the callee execution, because the callee's frame might grow indefinitelly;
 - based on the type of the function call, the caller copies the inputs, starting at the offset it chose in the previous step;
@@ -43,7 +43,7 @@ The way a caller performs the call is this:
 - the RET instruction restores the caller's FP and jumps to the return address stored in the callee frame.
 - the caller can then read the output words from same offset where it wrote the input words.
 
-I considered two other alternatives, which has tradeoffs, for which I am not sure which is better:
+Two alternatives were considered, which have tradeoffs, but it is not clear if they are better overall:
 
 1) In the scheme proposed, the input and output slots are overlapping, so a function must necessarily overwrite some of the inputs with the outputs.
    The alternative would be to use separated slots for inputs and outputs, which might save a few register copies at expense of more frame memory
