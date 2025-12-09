@@ -30,6 +30,7 @@ use wasmparser::{
 use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget},
     dag::{NodeInput, ValueOrigin},
+    liveness_dag::LivenessDag,
     locals_data_flow::LiftedBlockTree,
     settings::Settings,
 };
@@ -401,6 +402,7 @@ impl<'a> Module<'a> {
 
 #[derive(Debug)]
 pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
+    // Common stages
     Unparsed(FunctionBody<'a>),
     BlockTree {
         locals_types: Vec<ValType>,
@@ -415,8 +417,11 @@ pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
     ConstDedupDag(Dag<'a>),
     DanglingOptDag(Dag<'a>),
     BlocklessDag(BlocklessDag<'a>),
+    // Write-once memory stages
     PlainFlatAsm(WriteOnceAsm<S::Directive>),
     DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
+    // Read-write memory stages
+    LivenessDag(LivenessDag<'a>),
 }
 
 pub trait LabelGenerator {
@@ -432,6 +437,8 @@ impl LabelGenerator for AtomicU32 {
 impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
     pub fn advance_stage(
         self,
+        // TODO: place the pipeline choice inside the settings
+        use_rw: bool,
         settings: &S,
         ctx: &Module<'a>,
         func_idx: u32,
@@ -505,13 +512,20 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 FunctionProcessingStage::BlocklessDag(blockless_dag)
             }
             FunctionProcessingStage::BlocklessDag(blockless_dag) => {
-                // Flatten the blockless DAG into assembly-like representation.
-                let (flat_asm, copies_saved) =
-                    flattening::flatten_dag(settings, ctx, label_gen, blockless_dag, func_idx);
-                if let Some(stats) = stats {
-                    stats.register_copies_saved += copies_saved;
+                if use_rw {
+                    // Convert the blockless DAG to a liveness DAG representation.
+                    println!("Generating liveness DAG for function {}", func_idx);
+                    let liveness_dag = LivenessDag::new(blockless_dag);
+                    FunctionProcessingStage::LivenessDag(liveness_dag)
+                } else {
+                    // Flatten the blockless DAG into assembly-like representation.
+                    let (flat_asm, copies_saved) =
+                        flattening::flatten_dag(settings, ctx, label_gen, blockless_dag, func_idx);
+                    if let Some(stats) = stats {
+                        stats.register_copies_saved += copies_saved;
+                    }
+                    FunctionProcessingStage::PlainFlatAsm(flat_asm)
                 }
-                FunctionProcessingStage::PlainFlatAsm(flat_asm)
             }
             FunctionProcessingStage::PlainFlatAsm(mut flat_asm) => {
                 // Optimization pass: remove useless jumps.
@@ -525,11 +539,22 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 // Processing is complete. Just return itself.
                 FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
             }
+            FunctionProcessingStage::LivenessDag(generic_blockless_dag) => {
+                // TODO: further process the RW pipeline
+                // For now, returning a fake empty flat asm.
+                let flat_asm = WriteOnceAsm {
+                    func_idx,
+                    frame_size: 0,
+                    directives: Vec::new(),
+                };
+                FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
+            }
         })
     }
 
     pub fn advance_all_stages(
         mut self,
+        use_rw: bool,
         settings: &S,
         ctx: &Module<'a>,
         func_idx: u32,
@@ -540,7 +565,14 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
             if let FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm) = self {
                 return Ok(flat_asm);
             }
-            self = self.advance_stage(settings, ctx, func_idx, label_gen, stats.as_deref_mut())?;
+            self = self.advance_stage(
+                use_rw,
+                settings,
+                ctx,
+                func_idx,
+                label_gen,
+                stats.as_deref_mut(),
+            )?;
         }
     }
 }
@@ -640,7 +672,7 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
     /// Processes all the functions sequentially, returning a fully processed program.
     ///
     /// Prefer to use `default_par_process_all_functions()` if your Settings is `Send + Sync`.
-    pub fn default_process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
+    pub fn default_process_all_functions(self, use_rw: bool) -> wasmparser::Result<Program<'a, S>> {
         let label_gen = AtomicU32::new(0);
         let mut stats = Statistics::default();
         let functions = self
@@ -648,7 +680,14 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
             .into_iter()
             .enumerate()
             .map(|(i, func)| {
-                func.advance_all_stages(&self.s, &self.m, i as u32, &label_gen, Some(&mut stats))
+                func.advance_all_stages(
+                    use_rw,
+                    &self.s,
+                    &self.m,
+                    i as u32,
+                    &label_gen,
+                    Some(&mut stats),
+                )
             })
             .collect::<wasmparser::Result<Vec<_>>>()?;
 
@@ -733,11 +772,14 @@ where
     }
 
     /// Processes all the functions in parallel, returning a fully processed program.
-    pub fn default_par_process_all_functions(self) -> wasmparser::Result<Program<'a, S>> {
+    pub fn default_par_process_all_functions(
+        self,
+        use_rw: bool,
+    ) -> wasmparser::Result<Program<'a, S>> {
         let mut stats = Statistics::default();
         let funcs = self.parallel_process_all_functions(
             |func_idx, func, settings, ctx, label_gen, stats| {
-                func.advance_all_stages(settings, ctx, func_idx, label_gen, stats)
+                func.advance_all_stages(use_rw, settings, ctx, func_idx, label_gen, stats)
                     .unwrap()
             },
             Some(&mut stats),

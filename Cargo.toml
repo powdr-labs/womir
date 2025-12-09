@@ -16,6 +16,7 @@ wasmparser = { version = "0.235", default-features = false, features = [
     'features',
     'simd',
 ] }
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }

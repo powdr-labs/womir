@@ -77,13 +77,16 @@ fn process_block<'a>(
             && control_stack.len() > break_target.depth as usize
         {
             for (input_idx, input) in inputs.enumerate() {
+                // There is no point in checking further if this input is already
+                // marked as not redirected.
+                if !control_stack[break_target.depth as usize].is_input_redirected[input_idx] {
+                    continue;
+                }
+
                 if let NodeInput::Reference(ValueOrigin {
                     node: 0,
                     output_idx,
                 }) = input
-                    // There is no point in checking further if this input is already
-                    // marked as not redirected.
-                    && control_stack[break_target.depth as usize].is_input_redirected[input_idx]
                 {
                     let mut output_idx = Some(*output_idx);
                     let mut depth = 0;
@@ -105,7 +108,14 @@ fn process_block<'a>(
                     if output_idx != Some(input_idx as u32) {
                         control_stack[break_target.depth as usize].is_input_redirected[input_idx] =
                             false;
+                    } else {
+                        // It is still redirected.
+                        println!("Mapped depth {}", depth);
                     }
+                } else {
+                    // Some arbitrary value is being used, so it is not a redirected input.
+                    control_stack[break_target.depth as usize].is_input_redirected[input_idx] =
+                        false;
                 }
             }
         }
@@ -188,8 +198,15 @@ fn process_block<'a>(
         // Update input redirection tracking based on breaks to the loop
         if !control_stack.is_empty() {
             match &operation {
-                Br(break_target) | BrIf(break_target) | BrIfZero(break_target) => {
+                Br(break_target) => {
                     handle_iteration_inputs(control_stack, break_target, inputs.iter());
+                }
+                BrIf(break_target) | BrIfZero(break_target) => {
+                    handle_iteration_inputs(
+                        control_stack,
+                        break_target,
+                        inputs[0..inputs.len() - 1].iter(),
+                    );
                 }
                 BrTable { targets } => {
                     for target in targets {
@@ -216,11 +233,18 @@ fn process_block<'a>(
 
     let mut redirected_inputs = Vec::new();
     if let Some(entry) = control_stack.pop_front() {
+        let num_inputs = entry.is_input_redirected.len();
         for (input_idx, is_redirected) in entry.is_input_redirected.into_iter().enumerate() {
             if is_redirected {
                 redirected_inputs.push(input_idx as u32);
             }
         }
+        println!(
+            "Depth {} redirected inputs: {}/{}",
+            control_stack.len() + 1,
+            redirected_inputs.len(),
+            num_inputs
+        );
     }
 
     LivenessDag {
