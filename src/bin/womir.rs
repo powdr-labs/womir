@@ -3,7 +3,7 @@ use std::{
     io::{BufWriter, Write},
 };
 
-use itertools::Itertools;
+use clap::{Parser, Subcommand};
 use womir::{
     generic_ir::GenericIrSetting,
     interpreter::{ExternalFunctions, Interpreter, MemoryAccessor},
@@ -80,43 +80,83 @@ impl ExternalFunctions for DataInput {
 fn main() -> wasmparser::Result<()> {
     env_logger::init();
 
-    // TODO: do proper command line argument parsing
-    let args: Vec<String> = std::env::args().collect();
-
-    let wasm_file_path = &args[1];
-
-    let func_name = args.get(2);
-    let func_inputs = args
-        .get(3)
-        .unwrap_or(&String::new())
-        .split(',')
-        .filter_map(|s| s.parse::<u32>().ok())
-        .collect_vec();
-
-    let data_inputs = args
-        .get(4)
-        .unwrap_or(&String::new())
-        .split(',')
-        .filter_map(|s| s.parse::<u32>().ok())
-        .collect_vec();
-
-    let wasm_file = std::fs::read(wasm_file_path).unwrap();
-
-    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)?
-        .default_par_process_all_functions()?;
-
-    if let Err(err) = dump_ir(&program) {
-        log::error!("Failed to dump IR: {err}");
+    /// Simple CLI for the `womir` binary.
+    ///
+    /// Two subcommands are supported:
+    ///   compile <wasm-file>
+    ///   run <wasm-file> <function> --func-inputs 1,2 --data-inputs 3,4
+    #[derive(Parser)]
+    #[command(author, version, about = "womir tool: compile or run a Wasm file", long_about = None)]
+    struct Cli {
+        /// Enable read-write pipeline
+        #[arg(short = 'w', long = "rw-pipeline", global = true)]
+        rw_pipeline: bool,
+        #[command(subcommand)]
+        command: Command,
     }
 
-    if let Some(func_name) = func_name {
-        let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
-        log::info!("Executing function: {func_name}");
-        let outputs = interpreter.run(func_name, &func_inputs);
-        log::info!("Outputs: {:?}", outputs);
+    #[derive(Subcommand)]
+    enum Command {
+        /// Load and process the Wasm file (writes IR dump)
+        Compile {
+            /// Path to the wasm file to load
+            wasm_file: String,
+        },
+
+        /// Run a function from the Wasm file
+        Run {
+            /// Path to the wasm file to load
+            wasm_file: String,
+
+            /// Function name to execute
+            function: String,
+
+            /// Comma separated function inputs (u32)
+            #[arg(long = "func-inputs", value_delimiter = ',', value_parser = clap::value_parser!(u32))]
+            func_inputs: Vec<u32>,
+
+            /// Comma separated data inputs (u32)
+            #[arg(long = "data-inputs", value_delimiter = ',', value_parser = clap::value_parser!(u32))]
+            data_inputs: Vec<u32>,
+        },
     }
 
-    Ok(())
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Compile { wasm_file } => {
+            let wasm_bytes = std::fs::read(&wasm_file).unwrap();
+            let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?
+                .default_par_process_all_functions(cli.rw_pipeline)?;
+
+            if let Err(err) = dump_ir(&program) {
+                log::error!("Failed to dump IR: {err}");
+            }
+
+            Ok(())
+        }
+        Command::Run {
+            wasm_file,
+            function,
+            func_inputs,
+            data_inputs,
+        } => {
+            let wasm_bytes = std::fs::read(&wasm_file).unwrap();
+            let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?
+                .default_par_process_all_functions(cli.rw_pipeline)?;
+
+            if let Err(err) = dump_ir(&program) {
+                log::error!("Failed to dump IR: {err}");
+            }
+
+            let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
+            log::info!("Executing function: {function}");
+            let outputs = interpreter.run(&function, &func_inputs);
+            log::info!("Outputs: {:?}", outputs);
+
+            Ok(())
+        }
+    }
 }
 
 fn dump_ir(program: &Program<GenericIrSetting>) -> std::io::Result<()> {
@@ -156,7 +196,7 @@ mod tests {
         let wasm_file = std::fs::read(path).unwrap();
         let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
             .unwrap()
-            .default_process_all_functions()
+            .default_process_all_functions(false)
             .unwrap();
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
@@ -485,7 +525,7 @@ mod tests {
                     let wasm_file = std::fs::read(mod_name).unwrap();
                     let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
                         .unwrap()
-                        .default_par_process_all_functions()
+                        .default_par_process_all_functions(false)
                         .unwrap();
                     let mut interpreter = Interpreter::new(program, SpectestExternalFunctions);
 
