@@ -108,9 +108,6 @@ fn process_block<'a>(
                     if output_idx != Some(input_idx as u32) {
                         control_stack[break_target.depth as usize].is_input_redirected[input_idx] =
                             false;
-                    } else {
-                        // It is still redirected.
-                        println!("Mapped depth {}", depth);
                     }
                 } else {
                     // Some arbitrary value is being used, so it is not a redirected input.
@@ -233,18 +230,11 @@ fn process_block<'a>(
 
     let mut redirected_inputs = Vec::new();
     if let Some(entry) = control_stack.pop_front() {
-        let num_inputs = entry.is_input_redirected.len();
         for (input_idx, is_redirected) in entry.is_input_redirected.into_iter().enumerate() {
             if is_redirected {
                 redirected_inputs.push(input_idx as u32);
             }
         }
-        println!(
-            "Depth {} redirected inputs: {}/{}",
-            control_stack.len() + 1,
-            redirected_inputs.len(),
-            num_inputs
-        );
     }
 
     LivenessDag {
