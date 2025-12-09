@@ -12,7 +12,7 @@ use crate::loader::{
 #[derive(Debug)]
 pub struct Liveness {
     /// Last usage of a value produced by a node.
-    last_usage: HashMap<(usize, u32), u32>,
+    last_usage: HashMap<(usize, u32), usize>,
 
     /// The set of outputs indexed from the Input node that are redirected
     /// as-is to the next iteration of the loop.
@@ -35,7 +35,7 @@ impl Liveness {
     /// TODO: calculate the liveness for all possible control flow paths,
     /// and use the _curr_node_idx parameter to fine grain the query
     /// based on what path is being taken.
-    pub fn query_liveness(&self, _curr_node_idx: usize, node_idx: usize, output_idx: u32) -> u32 {
+    pub fn query_liveness(&self, _curr_node_idx: usize, node_idx: usize, output_idx: u32) -> usize {
         self.last_usage[&(node_idx, output_idx)]
     }
 }
@@ -95,7 +95,7 @@ fn process_block<'a>(
                         output_idx = control_stack[depth as usize]
                             .input_map
                             .get(&output_idx_val)
-                            .cloned();
+                            .copied();
                         depth += 1;
                     }
 
@@ -126,13 +126,13 @@ fn process_block<'a>(
         // For each input, we mark its last used node as the current node index.
         for input in &inputs {
             if let NodeInput::Reference(ValueOrigin { node, output_idx }) = input {
-                last_usage.insert((*node, *output_idx), index as u32);
+                last_usage.insert((*node, *output_idx), index);
             }
         }
 
         // Initialize last used node to the current node index
         for output_idx in 0..(output_types.len() as u32) {
-            last_usage.insert((index, output_idx), index as u32);
+            last_usage.insert((index, output_idx), index);
         }
 
         // Process subnodes recursively
@@ -193,18 +193,14 @@ fn process_block<'a>(
                 }
                 BrTable { targets } => {
                     for target in targets {
-                        if target.target.depth == 0
-                            && target.target.kind == TargetType::FunctionOrLoop
-                        {
-                            handle_iteration_inputs(
-                                control_stack,
-                                &target.target,
-                                target
-                                    .input_permutation
-                                    .iter()
-                                    .map(|perm| &inputs[*perm as usize]),
-                            );
-                        }
+                        handle_iteration_inputs(
+                            control_stack,
+                            &target.target,
+                            target
+                                .input_permutation
+                                .iter()
+                                .map(|perm| &inputs[*perm as usize]),
+                        );
                     }
                 }
                 _ => {}
