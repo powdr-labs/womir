@@ -188,44 +188,122 @@
                 this.rectangles = [];
                 const lines = content.split('\n');
                 
-                for (const line of lines) {
-                    // Remove comments and trim
-                    const cleanLine = line.split('#')[0].trim();
-                    if (cleanLine === '') continue;
+                // Parse recursively with support for L blocks
+                const parseLines = (lineList, xOffset = 0) => {
+                    const result = [];
+                    let i = 0;
                     
-                    const parts = cleanLine.split(/\s+/);
-                    const type = parts[0];
-                    
-                    if (type === 'F' && parts.length >= 3) {
-                        // Type F: vertical dashed line - F x y
-                        const rect = {
-                            type: 'F',
-                            x1: parseInt(parts[1]),
-                            y1: parseInt(parts[2])
-                        };
+                    while (i < lineList.length) {
+                        const line = lineList[i];
+                        // Remove comments and trim
+                        const cleanLine = line.split('#')[0].trim();
                         
-                        // Validate numbers
-                        if (!isNaN(rect.x1) && !isNaN(rect.y1)) {
-                            this.rectangles.push(rect);
+                        if (cleanLine === '') {
+                            i++;
+                            continue;
                         }
-                    } else if (type === 'A' && parts.length >= 5) {
-                        // Type A: rectangle - A x1 y1 x2 y2
-                        const rect = {
-                            type: 'A',
-                            x1: parseInt(parts[1]),
-                            y1: parseInt(parts[2]),
-                            x2: parseInt(parts[3]),
-                            y2: parseInt(parts[4])
-                        };
                         
-                        // Validate numbers
-                        if (!isNaN(rect.x1) && !isNaN(rect.y1) && 
-                            !isNaN(rect.x2) && !isNaN(rect.y2)) {
-                            this.rectangles.push(rect);
+                        if (cleanLine === '}') {
+                            // End of L block
+                            return result;
+                        }
+                        
+                        const parts = cleanLine.split(/\s+/);
+                        const type = parts[0];
+                        
+                        if (type === 'L' && parts.length >= 2 && cleanLine.endsWith('{')) {
+                            // Type L: container block - L x {
+                            const localX = parseInt(parts[1]);
+                            if (!isNaN(localX)) {
+                                const lBlock = {
+                                    type: 'L',
+                                    x1: xOffset + localX,
+                                    children: [],
+                                    containedA: [],
+                                    containedF: []
+                                };
+                                
+                                // Parse contents of L block
+                                const innerLines = [];
+                                i++;
+                                let braceCount = 1;
+                                while (i < lineList.length && braceCount > 0) {
+                                    const innerLine = lineList[i];
+                                    const cleanInner = innerLine.split('#')[0].trim();
+                                    if (cleanInner === '}') {
+                                        braceCount--;
+                                        if (braceCount === 0) break;
+                                    } else if (cleanInner.endsWith('{')) {
+                                        braceCount++;
+                                    }
+                                    innerLines.push(innerLine);
+                                    i++;
+                                }
+                                
+                                // Recursively parse inner content - inner blocks use local coordinates starting from 0
+                                lBlock.children = parseLines(innerLines, 0);
+                                
+                                // Recursively collect all A and F blocks for projection
+                                const collectBlocks = (blocks) => {
+                                    for (const block of blocks) {
+                                        if (block.type === 'A') {
+                                            lBlock.containedA.push({
+                                                y1: block.y1,
+                                                y2: block.y2
+                                            });
+                                        } else if (block.type === 'F') {
+                                            lBlock.containedF.push({
+                                                y: block.y1
+                                            });
+                                        } else if (block.type === 'L') {
+                                            // Recursively collect from nested L blocks
+                                            collectBlocks(block.children);
+                                        }
+                                    }
+                                };
+                                
+                                collectBlocks(lBlock.children);
+                                result.push(lBlock);
+                            }
+                            i++;
+                        } else if (type === 'F' && parts.length >= 3) {
+                            // Type F: vertical dashed line - F x y
+                            const rect = {
+                                type: 'F',
+                                x1: xOffset + parseInt(parts[1]),
+                                y1: parseInt(parts[2])
+                            };
+                            
+                            // Validate numbers
+                            if (!isNaN(rect.x1) && !isNaN(rect.y1)) {
+                                result.push(rect);
+                            }
+                            i++;
+                        } else if (type === 'A' && parts.length >= 5) {
+                            // Type A: rectangle - A x1 y1 x2 y2
+                            const rect = {
+                                type: 'A',
+                                x1: xOffset + parseInt(parts[1]),
+                                y1: parseInt(parts[2]),
+                                x2: xOffset + parseInt(parts[3]),
+                                y2: parseInt(parts[4])
+                            };
+                            
+                            // Validate numbers
+                            if (!isNaN(rect.x1) && !isNaN(rect.y1) && 
+                                !isNaN(rect.x2) && !isNaN(rect.y2)) {
+                                result.push(rect);
+                            }
+                            i++;
+                        } else {
+                            i++;
                         }
                     }
-                }
+                    
+                    return result;
+                };
                 
+                this.rectangles = parseLines(lines, 0);
                 this.render();
             }
             
@@ -341,9 +419,69 @@
                     this.ctx.stroke();
                 }
                 
-                // Draw rectangles
+                // Draw rectangles and L blocks
                 for (const rect of this.rectangles) {
-                    if (rect.type === 'A') {
+                    if (rect.type === 'L') {
+                        // Type L: Draw vertical lines for contained A blocks and F dots
+                        const x = rect.x1 * CELL_SIZE + this.offsetX;
+                        
+                        // Skip if completely outside visible area
+                        if (x < -10 || x > width + 10) continue;
+                        
+                        // Draw thick vertical lines for each contained A block
+                        if (rect.containedA && rect.containedA.length > 0) {
+                            this.ctx.strokeStyle = 'rgba(100, 100, 100, 0.8)'; // Dark gray
+                            this.ctx.lineWidth = 5;
+                            
+                            for (const aBlock of rect.containedA) {
+                                const y1 = aBlock.y1 * CELL_SIZE + this.offsetY;
+                                const y2 = (aBlock.y2 + 1) * CELL_SIZE + this.offsetY;
+                                
+                                // Draw vertical line on left side of the A block's Y range
+                                this.ctx.beginPath();
+                                this.ctx.moveTo(x, Math.max(0, y1));
+                                this.ctx.lineTo(x, Math.min(height, y2));
+                                this.ctx.stroke();
+                            }
+                        }
+                        
+                        // Handle F blocks: draw dots and a single dashed line from highest dot
+                        if (rect.containedF && rect.containedF.length > 0) {
+                            // Find the highest (minimum Y) F block
+                            let minY = rect.containedF[0].y;
+                            for (const fBlock of rect.containedF) {
+                                minY = Math.min(minY, fBlock.y);
+                            }
+                            
+                            // Draw all red dots
+                            for (const fBlock of rect.containedF) {
+                                const dotY = fBlock.y * CELL_SIZE + this.offsetY;
+                                
+                                if (dotY >= -10 && dotY <= height + 10) {
+                                    this.ctx.fillStyle = 'rgba(231, 76, 60, 1)'; // Red
+                                    this.ctx.beginPath();
+                                    this.ctx.arc(x, dotY, 8, 0, 2 * Math.PI);
+                                    this.ctx.fill();
+                                    
+                                    // Add border to the dot
+                                    this.ctx.strokeStyle = '#c0392b'; // Darker red
+                                    this.ctx.lineWidth = 2;
+                                    this.ctx.stroke();
+                                }
+                            }
+                            
+                            // Draw single dashed line from the highest dot downward
+                            const startY = minY * CELL_SIZE + this.offsetY;
+                            this.ctx.strokeStyle = TYPE_COLORS['F'] || TYPE_COLORS['default'];
+                            this.ctx.lineWidth = 3;
+                            this.ctx.setLineDash([10, 5]); // 10px dash, 5px gap
+                            this.ctx.beginPath();
+                            this.ctx.moveTo(x, Math.max(startY, 0));
+                            this.ctx.lineTo(x, height);
+                            this.ctx.stroke();
+                            this.ctx.setLineDash([]); // Reset dash pattern
+                        }
+                    } else if (rect.type === 'A') {
                         // Type A: Draw as rectangle
                         const x = rect.x1 * CELL_SIZE + this.offsetX;
                         const y = rect.y1 * CELL_SIZE + this.offsetY;
