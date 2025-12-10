@@ -334,77 +334,74 @@
             
             // Map a visual column to actual coordinates considering expansions
             getColumnInfo(visualCol) {
-                let currentVisualCol = 0;
-                let currentActualX = 0;
-                
-                // Walk through columns accounting for expansions
-                while (currentVisualCol <= visualCol) {
-                    // Check for expanded L block at current position
-                    const lBlock = this.rectangles.find(b => 
-                        b.type === 'L' && b.x === currentActualX && this.expandedLBlocks.has(b.id));
+                // Find the actual coordinate by checking each position
+                for (let actualX = 0; actualX <= visualCol + 100; actualX++) {
+                    const visualX = this.actualToVisualX(actualX);
                     
-                    if (lBlock) {
-                        const width = this.getExpandedWidth(lBlock);
-                        if (visualCol < currentVisualCol + width) {
-                            // We're inside this expanded L block
-                            return {
-                                actualX: currentActualX,
-                                localX: visualCol - currentVisualCol,
-                                isExpanded: true,
-                                lBlock: lBlock
-                            };
+                    // Check if this actual position maps exactly to our visual column
+                    if (visualX === visualCol) {
+                        const lBlock = this.rectangles.find(b => 
+                            b.type === 'L' && b.x === actualX);
+                        return {
+                            actualX: actualX,
+                            isExpanded: lBlock ? this.expandedLBlocks.has(lBlock.id) : false,
+                            isInsideExpansion: false,
+                            lBlock: lBlock || null
+                        };
+                    }
+                    
+                    // Check if we've passed the target - means we're in an expansion
+                    if (visualX > visualCol) {
+                        // Look for an expanded L block at the previous actual position
+                        for (let checkX = actualX - 1; checkX >= 0; checkX--) {
+                            const lBlock = this.rectangles.find(b => 
+                                b.type === 'L' && b.x === checkX && this.expandedLBlocks.has(b.id));
+                            
+                            if (lBlock) {
+                                const lVisualX = this.actualToVisualX(checkX);
+                                const expansionWidth = this.getExpandedWidth(lBlock);
+                                const expansionStart = lVisualX - expansionWidth;
+                                
+                                if (visualCol >= expansionStart && visualCol < lVisualX) {
+                                    return {
+                                        actualX: checkX,
+                                        localX: visualCol - expansionStart,
+                                        isExpanded: true,
+                                        isInsideExpansion: true,
+                                        lBlock: lBlock
+                                    };
+                                }
+                            }
                         }
-                        currentVisualCol += width;
-                        currentActualX++;
-                    } else {
-                        if (currentVisualCol === visualCol) {
-                            // Check if there's a collapsed L block here
-                            const collapsedL = this.rectangles.find(b => 
-                                b.type === 'L' && b.x === currentActualX);
-                            return {
-                                actualX: currentActualX,
-                                isExpanded: false,
-                                lBlock: collapsedL || null
-                            };
-                        }
-                        currentVisualCol++;
-                        currentActualX++;
+                        // Shouldn't happen, but return a default
+                        return {
+                            actualX: actualX,
+                            isExpanded: false,
+                            isInsideExpansion: false,
+                            lBlock: null
+                        };
                     }
                 }
                 
-                // Beyond any L blocks, just regular columns
+                // Fallback for columns beyond the range
                 return {
-                    actualX: currentActualX + (visualCol - currentVisualCol),
+                    actualX: visualCol,
                     isExpanded: false,
+                    isInsideExpansion: false,
                     lBlock: null
                 };
             }
             
             // Convert actual X coordinate to visual X coordinate accounting for expansions
             actualToVisualX(actualX) {
-                let visualX = 0;
-                let currentActualX = 0;
+                let visualX = actualX; // Start with the actual position
                 
-                // Walk through all positions up to actualX
-                while (currentActualX <= actualX) {
-                    const lBlock = this.rectangles.find(b => 
-                        b.type === 'L' && b.x === currentActualX && this.expandedLBlocks.has(b.id));
-                    
-                    if (lBlock) {
-                        if (currentActualX === actualX) {
-                            // We've reached the target position which is an L block
-                            return visualX;
-                        }
-                        // This L block is expanded - skip its width
-                        visualX += this.getExpandedWidth(lBlock);
-                        currentActualX++;
-                    } else {
-                        if (currentActualX === actualX) {
-                            // We've reached the target position
-                            return visualX;
-                        }
-                        visualX++;
-                        currentActualX++;
+                // Add extra space for each expanded L block at or before this position
+                for (const block of this.rectangles) {
+                    if (block.type === 'L' && block.x <= actualX && this.expandedLBlocks.has(block.id)) {
+                        // This L block is expanded and is at or before our target position
+                        // Add its expansion width (the expansion happens BEFORE the L block column)
+                        visualX += this.getExpandedWidth(block);
                     }
                 }
                 
@@ -520,28 +517,88 @@
                     const col = Math.floor((x - this.offsetX) / CELL_SIZE);
                     const layer = Math.floor(y / HEADER_HEIGHT);
                     
-                    if (col >= 0 && layer === 0) {
-                        const colInfo = this.getColumnInfo(col);
-                        if (colInfo.lBlock && !colInfo.isExpanded) {
-                            // Toggle expansion
-                            if (this.expandedLBlocks.has(colInfo.lBlock.id)) {
-                                this.expandedLBlocks.delete(colInfo.lBlock.id);
-                            } else {
-                                this.expandedLBlocks.add(colInfo.lBlock.id);
+                    if (col >= 0 && layer >= 0) {
+                        // Find which L block was clicked by traversing the hierarchy
+                        let blockToToggle = null;
+                        
+                        // Helper to find L block at specific position and layer
+                        const findLBlockAt = (blocks, targetCol, targetLayer, currentLayer = 0, parentOffset = 0) => {
+                            for (const block of blocks) {
+                                if (block.type === 'L') {
+                                    const blockVisualX = currentLayer === 0 ? 
+                                        this.actualToVisualX(block.x) : 
+                                        parentOffset + block.x;
+                                    
+                                    if (this.expandedLBlocks.has(block.id)) {
+                                        // L is expanded
+                                        const expansionWidth = this.getExpandedWidth(block);
+                                        // For top-level, expansion is BEFORE the L column
+                                        // For nested, expansion REPLACES the L column
+                                        const expansionStart = currentLayer === 0 ? 
+                                            blockVisualX - expansionWidth : 
+                                            blockVisualX;
+                                        const expansionEnd = currentLayer === 0 ?
+                                            blockVisualX - 1 :
+                                            blockVisualX + expansionWidth - 1;
+                                        
+                                        if (targetCol >= expansionStart && targetCol <= expansionEnd) {
+                                            // Click is inside this L's expansion
+                                            if (currentLayer + 1 === targetLayer) {
+                                                // This expansion is at the target layer
+                                                const localX = targetCol - expansionStart;
+                                                const nestedL = block.children.find(c => 
+                                                    c.type === 'L' && c.x === localX);
+                                                if (nestedL) {
+                                                    return nestedL;
+                                                }
+                                            } else if (currentLayer + 1 < targetLayer) {
+                                                // Need to go deeper
+                                                const result = findLBlockAt(
+                                                    block.children, 
+                                                    targetCol, 
+                                                    targetLayer, 
+                                                    currentLayer + 1, 
+                                                    expansionStart
+                                                );
+                                                if (result) return result;
+                                            }
+                                        } else if (currentLayer === 0 && targetCol === blockVisualX && currentLayer === targetLayer) {
+                                            // Click on the L column itself at top level (when expanded, shows as gap)
+                                            // Don't toggle if already expanded
+                                        }
+                                    } else {
+                                        // L is collapsed
+                                        if (targetCol === blockVisualX && currentLayer === targetLayer) {
+                                            return block;
+                                        }
+                                    }
+                                }
                             }
+                            return null;
+                        };
+                        
+                        blockToToggle = findLBlockAt(this.rectangles, col, layer);
+                        
+                        if (blockToToggle) {
+                            // Toggle expansion
+                            if (this.expandedLBlocks.has(blockToToggle.id)) {
+                                this.expandedLBlocks.delete(blockToToggle.id);
+                                // Also collapse all children
+                                const collapseChildren = (block) => {
+                                    for (const child of block.children) {
+                                        if (child.type === 'L') {
+                                            this.expandedLBlocks.delete(child.id);
+                                            collapseChildren(child);
+                                        }
+                                    }
+                                };
+                                collapseChildren(blockToToggle);
+                            } else {
+                                this.expandedLBlocks.add(blockToToggle.id);
+                            }
+                            
                             this.buildXMapping();
-                            
-                            // Force full re-render with new canvas sizes
-                            const container = document.getElementById('container');
-                            const numHeaders = 1 + this.headerLayers.length;
-                            const headerHeight = numHeaders * HEADER_HEIGHT;
-                            
-                            this.xHeadersContainer.style.height = headerHeight + 'px';
-                            this.canvas.style.top = headerHeight + 'px';
-                            this.yHeader.style.top = headerHeight + 'px';
-                            this.corner.style.height = headerHeight + 'px';
-                            
-                            this.setupCanvas(); // Resize everything
+                            this.setupCanvas(); // Resize everything and re-render
                         }
                     }
                 });
@@ -616,23 +673,32 @@
                 }
             }
             
-            renderBlocks(blocks, visualXOffset = 0) {
+            renderBlocks(blocks, visualXOffset = -1, insideExpanded = false) {
                 // Render blocks with proper visual offset
                 for (const block of blocks) {
                     if (block.type === 'L') {
                         const isExpanded = this.expandedLBlocks.has(block.id);
                         
-                        if (isExpanded) {
-                            // L block is expanded - render its children with local coordinates
-                            const baseVisualX = visualXOffset === 0 ? 
-                                this.actualToVisualX(block.x) : 
-                                visualXOffset + block.x;
-                            this.renderBlocks(block.children, baseVisualX);
+                        if (isExpanded && !insideExpanded) {
+                            // L block is expanded at top level - render its children before the L column
+                            const lVisualX = this.actualToVisualX(block.x);
+                            const expansionWidth = this.getExpandedWidth(block);
+                            const expansionStartX = lVisualX - expansionWidth; // Expansion starts before the L column
+                            this.renderBlocks(block.children, expansionStartX, true);
+                        } else if (isExpanded && insideExpanded) {
+                            // Nested L block expanded inside another L block
+                            // The visualXOffset is where the parent's expansion starts
+                            // We need to position this L's expansion at its local position within the parent
+                            const lLocalVisualX = visualXOffset + block.x;
+                            const expansionWidth = this.getExpandedWidth(block);
+                            // The expansion goes BEFORE the L column, replacing the L's position
+                            const expansionStartX = lLocalVisualX;
+                            this.renderBlocks(block.children, expansionStartX, true);
                         } else {
                             // Render collapsed L block projection
-                            const x = (visualXOffset === 0 ? 
-                                this.actualToVisualX(block.x) : 
-                                visualXOffset + block.x) * CELL_SIZE + this.offsetX;
+                            const x = insideExpanded ? 
+                                (visualXOffset + block.x) * CELL_SIZE + this.offsetX :
+                                this.actualToVisualX(block.x) * CELL_SIZE + this.offsetX;
                             
                             // Draw vertical lines for A blocks
                             if (block.containedA.length > 0) {
@@ -682,12 +748,12 @@
                         }
                     } else if (block.type === 'A') {
                         // A block - use visual offset if inside expanded L, otherwise use actualToVisualX
-                        const x1 = (visualXOffset === 0 ? 
-                            this.actualToVisualX(block.x1) : 
-                            visualXOffset + block.x1) * CELL_SIZE + this.offsetX;
-                        const x2 = (visualXOffset === 0 ? 
-                            this.actualToVisualX(block.x2) : 
-                            visualXOffset + block.x2) * CELL_SIZE + this.offsetX;
+                        const x1 = insideExpanded ? 
+                            (visualXOffset + block.x1) * CELL_SIZE + this.offsetX :
+                            this.actualToVisualX(block.x1) * CELL_SIZE + this.offsetX;
+                        const x2 = insideExpanded ? 
+                            (visualXOffset + block.x2) * CELL_SIZE + this.offsetX :
+                            this.actualToVisualX(block.x2) * CELL_SIZE + this.offsetX;
                         const y = block.y1 * CELL_SIZE + this.offsetY;
                         const w = x2 - x1 + CELL_SIZE;
                         const h = (block.y2 - block.y1 + 1) * CELL_SIZE;
@@ -712,9 +778,9 @@
                         }
                     } else if (block.type === 'F') {
                         // F block - use visual offset if inside expanded L, otherwise use actualToVisualX
-                        const x = (visualXOffset === 0 ? 
-                            this.actualToVisualX(block.x1) : 
-                            visualXOffset + block.x1) * CELL_SIZE + this.offsetX;
+                        const x = insideExpanded ?
+                            (visualXOffset + block.x1) * CELL_SIZE + this.offsetX :
+                            this.actualToVisualX(block.x1) * CELL_SIZE + this.offsetX;
                         const startY = block.y1 * CELL_SIZE + this.offsetY;
                         
                         if (x >= -10 && x <= this.canvas.width + 10) {
@@ -746,8 +812,47 @@
                 // Clear existing headers
                 this.xHeadersContainer.innerHTML = '';
                 
-                // Number of layers: always 1 base layer, plus any expansion layers
-                const numLayers = 1 + this.headerLayers.length;
+                // Build complete expansion map with proper depth tracking
+                const expansionsByDepth = new Map();
+                
+                const mapExpansions = (blocks, depth, parentStart) => {
+                    for (const block of blocks) {
+                        if (block.type === 'L' && this.expandedLBlocks.has(block.id)) {
+                            const blockVisualX = depth === 0 ? 
+                                this.actualToVisualX(block.x) : 
+                                parentStart + block.x;
+                            
+                            const width = this.getExpandedWidth(block);
+                            
+                            // For top-level L blocks, expansion goes BEFORE the L column
+                            // For nested L blocks, expansion REPLACES the L column position
+                            const expansionStart = depth === 0 ? 
+                                blockVisualX - width : 
+                                blockVisualX;
+                            const expansionEnd = depth === 0 ?
+                                blockVisualX - 1 :
+                                blockVisualX + width - 1;
+                            
+                            if (!expansionsByDepth.has(depth)) {
+                                expansionsByDepth.set(depth, []);
+                            }
+                            
+                            expansionsByDepth.get(depth).push({
+                                block: block,
+                                start: expansionStart,
+                                end: expansionEnd,
+                                lColumn: depth === 0 ? blockVisualX : -1  // Only top-level has separate L column
+                            });
+                            
+                            // Recurse for children - they start at the expansion start
+                            mapExpansions(block.children, depth + 1, expansionStart);
+                        }
+                    }
+                };
+                
+                mapExpansions(this.rectangles, 0, 0);
+                
+                const numLayers = expansionsByDepth.size + 1;
                 const width = this.xHeadersContainer.clientWidth;
                 
                 // Calculate visible columns
@@ -768,16 +873,9 @@
                     ctx.fillStyle = '#e8e8e8';
                     ctx.fillRect(0, 0, canvas.width, HEADER_HEIGHT);
                     
-                    // Draw column numbers and L block indicators
-                    ctx.fillStyle = HEADER_TEXT_COLOR;
-                    ctx.font = '12px sans-serif';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    
-                    // Draw grid lines and numbers for visible columns
+                    // Draw grid lines and content
                     for (let col = startCol; col <= endCol; col++) {
                         const x = col * CELL_SIZE + this.offsetX;
-                        const colInfo = this.getColumnInfo(col);
                         
                         // Draw grid line
                         ctx.strokeStyle = GRID_COLOR;
@@ -787,67 +885,117 @@
                         ctx.lineTo(x, HEADER_HEIGHT);
                         ctx.stroke();
                         
+                        let content = null;
+                        
                         if (layer === 0) {
-                            // Top layer - show actual coordinates and L block markers
-                            if (colInfo.lBlock && !colInfo.isExpanded) {
-                                // Draw thick line for collapsed L block
-                                ctx.strokeStyle = '#666';
-                                ctx.lineWidth = 3;
-                                ctx.beginPath();
-                                ctx.moveTo(x, 0);
-                                ctx.lineTo(x, HEADER_HEIGHT);
-                                ctx.stroke();
-                                
-                                // Draw white circle background for + symbol
-                                ctx.fillStyle = 'white';
-                                ctx.beginPath();
-                                ctx.arc(x + CELL_SIZE/2, HEADER_HEIGHT/2, 10, 0, 2 * Math.PI);
-                                ctx.fill();
-                                
-                                // Draw circle border
-                                ctx.strokeStyle = '#333';
-                                ctx.lineWidth = 1;
-                                ctx.stroke();
-                                
-                                // Draw + symbol
-                                ctx.fillStyle = '#333';
-                                ctx.font = 'bold 16px sans-serif';
-                                ctx.fillText('+', x + CELL_SIZE/2, HEADER_HEIGHT/2);
-                            } else if (colInfo.isExpanded) {
-                                // Inside expanded L block - leave empty or show a bracket/line to indicate expansion
-                                // The actual local coordinates will be shown in layer 1
-                                ctx.strokeStyle = '#999';
-                                ctx.lineWidth = 2;
-                                ctx.beginPath();
-                                ctx.moveTo(x, HEADER_HEIGHT - 5);
-                                ctx.lineTo(x, HEADER_HEIGHT);
-                                ctx.stroke();
+                            // Base layer - only show top-level content
+                            const colInfo = this.getColumnInfo(col);
+                            
+                            if (colInfo.isInsideExpansion) {
+                                // Inside an expansion - leave empty
+                                content = { type: 'empty' };
+                            } else if (colInfo.lBlock) {
+                                if (this.expandedLBlocks.has(colInfo.lBlock.id)) {
+                                    content = { type: 'gap' };
+                                } else {
+                                    content = { type: 'collapsed-L', block: colInfo.lBlock };
+                                }
                             } else {
-                                // Regular column number
-                                ctx.fillStyle = HEADER_TEXT_COLOR;
-                                ctx.font = '12px sans-serif';
-                                ctx.fillText(colInfo.actualX.toString(), x + CELL_SIZE/2, HEADER_HEIGHT/2);
-                            }
-                        } else if (layer === 1) {
-                            // Second layer - show local coordinates for expanded L blocks
-                            if (colInfo.isExpanded && colInfo.lBlock) {
-                                // Show the local X coordinate within the expanded L block
-                                ctx.fillStyle = HEADER_TEXT_COLOR;
-                                ctx.font = '12px sans-serif';
-                                ctx.fillText(colInfo.localX.toString(), x + CELL_SIZE/2, HEADER_HEIGHT/2);
+                                content = { type: 'number', value: colInfo.actualX };
                             }
                         } else {
-                            // Higher layers for nested expanded L blocks
-                            if (colInfo.isExpanded && colInfo.lBlock) {
-                                // Check if this column is inside a nested expanded L block
-                                const nestedInfo = this.getNestedColumnInfo(colInfo.lBlock, colInfo.localX, layer);
-                                if (nestedInfo) {
-                                    ctx.fillStyle = HEADER_TEXT_COLOR;
-                                    ctx.font = '12px sans-serif';
-                                    ctx.fillText(nestedInfo.localX.toString(), x + CELL_SIZE/2, HEADER_HEIGHT/2);
+                            // Expansion layers
+                            const expansions = expansionsByDepth.get(layer - 1);
+                            if (expansions) {
+                                for (const exp of expansions) {
+                                    if (col >= exp.start && col <= exp.end) {
+                                        const localX = col - exp.start;
+                                        
+                                        // Check if there's an expanded nested L that takes over from here
+                                        let isInNestedExpansion = false;
+                                        for (const child of exp.block.children) {
+                                            if (child.type === 'L' && this.expandedLBlocks.has(child.id)) {
+                                                const nestedWidth = this.getExpandedWidth(child);
+                                                if (localX >= child.x && localX < child.x + nestedWidth) {
+                                                    isInNestedExpansion = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        
+                                        if (isInNestedExpansion) {
+                                            content = { type: 'empty' };  // Nested expansion handles this area
+                                        } else {
+                                            // Check for collapsed nested L at this exact position
+                                            const nestedL = exp.block.children.find(c => 
+                                                c.type === 'L' && c.x === localX && !this.expandedLBlocks.has(c.id));
+                                            
+                                            if (nestedL) {
+                                                content = { type: 'collapsed-L', block: nestedL };
+                                            } else {
+                                                content = { type: 'number', value: localX };
+                                            }
+                                        }
+                                        break;
+                                    } else if (exp.lColumn !== -1 && col === exp.lColumn) {
+                                        content = { type: 'empty' };
+                                        break;
+                                    }
                                 }
                             }
+                            
+                            if (!content) {
+                                content = { type: 'empty' };
+                            }
                         }
+                        
+                        const displayContent = content;
+                        
+                        // Render content
+                        if (displayContent.type === 'collapsed-L') {
+                            // Draw + button
+                            ctx.strokeStyle = '#666';
+                            ctx.lineWidth = 3;
+                            ctx.beginPath();
+                            ctx.moveTo(x + CELL_SIZE/2, 0);
+                            ctx.lineTo(x + CELL_SIZE/2, HEADER_HEIGHT);
+                            ctx.stroke();
+                            
+                            ctx.fillStyle = 'white';
+                            ctx.beginPath();
+                            ctx.arc(x + CELL_SIZE/2, HEADER_HEIGHT/2, 10, 0, 2 * Math.PI);
+                            ctx.fill();
+                            
+                            ctx.strokeStyle = '#333';
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                            
+                            ctx.fillStyle = '#333';
+                            ctx.font = 'bold 16px sans-serif';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText('+', x + CELL_SIZE/2, HEADER_HEIGHT/2);
+                        } else if (displayContent.type === 'number') {
+                            // Show number
+                            ctx.fillStyle = HEADER_TEXT_COLOR;
+                            ctx.font = '12px sans-serif';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(displayContent.value.toString(), x + CELL_SIZE/2, HEADER_HEIGHT/2);
+                        } else if (displayContent.type === 'gap') {
+                            // Visual gap indicator
+                            ctx.fillStyle = '#f5f5f5';
+                            ctx.fillRect(x, 0, CELL_SIZE, HEADER_HEIGHT);
+                            
+                            // Draw subtle vertical line to indicate expansion boundary
+                            ctx.strokeStyle = '#ddd';
+                            ctx.lineWidth = 2;
+                            ctx.beginPath();
+                            ctx.moveTo(x + CELL_SIZE/2, HEADER_HEIGHT * 0.2);
+                            ctx.lineTo(x + CELL_SIZE/2, HEADER_HEIGHT * 0.8);
+                            ctx.stroke();
+                        }
+                        // 'empty' type cells remain blank
                     }
                     
                     // Draw bottom border
