@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Allocation Visualizer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+            background: #f0f0f0;
+        }
+        
+        #controls {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 50px;
+            background: #2c3e50;
+            border-bottom: 2px solid #1a1a1a;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            z-index: 1000;
+        }
+        
+        #controls button {
+            padding: 8px 16px;
+            margin-right: 10px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        #controls button:hover {
+            background: #2980b9;
+        }
+        
+        #fileInput {
+            display: none;
+        }
+        
+        #fileInfo {
+            color: white;
+            margin-left: 20px;
+            font-size: 14px;
+        }
+        
+        #container {
+            position: relative;
+            width: 100vw;
+            height: calc(100vh - 50px);
+            top: 50px;
+        }
+        
+        #canvas {
+            position: absolute;
+            top: 40px;
+            left: 60px;
+            cursor: grab;
+            background: white;
+        }
+        
+        #canvas.grabbing {
+            cursor: grabbing;
+        }
+        
+        #x-header {
+            position: absolute;
+            top: 0;
+            left: 60px;
+            height: 40px;
+            background: #e8e8e8;
+            border-bottom: 2px solid #333;
+            overflow: hidden;
+        }
+        
+        #y-header {
+            position: absolute;
+            top: 40px;
+            left: 0;
+            width: 60px;
+            background: #e8e8e8;
+            border-right: 2px solid #333;
+            overflow: hidden;
+        }
+        
+        #corner {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 60px;
+            height: 40px;
+            background: #d0d0d0;
+            border-right: 2px solid #333;
+            border-bottom: 2px solid #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <button id="openFileBtn">Open File</button>
+        <input type="file" id="fileInput" accept=".txt">
+        <span id="fileInfo"></span>
+    </div>
+    <div id="container">
+        <div id="corner">t / slot</div>
+        <canvas id="x-header"></canvas>
+        <canvas id="y-header"></canvas>
+        <canvas id="canvas"></canvas>
+    </div>
+    
+    <script>
+        const CELL_SIZE = 30;
+        const GRID_COLOR = '#ddd';
+        const HEADER_TEXT_COLOR = '#333';
+        
+        // Define colors for different rectangle types
+        const TYPE_COLORS = {
+            'A': 'rgba(52, 152, 219, 0.7)',  // Blue
+            'F': 'rgba(230, 126, 34, 0.7)',  // Orange
+            'default': 'rgba(149, 165, 166, 0.7)' // Gray
+        };
+        
+        class GridVisualizer {
+            constructor() {
+                this.canvas = document.getElementById('canvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.xHeader = document.getElementById('x-header');
+                this.xHeaderCtx = this.xHeader.getContext('2d');
+                this.yHeader = document.getElementById('y-header');
+                this.yHeaderCtx = this.yHeader.getContext('2d');
+                
+                this.offsetX = 0;
+                this.offsetY = 0;
+                this.isDragging = false;
+                this.dragStartX = 0;
+                this.dragStartY = 0;
+                this.dragOffsetX = 0;
+                this.dragOffsetY = 0;
+                
+                this.rectangles = [];
+                
+                this.setupCanvas();
+                this.setupEventListeners();
+                this.setupFileHandling();
+                this.render();
+            }
+            
+            setupFileHandling() {
+                const openFileBtn = document.getElementById('openFileBtn');
+                const fileInput = document.getElementById('fileInput');
+                const fileInfo = document.getElementById('fileInfo');
+                
+                openFileBtn.addEventListener('click', () => {
+                    fileInput.click();
+                });
+                
+                fileInput.addEventListener('change', (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                            this.parseFile(event.target.result);
+                            fileInfo.textContent = `Loaded: ${file.name}`;
+                        };
+                        reader.readAsText(file);
+                    }
+                });
+            }
+            
+            parseFile(content) {
+                this.rectangles = [];
+                const lines = content.split('\n');
+                
+                for (const line of lines) {
+                    // Remove comments and trim
+                    const cleanLine = line.split('#')[0].trim();
+                    if (cleanLine === '') continue;
+                    
+                    const parts = cleanLine.split(/\s+/);
+                    const type = parts[0];
+                    
+                    if (type === 'F' && parts.length >= 3) {
+                        // Type F: vertical dashed line - F x y
+                        const rect = {
+                            type: 'F',
+                            x1: parseInt(parts[1]),
+                            y1: parseInt(parts[2])
+                        };
+                        
+                        // Validate numbers
+                        if (!isNaN(rect.x1) && !isNaN(rect.y1)) {
+                            this.rectangles.push(rect);
+                        }
+                    } else if (type === 'A' && parts.length >= 5) {
+                        // Type A: rectangle - A x1 y1 x2 y2
+                        const rect = {
+                            type: 'A',
+                            x1: parseInt(parts[1]),
+                            y1: parseInt(parts[2]),
+                            x2: parseInt(parts[3]),
+                            y2: parseInt(parts[4])
+                        };
+                        
+                        // Validate numbers
+                        if (!isNaN(rect.x1) && !isNaN(rect.y1) && 
+                            !isNaN(rect.x2) && !isNaN(rect.y2)) {
+                            this.rectangles.push(rect);
+                        }
+                    }
+                }
+                
+                this.render();
+            }
+            
+            setupCanvas() {
+                const resize = () => {
+                    const container = document.getElementById('container');
+                    const width = container.clientWidth - 60;
+                    const height = container.clientHeight - 40;
+                    
+                    // Main canvas
+                    this.canvas.width = width;
+                    this.canvas.height = height;
+                    this.canvas.style.width = width + 'px';
+                    this.canvas.style.height = height + 'px';
+                    
+                    // X header
+                    this.xHeader.width = width;
+                    this.xHeader.height = 40;
+                    this.xHeader.style.width = width + 'px';
+                    this.xHeader.style.height = '40px';
+                    
+                    // Y header
+                    this.yHeader.width = 60;
+                    this.yHeader.height = height;
+                    this.yHeader.style.width = '60px';
+                    this.yHeader.style.height = height + 'px';
+                    
+                    this.render();
+                };
+                
+                resize();
+                window.addEventListener('resize', resize);
+            }
+            
+            setupEventListeners() {
+                this.canvas.addEventListener('mousedown', (e) => {
+                    this.isDragging = true;
+                    this.canvas.classList.add('grabbing');
+                    this.dragStartX = e.clientX;
+                    this.dragStartY = e.clientY;
+                    this.dragOffsetX = this.offsetX;
+                    this.dragOffsetY = this.offsetY;
+                });
+                
+                window.addEventListener('mousemove', (e) => {
+                    if (!this.isDragging) return;
+                    
+                    const dx = e.clientX - this.dragStartX;
+                    const dy = e.clientY - this.dragStartY;
+                    
+                    this.offsetX = this.dragOffsetX + dx;
+                    this.offsetY = this.dragOffsetY + dy;
+                    
+                    // Prevent dragging too far into negative space
+                    this.offsetX = Math.min(this.offsetX, 0);
+                    this.offsetY = Math.min(this.offsetY, 0);
+                    
+                    this.render();
+                });
+                
+                window.addEventListener('mouseup', () => {
+                    this.isDragging = false;
+                    this.canvas.classList.remove('grabbing');
+                });
+                
+                // Wheel zoom (optional, commented out for now)
+                /*
+                this.canvas.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    // Future zoom functionality
+                });
+                */
+            }
+            
+            render() {
+                this.renderGrid();
+                this.renderXHeader();
+                this.renderYHeader();
+            }
+            
+            renderGrid() {
+                const width = this.canvas.width;
+                const height = this.canvas.height;
+                
+                // Clear canvas
+                this.ctx.clearRect(0, 0, width, height);
+                
+                // Calculate visible range
+                const startCol = Math.max(0, Math.floor(-this.offsetX / CELL_SIZE));
+                const endCol = Math.ceil((width - this.offsetX) / CELL_SIZE);
+                const startRow = Math.max(0, Math.floor(-this.offsetY / CELL_SIZE));
+                const endRow = Math.ceil((height - this.offsetY) / CELL_SIZE);
+                
+                // Draw grid lines
+                this.ctx.strokeStyle = GRID_COLOR;
+                this.ctx.lineWidth = 1;
+                
+                // Vertical lines
+                for (let col = startCol; col <= endCol; col++) {
+                    const x = col * CELL_SIZE + this.offsetX;
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(x, 0);
+                    this.ctx.lineTo(x, height);
+                    this.ctx.stroke();
+                }
+                
+                // Horizontal lines
+                for (let row = startRow; row <= endRow; row++) {
+                    const y = row * CELL_SIZE + this.offsetY;
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(0, y);
+                    this.ctx.lineTo(width, y);
+                    this.ctx.stroke();
+                }
+                
+                // Draw rectangles
+                for (const rect of this.rectangles) {
+                    if (rect.type === 'A') {
+                        // Type A: Draw as rectangle
+                        const x = rect.x1 * CELL_SIZE + this.offsetX;
+                        const y = rect.y1 * CELL_SIZE + this.offsetY;
+                        const w = (rect.x2 - rect.x1 + 1) * CELL_SIZE;
+                        const h = (rect.y2 - rect.y1 + 1) * CELL_SIZE;
+                        
+                        // Skip if rectangle is completely outside visible area
+                        if (x + w < 0 || x > width || y + h < 0 || y > height) continue;
+                        
+                        // Get color for type
+                        const color = TYPE_COLORS[rect.type] || TYPE_COLORS['default'];
+                        
+                        // Draw filled rectangle
+                        this.ctx.fillStyle = color;
+                        this.ctx.fillRect(x, y, w, h);
+                        
+                        // Draw border
+                        this.ctx.strokeStyle = color.replace('0.7', '1');
+                        this.ctx.lineWidth = 2;
+                        this.ctx.strokeRect(x, y, w, h);
+                        
+                        // Draw type label if rectangle is large enough
+                        if (w >= 20 && h >= 20) {
+                            this.ctx.fillStyle = '#333';
+                            this.ctx.font = 'bold 12px sans-serif';
+                            this.ctx.textAlign = 'center';
+                            this.ctx.textBaseline = 'middle';
+                            this.ctx.fillText(rect.type, x + w/2, y + h/2);
+                        }
+                    } else if (rect.type === 'F') {
+                        // Type F: Draw as vertical dashed line with red dot at start
+                        const x = rect.x1 * CELL_SIZE + this.offsetX;
+                        const startY = rect.y1 * CELL_SIZE + this.offsetY;
+                        
+                        // Skip if line is completely outside visible area horizontally
+                        if (x < -10 || x > width + 10) continue;
+                        
+                        // Draw dashed vertical line extending down from the start point
+                        this.ctx.strokeStyle = TYPE_COLORS['F'] || TYPE_COLORS['default'];
+                        this.ctx.lineWidth = 3;
+                        this.ctx.setLineDash([10, 5]); // 10px dash, 5px gap
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(x, Math.max(startY, 0));
+                        this.ctx.lineTo(x, height);
+                        this.ctx.stroke();
+                        this.ctx.setLineDash([]); // Reset dash pattern
+                        
+                        // Draw big red dot at the start if visible
+                        if (startY >= -10 && startY <= height + 10) {
+                            this.ctx.fillStyle = 'rgba(231, 76, 60, 1)'; // Red
+                            this.ctx.beginPath();
+                            this.ctx.arc(x, startY, 8, 0, 2 * Math.PI);
+                            this.ctx.fill();
+                            
+                            // Add border to the dot
+                            this.ctx.strokeStyle = '#c0392b'; // Darker red
+                            this.ctx.lineWidth = 2;
+                            this.ctx.stroke();
+                        }
+                    }
+                }
+                
+                // Draw thicker lines at origin (on top of rectangles)
+                this.ctx.strokeStyle = '#666';
+                this.ctx.lineWidth = 2;
+                
+                // Y-axis
+                if (this.offsetX > -2 && this.offsetX < width) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(this.offsetX, 0);
+                    this.ctx.lineTo(this.offsetX, height);
+                    this.ctx.stroke();
+                }
+                
+                // X-axis
+                if (this.offsetY > -2 && this.offsetY < height) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(0, this.offsetY);
+                    this.ctx.lineTo(width, this.offsetY);
+                    this.ctx.stroke();
+                }
+            }
+            
+            renderXHeader() {
+                const width = this.xHeader.width;
+                const height = this.xHeader.height;
+                
+                // Clear header
+                this.xHeaderCtx.clearRect(0, 0, width, height);
+                
+                // Background
+                this.xHeaderCtx.fillStyle = '#e8e8e8';
+                this.xHeaderCtx.fillRect(0, 0, width, height);
+                
+                // Calculate visible columns
+                const startCol = Math.max(0, Math.floor(-this.offsetX / CELL_SIZE));
+                const endCol = Math.ceil((width - this.offsetX) / CELL_SIZE);
+                
+                // Draw column numbers
+                this.xHeaderCtx.fillStyle = HEADER_TEXT_COLOR;
+                this.xHeaderCtx.font = '12px sans-serif';
+                this.xHeaderCtx.textAlign = 'center';
+                this.xHeaderCtx.textBaseline = 'middle';
+                
+                for (let col = startCol; col <= endCol; col++) {
+                    const x = col * CELL_SIZE + this.offsetX + CELL_SIZE / 2;
+                    this.xHeaderCtx.fillText(col.toString(), x, height / 2);
+                    
+                    // Draw grid lines
+                    this.xHeaderCtx.strokeStyle = GRID_COLOR;
+                    this.xHeaderCtx.lineWidth = 1;
+                    this.xHeaderCtx.beginPath();
+                    this.xHeaderCtx.moveTo(col * CELL_SIZE + this.offsetX, 0);
+                    this.xHeaderCtx.lineTo(col * CELL_SIZE + this.offsetX, height);
+                    this.xHeaderCtx.stroke();
+                }
+            }
+            
+            renderYHeader() {
+                const width = this.yHeader.width;
+                const height = this.yHeader.height;
+                
+                // Clear header
+                this.yHeaderCtx.clearRect(0, 0, width, height);
+                
+                // Background
+                this.yHeaderCtx.fillStyle = '#e8e8e8';
+                this.yHeaderCtx.fillRect(0, 0, width, height);
+                
+                // Calculate visible rows
+                const startRow = Math.max(0, Math.floor(-this.offsetY / CELL_SIZE));
+                const endRow = Math.ceil((height - this.offsetY) / CELL_SIZE);
+                
+                // Draw row numbers
+                this.yHeaderCtx.fillStyle = HEADER_TEXT_COLOR;
+                this.yHeaderCtx.font = '12px sans-serif';
+                this.yHeaderCtx.textAlign = 'center';
+                this.yHeaderCtx.textBaseline = 'middle';
+                
+                for (let row = startRow; row <= endRow; row++) {
+                    const y = row * CELL_SIZE + this.offsetY + CELL_SIZE / 2;
+                    this.yHeaderCtx.fillText(row.toString(), width / 2, y);
+                    
+                    // Draw grid lines
+                    this.yHeaderCtx.strokeStyle = GRID_COLOR;
+                    this.yHeaderCtx.lineWidth = 1;
+                    this.yHeaderCtx.beginPath();
+                    this.yHeaderCtx.moveTo(0, row * CELL_SIZE + this.offsetY);
+                    this.yHeaderCtx.lineTo(width, row * CELL_SIZE + this.offsetY);
+                    this.yHeaderCtx.stroke();
+                }
+            }
+        }
+        
+        // Initialize the visualizer when the page loads
+        window.addEventListener('DOMContentLoaded', () => {
+            new GridVisualizer();
+        });
+    </script>
+</body>
+</html>
