@@ -409,31 +409,52 @@
             }
             
             getExpandedWidth(lBlock) {
-                // Calculate the width of an L block when expanded
+                // Calculate the VISUAL width of an L block when expanded
+                // This must account for ALL nested expansions pushing content right
                 let maxX = 0;
+                let currentX = 0;
                 
-                // First pass: find the maximum x coordinate used by any child
-                for (const child of lBlock.children) {
+                // Process children in order to account for expansions
+                const children = [...lBlock.children].sort((a, b) => {
+                    const aX = a.x || a.x1 || 0;
+                    const bX = b.x || b.x1 || 0;
+                    return aX - bX;
+                });
+                
+                for (const child of children) {
                     if (child.type === 'A') {
-                        // For A blocks, we need space up to x2 + 1
                         maxX = Math.max(maxX, child.x2 + 1);
                     } else if (child.type === 'F') {
-                        // For F blocks, we need space up to x1 + 1
                         maxX = Math.max(maxX, child.x1 + 1);
                     } else if (child.type === 'L') {
-                        // For nested L blocks, account for their position and width
                         if (this.expandedLBlocks.has(child.id)) {
-                            // If expanded, include its full expanded width
+                            // Expanded nested L: adds its width BEFORE its position
                             const childWidth = this.getExpandedWidth(child);
-                            maxX = Math.max(maxX, child.x + childWidth);
+                            // Everything after this L gets pushed by childWidth
+                            maxX = Math.max(maxX, child.x + childWidth + 1);
+                            
+                            // Also check if any content after this L needs more space
+                            for (const sibling of lBlock.children) {
+                                const sibX = sibling.x || sibling.x1 || 0;
+                                if (sibX > child.x) {
+                                    // This sibling is pushed right by the expansion
+                                    if (sibling.type === 'A') {
+                                        maxX = Math.max(maxX, sibling.x2 + childWidth + 1);
+                                    } else if (sibling.type === 'F') {
+                                        maxX = Math.max(maxX, sibling.x1 + childWidth + 1);
+                                    } else if (sibling.type === 'L') {
+                                        const sibWidth = this.expandedLBlocks.has(sibling.id) ? 
+                                            this.getExpandedWidth(sibling) : 1;
+                                        maxX = Math.max(maxX, sibling.x + childWidth + sibWidth);
+                                    }
+                                }
+                            }
                         } else {
-                            // If collapsed, it takes 1 column
                             maxX = Math.max(maxX, child.x + 1);
                         }
                     }
                 }
                 
-                // Return the width needed, with minimum of 1
                 return Math.max(maxX, 1);
             }
             
@@ -525,21 +546,16 @@
                         const findLBlockAt = (blocks, targetCol, targetLayer, currentLayer = 0, parentOffset = 0) => {
                             for (const block of blocks) {
                                 if (block.type === 'L') {
-                                    const blockVisualX = currentLayer === 0 ? 
-                                        this.actualToVisualX(block.x) : 
-                                        parentOffset + block.x;
+                                    // Calculate visual position with unified logic
+                                    const blockVisualX = currentLayer === 0 ?
+                                        this.actualToVisualX(block.x) :
+                                        parentOffset + this.getVisualOffsetInParent(block, blocks);
                                     
                                     if (this.expandedLBlocks.has(block.id)) {
-                                        // L is expanded
-                                        const expansionWidth = this.getExpandedWidth(block);
-                                        // For top-level, expansion is BEFORE the L column
-                                        // For nested, expansion REPLACES the L column
-                                        const expansionStart = currentLayer === 0 ? 
-                                            blockVisualX - expansionWidth : 
-                                            blockVisualX;
-                                        const expansionEnd = currentLayer === 0 ?
-                                            blockVisualX - 1 :
-                                            blockVisualX + expansionWidth - 1;
+                                        const width = this.getExpandedWidth(block);
+                                        // Unified: expansion ALWAYS goes BEFORE the L column
+                                        const expansionStart = blockVisualX - width;
+                                        const expansionEnd = blockVisualX - 1;
                                         
                                         if (targetCol >= expansionStart && targetCol <= expansionEnd) {
                                             // Click is inside this L's expansion
@@ -562,9 +578,8 @@
                                                 );
                                                 if (result) return result;
                                             }
-                                        } else if (currentLayer === 0 && targetCol === blockVisualX && currentLayer === targetLayer) {
-                                            // Click on the L column itself at top level (when expanded, shows as gap)
-                                            // Don't toggle if already expanded
+                                        } else if (targetCol === blockVisualX && currentLayer === targetLayer) {
+                                            // Click on L column itself
                                         }
                                     } else {
                                         // L is collapsed
@@ -673,27 +688,28 @@
                 }
             }
             
-            renderBlocks(blocks, visualXOffset = -1, insideExpanded = false) {
+            renderBlocks(blocks, visualXOffset = -1, insideExpanded = false, depth = 0) {
                 // Render blocks with proper visual offset
                 for (const block of blocks) {
                     if (block.type === 'L') {
                         const isExpanded = this.expandedLBlocks.has(block.id);
                         
-                        if (isExpanded && !insideExpanded) {
-                            // L block is expanded at top level - render its children before the L column
-                            const lVisualX = this.actualToVisualX(block.x);
+                        if (isExpanded) {
                             const expansionWidth = this.getExpandedWidth(block);
-                            const expansionStartX = lVisualX - expansionWidth; // Expansion starts before the L column
-                            this.renderBlocks(block.children, expansionStartX, true);
-                        } else if (isExpanded && insideExpanded) {
-                            // Nested L block expanded inside another L block
-                            // The visualXOffset is where the parent's expansion starts
-                            // We need to position this L's expansion at its local position within the parent
-                            const lLocalVisualX = visualXOffset + block.x;
-                            const expansionWidth = this.getExpandedWidth(block);
-                            // The expansion goes BEFORE the L column, replacing the L's position
-                            const expansionStartX = lLocalVisualX;
-                            this.renderBlocks(block.children, expansionStartX, true);
+                            
+                            let lVisualX, expansionStartX;
+                            
+                            if (!insideExpanded) {
+                                // Top-level: expansion goes BEFORE the L column
+                                lVisualX = this.actualToVisualX(block.x);
+                                expansionStartX = lVisualX - expansionWidth;
+                            } else {
+                                // Nested: expansion REPLACES the L column
+                                lVisualX = visualXOffset + this.getVisualOffsetInParent(block, blocks);
+                                expansionStartX = lVisualX;  // Expansion AT the L position
+                            }
+                            
+                            this.renderBlocks(block.children, expansionStartX, true, depth + 1);
                         } else {
                             // Render collapsed L block projection
                             const x = insideExpanded ? 
@@ -815,23 +831,28 @@
                 // Build complete expansion map with proper depth tracking
                 const expansionsByDepth = new Map();
                 
-                const mapExpansions = (blocks, depth, parentStart) => {
+                const mapExpansions = (blocks, depth, parentExpansionStart) => {
                     for (const block of blocks) {
                         if (block.type === 'L' && this.expandedLBlocks.has(block.id)) {
-                            const blockVisualX = depth === 0 ? 
-                                this.actualToVisualX(block.x) : 
-                                parentStart + block.x;
-                            
                             const width = this.getExpandedWidth(block);
                             
-                            // For top-level L blocks, expansion goes BEFORE the L column
-                            // For nested L blocks, expansion REPLACES the L column position
-                            const expansionStart = depth === 0 ? 
-                                blockVisualX - width : 
-                                blockVisualX;
-                            const expansionEnd = depth === 0 ?
-                                blockVisualX - 1 :
-                                blockVisualX + width - 1;
+                            let blockVisualX, expansionStart, expansionEnd, lColumn;
+                            
+                            if (depth === 0) {
+                                // Top-level: expansion goes BEFORE the L column
+                                blockVisualX = this.actualToVisualX(block.x);
+                                expansionStart = blockVisualX - width;
+                                expansionEnd = blockVisualX - 1;
+                                lColumn = blockVisualX;
+                            } else {
+                                // Nested: expansion REPLACES the L column
+                                // Calculate the L's position within parent
+                                blockVisualX = parentExpansionStart + this.getVisualOffsetInParent(block, blocks);
+                                // For nested L, expansion starts AT the L position
+                                expansionStart = blockVisualX;
+                                expansionEnd = blockVisualX + width - 1;
+                                lColumn = -1; // No separate L column for nested (it's replaced by expansion)
+                            }
                             
                             if (!expansionsByDepth.has(depth)) {
                                 expansionsByDepth.set(depth, []);
@@ -841,14 +862,43 @@
                                 block: block,
                                 start: expansionStart,
                                 end: expansionEnd,
-                                lColumn: depth === 0 ? blockVisualX : -1  // Only top-level has separate L column
+                                lColumn: lColumn
                             });
                             
-                            // Recurse for children - they start at the expansion start
+                            // Recurse for children - they are positioned relative to THIS block's expansion start
                             mapExpansions(block.children, depth + 1, expansionStart);
                         }
                     }
                 };
+                
+                // Helper to calculate visual offset accounting for sibling expansions
+                this.getVisualOffsetInParent = (targetBlock, siblings) => {
+                    let offset = targetBlock.x;
+                    
+                    // Add space for any expanded L blocks before this one
+                    for (const sibling of siblings) {
+                        if (sibling.type === 'L' && sibling.x < targetBlock.x && this.expandedLBlocks.has(sibling.id)) {
+                            offset += this.getExpandedWidth(sibling);
+                        }
+                    }
+                    
+                    return offset;
+                };
+                
+                // Also add top-level expansions to the map for consistent handling
+                expansionsByDepth.set(-1, []);
+                for (const block of this.rectangles) {
+                    if (block.type === 'L' && this.expandedLBlocks.has(block.id)) {
+                        const width = this.getExpandedWidth(block);
+                        const blockVisualX = this.actualToVisualX(block.x);
+                        expansionsByDepth.get(-1).push({
+                            block: block,
+                            start: blockVisualX - width,
+                            end: blockVisualX - 1,
+                            lColumn: blockVisualX
+                        });
+                    }
+                }
                 
                 mapExpansions(this.rectangles, 0, 0);
                 
@@ -885,67 +935,88 @@
                         ctx.lineTo(x, HEADER_HEIGHT);
                         ctx.stroke();
                         
-                        let content = null;
+                        let content = { type: 'empty' };
                         
-                        if (layer === 0) {
-                            // Base layer - only show top-level content
-                            const colInfo = this.getColumnInfo(col);
-                            
-                            if (colInfo.isInsideExpansion) {
-                                // Inside an expansion - leave empty
-                                content = { type: 'empty' };
-                            } else if (colInfo.lBlock) {
-                                if (this.expandedLBlocks.has(colInfo.lBlock.id)) {
-                                    content = { type: 'gap' };
-                                } else {
+                        // Check for expansions at THIS layer's depth
+                        const currentLayerExpansions = layer === 0 ? 
+                            (expansionsByDepth.get(-1) || []) : 
+                            (expansionsByDepth.get(layer - 1) || []);
+                        
+                        let inCurrentLayerExpansion = false;
+                        
+                        // First check if we're in an expansion at this layer
+                        for (const exp of currentLayerExpansions) {
+                            if (col >= exp.start && col <= exp.end) {
+                                // In an expansion at this layer - show the local coordinate
+                                const localX = col - exp.start;
+                                content = { type: 'number', value: localX };
+                                inCurrentLayerExpansion = true;
+                                break;
+                            } else if (col === exp.lColumn && exp.lColumn >= 0) {
+                                content = { type: 'gap' };
+                                inCurrentLayerExpansion = true;
+                                break;
+                            }
+                        }
+                        
+                        // If not in an expansion at this layer, check if we need to show content
+                        if (!inCurrentLayerExpansion) {
+                            if (layer === 0) {
+                                // Base layer: show actual coordinates or collapsed L blocks
+                                const colInfo = this.getColumnInfo(col);
+                                if (colInfo.isInsideExpansion) {
+                                    // Inside an expansion - show local coordinate
+                                    content = { type: 'number', value: colInfo.localX };
+                                } else if (colInfo.lBlock && !this.expandedLBlocks.has(colInfo.lBlock.id)) {
                                     content = { type: 'collapsed-L', block: colInfo.lBlock };
+                                } else {
+                                    content = { type: 'number', value: colInfo.actualX };
                                 }
                             } else {
-                                content = { type: 'number', value: colInfo.actualX };
-                            }
-                        } else {
-                            // Expansion layers
-                            const expansions = expansionsByDepth.get(layer - 1);
-                            if (expansions) {
-                                for (const exp of expansions) {
-                                    if (col >= exp.start && col <= exp.end) {
-                                        const localX = col - exp.start;
+                                // For layer > 0, check if we're inside a parent expansion
+                                // and show that expansion's content
+                                const parentLayerExpansions = expansionsByDepth.get(layer - 2) || [];
+                                
+                                // For layer 1, also check top-level expansions
+                                const expansionsToCheck = layer === 1 ? 
+                                    expansionsByDepth.get(-1) || [] :
+                                    parentLayerExpansions;
+                                
+                                for (const parentExp of expansionsToCheck) {
+                                    if (col >= parentExp.start && col <= parentExp.end) {
+                                        const localX = col - parentExp.start;
                                         
-                                        // Check if there's an expanded nested L that takes over from here
-                                        let isInNestedExpansion = false;
-                                        for (const child of exp.block.children) {
-                                            if (child.type === 'L' && this.expandedLBlocks.has(child.id)) {
-                                                const nestedWidth = this.getExpandedWidth(child);
-                                                if (localX >= child.x && localX < child.x + nestedWidth) {
-                                                    isInNestedExpansion = true;
+                                        // For nested L blocks, check their actual position
+                                        // accounting for the fact that they expand AT their position, not before
+                                        let foundContent = false;
+                                        for (const child of parentExp.block.children) {
+                                            if (child.type === 'L') {
+                                                const childPos = this.getVisualOffsetInParent(child, parentExp.block.children);
+                                                
+                                                if (this.expandedLBlocks.has(child.id)) {
+                                                    // Expanded nested L - its expansion is AT childPos
+                                                    const childWidth = this.getExpandedWidth(child);
+                                                    if (localX >= childPos && localX < childPos + childWidth) {
+                                                        // We're in the nested expansion area - leave empty
+                                                        content = { type: 'empty' };
+                                                        foundContent = true;
+                                                        break;
+                                                    }
+                                                } else if (localX === childPos) {
+                                                    // Collapsed L at this position
+                                                    content = { type: 'collapsed-L', block: child };
+                                                    foundContent = true;
                                                     break;
                                                 }
                                             }
                                         }
                                         
-                                        if (isInNestedExpansion) {
-                                            content = { type: 'empty' };  // Nested expansion handles this area
-                                        } else {
-                                            // Check for collapsed nested L at this exact position
-                                            const nestedL = exp.block.children.find(c => 
-                                                c.type === 'L' && c.x === localX && !this.expandedLBlocks.has(c.id));
-                                            
-                                            if (nestedL) {
-                                                content = { type: 'collapsed-L', block: nestedL };
-                                            } else {
-                                                content = { type: 'number', value: localX };
-                                            }
+                                        if (!foundContent) {
+                                            content = { type: 'number', value: localX };
                                         }
-                                        break;
-                                    } else if (exp.lColumn !== -1 && col === exp.lColumn) {
-                                        content = { type: 'empty' };
                                         break;
                                     }
                                 }
-                            }
-                            
-                            if (!content) {
-                                content = { type: 'empty' };
                             }
                         }
                         
