@@ -5,12 +5,17 @@ use std::{
 
 use wasmparser::{Operator as Op, ValType};
 
-use crate::loader::{
-    blockless_dag::{BreakTarget, NodeInput, Operation, TargetType},
-    dag::ValueOrigin,
-    liveness_dag::LivenessDag,
-    rw_flattening::Settings,
-    word_count_type,
+use crate::{
+    loader::{
+        blockless_dag::{
+            BreakTarget, GenericBlocklessDag, GenericNode, NodeInput, Operation, TargetType,
+        },
+        dag::ValueOrigin,
+        liveness_dag::{self, LivenessDag},
+        rw_flattening::Settings,
+        word_count_type,
+    },
+    utils::rev_vec_filler::RevVecFiller,
 };
 
 pub enum Error {
@@ -19,13 +24,12 @@ pub enum Error {
 }
 
 /// One possible register allocation for a given DAG.
+#[derive(Debug)]
 pub struct Allocation {
     /// The registers assigned to the nodes outputs.
     nodes_outputs: BTreeMap<ValueOrigin, Range<u32>>,
-    /// The registers assigned to the labels. On a break, there is a chance that
-    /// the register were already written with the correct value. If not, it must
-    /// be written on demand, just before the break.
-    pub labels: HashMap<u32, Vec<Range<u32>>>,
+    /// The map of label id to its node index, for quick lookup on a break.
+    pub labels: HashMap<u32, usize>,
 }
 
 impl Allocation {
@@ -50,6 +54,10 @@ impl Allocation {
         self.nodes_outputs.iter()
     }
 }
+
+pub type AllocatedDag<'a> = GenericBlocklessDag<'a, Allocation>;
+
+pub type Node<'a> = GenericNode<'a, Allocation>;
 
 /// Tracks what registers are currently occupied by what values.
 struct OccupationTracker {
@@ -92,6 +100,11 @@ impl OccupationTracker {
     fn allocation_end(&self) -> u32 {
         todo!()
     }
+
+    /// Generates the final allocations map.
+    fn into_allocations(self) -> BTreeMap<ValueOrigin, Range<u32>> {
+        todo!()
+    }
 }
 
 struct OptimisticAllocator {
@@ -119,7 +132,7 @@ impl OptimisticAllocator {
 
 /// Allocates the inputs for a break node.
 fn handle_break<'a, S: Settings<'a>>(
-    dag: &LivenessDag<'_>,
+    nodes: &[liveness_dag::Node<'a>],
     oa: &mut VecDeque<OptimisticAllocator>,
     inputs: &[NodeInput],
     break_target: &BreakTarget,
@@ -135,7 +148,7 @@ fn handle_break<'a, S: Settings<'a>>(
             let mut next_reg = 0u32;
             for input in inputs {
                 let origin = unwrap_ref(input, "break inputs must be references");
-                let num_words = word_count::<S>(&dag, *origin);
+                let num_words = word_count::<S>(&nodes, *origin);
                 if oa[0]
                     .occupation_tracker
                     .try_allocate_with_hint(*origin, next_reg..next_reg + num_words)
@@ -193,81 +206,101 @@ fn handle_break<'a, S: Settings<'a>>(
 }
 
 fn recursive_block_allocation<'a, S: Settings<'a>>(
-    dag: &LivenessDag<'_>,
+    dag: LivenessDag<'a>,
     oa: &mut VecDeque<OptimisticAllocator>,
-) -> (Allocation, usize) {
+) -> (AllocatedDag<'a>, usize) {
     let mut number_of_saved_copies = 0;
 
-    for (index, node) in dag.nodes.iter().enumerate().rev() {
-        match &node.operation {
+    let LivenessDag {
+        mut nodes,
+        block_data: liveness,
+    } = dag;
+
+    let mut new_nodes = RevVecFiller::new(nodes.len());
+
+    for index in (0..nodes.len()).rev() {
+        let node = nodes.pop().unwrap();
+
+        let operation = match node.operation {
             Operation::Inputs => {
                 assert_eq!(index, 0);
-                // Already handled
+                // TODO: handle the inputs that might not have been allocated yet.
+                // (a pathological case for loop inputs, but still possible)
+                todo!();
+
+                Operation::Inputs
             }
-            Operation::WASMOp(operator) => match operator {
-                Op::Call { .. } | Op::CallIndirect { .. } => {
-                    // TODO: implement a simple heuristic to try to avoid having to
-                    // copy the function outputs to the slots allocated for them by
-                    // the nodes who uses them as inputs.
-                    //
-                    // The idea goes like this: we first check if an output slot
-                    // was specifically requested by the user node with a hint.
-                    // If it was, then we most likely have to do copy it anyway, so
-                    // we stop. If it wasn't, we check if between this call and the last
-                    // user of the output there are no other function calls (and we
-                    // must check inside the loop blocks as well). If there are not,
-                    // then we can set the output slots to the ones that naturally
-                    // follow from the function call, avoiding a register copy. In this
-                    // case, it is also possible that we can shift the call frame
-                    // itself some slots up, as the removal of the original output slots
-                    // might have freed up some space.
-                    //
-                    // The search can follow uncoditional breaks, skipping code that
-                    // will not be executed in this path.
-                    //
-                    // Since the search only happens in between function calls, this
-                    // heuristic is still linear in the number of nodes.
-                    //
-                    // It might leave holes in the register allocation, but the
-                    // optimization problem is NP-hard, so we must stop somewhere.
+            Operation::WASMOp(operator) => {
+                match &operator {
+                    Op::Call { .. } | Op::CallIndirect { .. } => {
+                        // TODO: implement a simple heuristic to try to avoid having to
+                        // copy the function outputs to the slots allocated for them by
+                        // the nodes who uses them as inputs.
+                        //
+                        // The idea goes like this: we first check if an output slot
+                        // was specifically requested by the user node with a hint.
+                        // If it was, then we most likely have to do copy it anyway, so
+                        // we stop. If it wasn't, we check if between this call and the last
+                        // user of the output there are no other function calls (and we
+                        // must check inside the loop blocks as well). If there are not,
+                        // then we can set the output slots to the ones that naturally
+                        // follow from the function call, avoiding a register copy. In this
+                        // case, it is also possible that we can shift the call frame
+                        // itself some slots up, as the removal of the original output slots
+                        // might have freed up some space.
+                        //
+                        // The search can follow uncoditional breaks, skipping code that
+                        // will not be executed in this path.
+                        //
+                        // Since the search only happens in between function calls, this
+                        // heuristic is still linear in the number of nodes.
+                        //
+                        // It might leave holes in the register allocation, but the
+                        // optimization problem is NP-hard, so we must stop somewhere.
 
-                    // On a given node index, the one after the last used slot is the
-                    // start of the called function frame. From there, two slots are
-                    // reserved for return address and frame pointer, and then come
-                    // the arguments.
-                    let arg_start = oa[0].occupation_tracker.allocation_end() + 2;
+                        // On a given node index, the one after the last used slot is the
+                        // start of the called function frame. From there, two slots are
+                        // reserved for return address and frame pointer, and then come
+                        // the arguments.
+                        let arg_start = oa[0].occupation_tracker.allocation_end() + 2;
 
-                    for input in &node.inputs {
-                        let origin = unwrap_ref(input, "function call inputs must be references");
-                        let num_words = word_count::<S>(&dag, *origin);
-                        if oa[0]
-                            .occupation_tracker
-                            .try_allocate_with_hint(*origin, arg_start..arg_start + num_words)
-                        {
-                            number_of_saved_copies += num_words as usize;
-                        }
-                    }
-                }
-                _ => {
-                    // This is the general case: for each input, allocate it.
-                    for input in &node.inputs {
-                        if let NodeInput::Reference(origin) = input {
-                            oa[0]
+                        for input in &node.inputs {
+                            let origin =
+                                unwrap_ref(input, "function call inputs must be references");
+                            let num_words = word_count::<S>(&nodes, *origin);
+                            if oa[0]
                                 .occupation_tracker
-                                .allocate(*origin, word_count::<S>(&dag, *origin));
+                                .try_allocate_with_hint(*origin, arg_start..arg_start + num_words)
+                            {
+                                number_of_saved_copies += num_words as usize;
+                            }
                         }
                     }
+                    _ => {
+                        // This is the general case: for each input, allocate it.
+                        for input in &node.inputs {
+                            if let NodeInput::Reference(origin) = input {
+                                oa[0]
+                                    .occupation_tracker
+                                    .allocate(*origin, word_count::<S>(&nodes, *origin));
+                            }
+                        }
 
-                    // Also allocate any remaining output that was not allocated yet.
-                    oa[0].allocate_outputs::<S>(index, &node.output_types);
-                }
-            },
+                        // Also allocate any remaining output that was not allocated yet.
+                        oa[0].allocate_outputs::<S>(index, &node.output_types);
+                    }
+                };
+
+                Operation::WASMOp(operator)
+            }
             Operation::Label { id } => {
                 // Record the current allocation for this label
-                oa[0].labels.insert(*id, index);
+                oa[0].labels.insert(id, index);
 
                 // Allocate any remaining output that was not allocated yet.
                 oa[0].allocate_outputs::<S>(index, &node.output_types);
+
+                Operation::Label { id }
             }
             Operation::Loop {
                 sub_dag,
@@ -301,14 +334,24 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 // TODO: somehow save the loop allocation to the loop node...
                 todo!()
             }
-            Operation::Br(break_target)
-            | Operation::BrIf(break_target)
-            | Operation::BrIfZero(break_target) => {
-                number_of_saved_copies += handle_break::<S>(dag, oa, &node.inputs, break_target);
+            Operation::Br(break_target) => {
+                number_of_saved_copies +=
+                    handle_break::<S>(&nodes, oa, &node.inputs, &break_target);
+                Operation::Br(break_target)
+            }
+            Operation::BrIf(break_target) => {
+                number_of_saved_copies +=
+                    handle_break::<S>(&nodes, oa, &node.inputs, &break_target);
+                Operation::BrIf(break_target)
+            }
+            Operation::BrIfZero(break_target) => {
+                number_of_saved_copies +=
+                    handle_break::<S>(&nodes, oa, &node.inputs, &break_target);
+                Operation::BrIfZero(break_target)
             }
             Operation::BrTable { targets } => {
                 let mut inputs = Vec::new();
-                for target in targets {
+                for target in &targets {
                     inputs.clear();
                     inputs.extend(
                         target
@@ -316,13 +359,42 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                             .iter()
                             .map(|&idx| node.inputs[idx as usize].clone()),
                     );
-                    number_of_saved_copies += handle_break::<S>(dag, oa, &inputs, &target.target);
+                    number_of_saved_copies +=
+                        handle_break::<S>(&nodes, oa, &inputs, &target.target);
                 }
+                Operation::BrTable { targets }
             }
-        }
+        };
+
+        let new_node = Node {
+            operation,
+            inputs: node.inputs,
+            output_types: node.output_types,
+        };
+
+        new_nodes.try_push_front(new_node).unwrap();
     }
 
-    todo!()
+    // Generate the final allocation for this block
+    let OptimisticAllocator {
+        occupation_tracker,
+        labels,
+    } = oa.pop_front().unwrap();
+
+    let allocation = Allocation {
+        nodes_outputs: occupation_tracker.into_allocations(),
+        labels,
+    };
+
+    // Collect the new nodes
+    let nodes = new_nodes.try_into_vec().unwrap();
+    (
+        AllocatedDag {
+            nodes,
+            block_data: allocation,
+        },
+        number_of_saved_copies,
+    )
 }
 
 /// Allocates registers for a given function DAG. It is not optimal, but it tries
@@ -331,7 +403,9 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
 /// Does the allocation bottom up, following the execution paths independently,
 /// proposing register assignment for future nodes (so to avoid copies), but
 /// leaving a final assignment for the traversed nodes.
-pub fn optimistic_allocation<'a, S: Settings<'a>>(dag: &LivenessDag<'_>) -> (Allocation, usize) {
+pub fn optimistic_allocation<'a, S: Settings<'a>>(
+    dag: LivenessDag<'a>,
+) -> (AllocatedDag<'a>, usize) {
     let mut oa = OptimisticAllocator {
         occupation_tracker: OccupationTracker::new(),
         labels: HashMap::new(),
@@ -368,12 +442,12 @@ fn unwrap_ref<'a>(input: &'a NodeInput, msg: &'static str) -> &'a ValueOrigin {
 }
 
 /// Gets the type of a value origin
-fn type_of<'a>(dag: &LivenessDag<'_>, origin: ValueOrigin) -> ValType {
-    let node = &dag.nodes[origin.node];
+fn type_of<'a>(nodes: &[liveness_dag::Node<'a>], origin: ValueOrigin) -> ValType {
+    let node = &nodes[origin.node];
     node.output_types[origin.output_idx as usize]
 }
 
 /// Gets the word count of a value origin
-fn word_count<'a, S: Settings<'a>>(dag: &LivenessDag<'_>, origin: ValueOrigin) -> u32 {
-    word_count_type::<S>(type_of(dag, origin))
+fn word_count<'a, S: Settings<'a>>(nodes: &[liveness_dag::Node<'a>], origin: ValueOrigin) -> u32 {
+    word_count_type::<S>(type_of(nodes, origin))
 }
