@@ -24,7 +24,7 @@ pub struct Liveness {
     /// eliding uneccessary copies.
     ///
     /// On the toplevel block (which is not a loop), this is always empty.
-    pub redirected_inputs: Vec<u32>,
+    redirected_inputs: Vec<u32>,
 }
 
 impl Liveness {
@@ -37,6 +37,10 @@ impl Liveness {
     /// based on what path is being taken.
     pub fn query_liveness(&self, _curr_node_idx: usize, node_idx: usize, output_idx: u32) -> usize {
         self.last_usage[&(node_idx, output_idx)]
+    }
+
+    pub fn query_if_input_is_redirected(&self, input_idx: u32) -> bool {
+        self.redirected_inputs.binary_search(&input_idx).is_ok()
     }
 }
 

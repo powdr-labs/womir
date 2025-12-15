@@ -224,9 +224,10 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
         let operation = match node.operation {
             Operation::Inputs => {
                 assert_eq!(index, 0);
-                // TODO: handle the inputs that might not have been allocated yet.
-                // (a pathological case for loop inputs, but still possible)
-                todo!();
+
+                // Allocate whatever output was not allocated yet.
+                // (can happen for loop inputs that are not used inside the body)
+                oa[0].allocate_outputs::<S>(index, &node.output_types);
 
                 Operation::Inputs
             }
@@ -309,7 +310,7 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 // We need a new allocation tracker for the loop body.
                 // It is derived from the current one, completely blocking the
                 // slots that are occupied for the duration of the loop.
-                let occupation_tracker = oa[0].occupation_tracker.make_sub_tracker(index);
+                let mut occupation_tracker = oa[0].occupation_tracker.make_sub_tracker(index);
 
                 // There are some heuristics we can do here to minimize copies.
 
@@ -318,7 +319,33 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 // input node), or if the loop body does not change the input,
                 // just forwards it unchanged to the next iteration, we can fix
                 // the allocation of the input to the current one, saving copies.
-                todo!();
+                let loop_liveness = &sub_dag.block_data;
+                for (input_idx, input) in node.inputs.iter().enumerate() {
+                    let origin = unwrap_ref(input, "loop inputs must be references");
+
+                    let Some(allocation) = oa[0].occupation_tracker.get_allocation(*origin) else {
+                        // If there is no allocation for the input, we will set it after we
+                        // process the loop, so this is the standard optimistic allocation case.
+                        continue;
+                    };
+
+                    let last_usage = liveness.query_liveness(index, origin.node, origin.output_idx);
+                    if (last_usage <= index && {
+                        assert_eq!(
+                            last_usage, index,
+                            "liveness bug: last usage is before a node that uses the value"
+                        );
+                        true
+                    }) || loop_liveness.query_if_input_is_redirected(input_idx as u32)
+                    {
+                        // We can fix the allocation of this input to the current one,
+                        // because either we don't care if it is rewritten by the loop,
+                        // or we have the guarantee that it won't be changed.
+                        occupation_tracker
+                            .set_allocation(*origin, allocation)
+                            .unwrap();
+                    }
+                }
 
                 let loop_oa = OptimisticAllocator {
                     occupation_tracker,
@@ -331,8 +358,16 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
 
                 number_of_saved_copies += loop_saved_copies;
 
-                // TODO: somehow save the loop allocation to the loop node...
-                todo!()
+                // We have to set the allocations for the inputs and outputs of the loop node.
+
+                // TODO: Maybe "project" the allocations from the loop body to the this block.
+                // This would be useful to the function output heuristic mentioned above.
+                todo!();
+
+                Operation::Loop {
+                    sub_dag: loop_allocation,
+                    break_targets,
+                }
             }
             Operation::Br(break_target) => {
                 number_of_saved_copies +=
