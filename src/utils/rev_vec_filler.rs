@@ -24,10 +24,14 @@ impl<T> RevVecFiller<T> {
 
         let spare = self.vec.spare_capacity_mut();
 
-        // Note to future editors: ensure there is no panic possible
-        // inside this block.
+        // Note to future editors: this block is critical.
+        // Soundness: `remaining_space` must only be updated *after* the slot is written.
+        // If a panic occurs after the write but before updating `remaining_space`,
+        // the written element may be leaked (but this remains memory-safe).
         {
-            unsafe { spare.get_unchecked_mut(idx).write(value) };
+            // SAFETY: while filling, `vec.len() == 0`, so `spare.len() == vec.capacity()`.
+            //  Also `idx < size <= capacity`, so `idx < spare.len()`.
+            unsafe { spare.get_unchecked_mut(idx) }.write(value);
             self.remaining_space = idx;
         }
         Ok(())
@@ -40,12 +44,13 @@ impl<T> RevVecFiller<T> {
 
         // We are taking ownership of self.vec, so we no longer want the
         // Drop impl to run.
-        let me = ManuallyDrop::new(self);
-        Ok(unsafe {
-            let mut vec = std::ptr::read(&me.vec);
-            vec.set_len(me.size);
-            vec
-        })
+        let mut me = ManuallyDrop::new(self);
+        let mut vec = std::mem::take(&mut me.vec);
+
+        // SAFETY: at this point, all elements have been initialized.
+        unsafe { vec.set_len(me.size) };
+
+        Ok(vec)
     }
 }
 
