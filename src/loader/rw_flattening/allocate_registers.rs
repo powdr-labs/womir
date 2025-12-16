@@ -87,7 +87,9 @@ impl OccupationTracker {
     }
 
     /// Allocates a value wherever there is space, if not already allocated.
-    fn allocate(&mut self, origin: ValueOrigin, size: u32) {
+    ///
+    /// Returns the range allocated for the value.
+    fn try_allocate(&mut self, origin: ValueOrigin, size: u32) -> Range<u32> {
         todo!()
     }
 
@@ -96,8 +98,21 @@ impl OccupationTracker {
         todo!()
     }
 
-    /// The first free register after the last allocated one.
-    fn allocation_end(&self) -> u32 {
+    /// Returns the start of a function call frame.
+    ///
+    /// I.e., the first register after the last allocated one at this point,
+    /// so everything from there on is free for the function call.
+    fn allocate_fn_call(&self, call_index: usize) -> u32 {
+        todo!()
+    }
+
+    /// Blocks the registers occupied in the sub-tracker from being used
+    /// in this tracker.
+    fn project_from_sub_tracker(
+        &mut self,
+        sub_block_index: usize,
+        sub_tracker: &OccupationTracker,
+    ) {
         todo!()
     }
 
@@ -113,6 +128,20 @@ struct OptimisticAllocator {
 }
 
 impl OptimisticAllocator {
+    /// Allocates the inputs of a node that have not been allocated yet.
+    fn allocate_inputs<'a, S: Settings<'a>>(
+        &mut self,
+        inputs: &[NodeInput],
+        nodes: &[liveness_dag::Node<'a>],
+    ) {
+        for input in inputs {
+            if let NodeInput::Reference(origin) = input {
+                self.occupation_tracker
+                    .try_allocate(*origin, word_count::<S>(&nodes, *origin));
+            }
+        }
+    }
+
     /// Allocates the outputs of a node that have not been allocated yet.
     fn allocate_outputs<'a, S: Settings<'a>>(
         &mut self,
@@ -125,7 +154,7 @@ impl OptimisticAllocator {
                 output_idx: output_idx as u32,
             };
             let num_words = word_count_type::<S>(*output_type);
-            self.occupation_tracker.allocate(origin, num_words);
+            self.occupation_tracker.try_allocate(origin, num_words);
         }
     }
 }
@@ -208,7 +237,7 @@ fn handle_break<'a, S: Settings<'a>>(
 fn recursive_block_allocation<'a, S: Settings<'a>>(
     dag: LivenessDag<'a>,
     oa: &mut VecDeque<OptimisticAllocator>,
-) -> (AllocatedDag<'a>, usize) {
+) -> (Vec<Node<'a>>, usize) {
     let mut number_of_saved_copies = 0;
 
     let LivenessDag {
@@ -263,7 +292,7 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                         // start of the called function frame. From there, two slots are
                         // reserved for return address and frame pointer, and then come
                         // the arguments.
-                        let arg_start = oa[0].occupation_tracker.allocation_end() + 2;
+                        let arg_start = oa[0].occupation_tracker.allocate_fn_call(index) + 2;
 
                         for input in &node.inputs {
                             let origin =
@@ -278,16 +307,8 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                         }
                     }
                     _ => {
-                        // This is the general case: for each input, allocate it.
-                        for input in &node.inputs {
-                            if let NodeInput::Reference(origin) = input {
-                                oa[0]
-                                    .occupation_tracker
-                                    .allocate(*origin, word_count::<S>(&nodes, *origin));
-                            }
-                        }
-
-                        // Also allocate any remaining output that was not allocated yet.
+                        // This is the general case. Allocates inputs and outputs that have not been allocated yet.
+                        oa[0].allocate_inputs::<S>(&node.inputs, &nodes);
                         oa[0].allocate_outputs::<S>(index, &node.output_types);
                     }
                 };
@@ -307,28 +328,24 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 sub_dag,
                 break_targets,
             } => {
+                // As with the general case, we allocate the inputs of the loop node.
+                // It has no outputs that would require allocation.
+                oa[0].allocate_inputs::<S>(&node.inputs, &nodes);
+
                 // We need a new allocation tracker for the loop body.
                 // It is derived from the current one, completely blocking the
                 // slots that are occupied for the duration of the loop.
                 let mut occupation_tracker = oa[0].occupation_tracker.make_sub_tracker(index);
 
-                // There are some heuristics we can do here to minimize copies.
-
-                // For each loop input, if it is already allocated, and this is the
-                // last usage of the value (can happen if the value comes from the
-                // input node), or if the loop body does not change the input,
-                // just forwards it unchanged to the next iteration, we can fix
-                // the allocation of the input to the current one, saving copies.
+                // There is an heuristic we can do here to minimize copies: for each loop input, if this
+                // is the last usage of the value, or if the loop body does not change the input and just
+                // forwards it unchanged to the next iteration, we can fix the allocation of the input to
+                // the current one, saving a copy.
                 let loop_liveness = &sub_dag.block_data;
                 for (input_idx, input) in node.inputs.iter().enumerate() {
                     let origin = unwrap_ref(input, "loop inputs must be references");
 
-                    let Some(allocation) = oa[0].occupation_tracker.get_allocation(*origin) else {
-                        // If there is no allocation for the input, we will set it after we
-                        // process the loop, so this is the standard optimistic allocation case.
-                        continue;
-                    };
-
+                    // Check if we can fix this allocation for the loop input.
                     let last_usage = liveness.query_liveness(index, origin.node, origin.output_idx);
                     if (last_usage <= index && {
                         assert_eq!(
@@ -341,8 +358,16 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                         // We can fix the allocation of this input to the current one,
                         // because either we don't care if it is rewritten by the loop,
                         // or we have the guarantee that it won't be changed.
+                        let allocation = oa[0].occupation_tracker.get_allocation(*origin).unwrap();
+                        number_of_saved_copies += allocation.len();
                         occupation_tracker
-                            .set_allocation(*origin, allocation)
+                            .set_allocation(
+                                ValueOrigin {
+                                    node: 0,
+                                    output_idx: input_idx as u32,
+                                },
+                                allocation,
+                            )
                             .unwrap();
                     }
                 }
@@ -353,19 +378,60 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 };
                 oa.push_front(loop_oa);
 
-                let (loop_allocation, loop_saved_copies) =
-                    recursive_block_allocation::<S>(sub_dag, oa);
+                let (loop_nodes, loop_saved_copies) = recursive_block_allocation::<S>(sub_dag, oa);
+
+                // Pop the loop allocation tracker.
+                let OptimisticAllocator {
+                    occupation_tracker,
+                    labels,
+                } = oa.pop_front().unwrap();
+
+                // Project the allocations back to the outer level. This will prevent
+                // the outer level from placing allocations that should survive across
+                // this loop block on registers that could be overwritten here.
+                oa[0]
+                    .occupation_tracker
+                    .project_from_sub_tracker(index, &occupation_tracker);
+
+                let allocation = Allocation {
+                    nodes_outputs: occupation_tracker.into_allocations(),
+                    labels,
+                };
+
+                // Collect the new nodes
+                let loop_dag = AllocatedDag {
+                    nodes: loop_nodes,
+                    block_data: allocation,
+                };
 
                 number_of_saved_copies += loop_saved_copies;
 
-                // We have to set the allocations for the inputs and outputs of the loop node.
+                // We have to set the allocations for the inputs of the loop node, mirroring
+                // the allocations set in the loop body.
+                for (input_idx, input) in node.inputs.iter().enumerate() {
+                    // Get the allocation assigned to the loop input inside the body.
+                    let preferred_alloc = loop_dag
+                        .block_data
+                        .nodes_outputs
+                        .get(&ValueOrigin {
+                            node: 0,
+                            output_idx: input_idx as u32,
+                        })
+                        .unwrap()
+                        .clone();
+                    let alloc_len = preferred_alloc.len();
 
-                // TODO: Maybe "project" the allocations from the loop body to the this block.
-                // This would be useful to the function output heuristic mentioned above.
-                todo!();
+                    let origin = unwrap_ref(input, "loop inputs must be references");
+                    if oa[0]
+                        .occupation_tracker
+                        .try_allocate_with_hint(*origin, preferred_alloc)
+                    {
+                        number_of_saved_copies += alloc_len;
+                    }
+                }
 
                 Operation::Loop {
-                    sub_dag: loop_allocation,
+                    sub_dag: loop_dag,
                     break_targets,
                 }
             }
@@ -410,26 +476,7 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
         new_nodes.try_push_front(new_node).unwrap();
     }
 
-    // Generate the final allocation for this block
-    let OptimisticAllocator {
-        occupation_tracker,
-        labels,
-    } = oa.pop_front().unwrap();
-
-    let allocation = Allocation {
-        nodes_outputs: occupation_tracker.into_allocations(),
-        labels,
-    };
-
-    // Collect the new nodes
-    let nodes = new_nodes.try_into_vec().unwrap();
-    (
-        AllocatedDag {
-            nodes,
-            block_data: allocation,
-        },
-        number_of_saved_copies,
-    )
+    (new_nodes.try_into_vec().unwrap(), number_of_saved_copies)
 }
 
 /// Allocates registers for a given function DAG. It is not optimal, but it tries
@@ -465,7 +512,27 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
     }
 
     // Do the allocation for the rest of the nodes, bottom up.
-    recursive_block_allocation::<S>(dag, &mut VecDeque::from([oa]))
+    let mut oa_stack = VecDeque::from([oa]);
+    let (nodes, number_of_saved_copies) = recursive_block_allocation::<S>(dag, &mut oa_stack);
+
+    // Generate the final allocation for this block
+    let OptimisticAllocator {
+        occupation_tracker,
+        labels,
+    } = oa_stack.pop_front().unwrap();
+
+    let allocation = Allocation {
+        nodes_outputs: occupation_tracker.into_allocations(),
+        labels,
+    };
+
+    (
+        AllocatedDag {
+            nodes,
+            block_data: allocation,
+        },
+        number_of_saved_copies,
+    )
 }
 
 /// Helper to extract ValueOrigin from NodeInput
