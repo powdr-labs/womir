@@ -189,8 +189,27 @@ fn handle_break<'a, S: Settings<'a>>(
         }
         TargetType::FunctionOrLoop => {
             // This is a break to a loop iteration.
-            // TODO
-            todo!()
+
+            // For each input, we try to mirror the allocation expected by the loop input.
+            let target_idx = break_target.depth as usize;
+            for (input_index, break_input) in inputs.iter().enumerate() {
+                let loop_input_origin = ValueOrigin {
+                    node: 0,
+                    output_idx: input_index as u32,
+                };
+                let loop_input_allocation = oa[target_idx]
+                    .occupation_tracker
+                    .get_allocation(loop_input_origin)
+                    .expect("loop input must be allocated");
+                let num_words = loop_input_allocation.len();
+                let break_origin = unwrap_ref(break_input, "break inputs must be references");
+                if oa[0]
+                    .occupation_tracker
+                    .try_allocate_with_hint(*break_origin, loop_input_allocation)
+                {
+                    number_of_saved_copies += num_words;
+                }
+            }
         }
         TargetType::Label(label) => {
             // Try to allocate the break input at the same registers as the label output.
