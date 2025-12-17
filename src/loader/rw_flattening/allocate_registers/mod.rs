@@ -2,6 +2,7 @@ mod occupation_tracker;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    num::NonZeroU32,
     ops::Range,
 };
 
@@ -76,7 +77,7 @@ impl OptimisticAllocator {
         for input in inputs {
             if let NodeInput::Reference(origin) = input {
                 self.occupation_tracker
-                    .try_allocate(*origin, word_count::<S>(&nodes, *origin));
+                    .try_allocate(*origin, assert_non_zero(word_count::<S>(&nodes, *origin)));
             }
         }
     }
@@ -92,7 +93,7 @@ impl OptimisticAllocator {
                 node: node_index,
                 output_idx: output_idx as u32,
             };
-            let num_words = word_count_type::<S>(*output_type);
+            let num_words = assert_non_zero(word_count_type::<S>(*output_type));
             self.occupation_tracker.try_allocate(origin, num_words);
         }
     }
@@ -193,15 +194,10 @@ fn handle_break<'a, S: Settings<'a>>(
 }
 
 fn recursive_block_allocation<'a, S: Settings<'a>>(
-    dag: LivenessDag<'a>,
+    mut nodes: Vec<liveness_dag::Node<'a>>,
     oa: &mut VecDeque<OptimisticAllocator>,
 ) -> (Vec<Node<'a>>, usize) {
     let mut number_of_saved_copies = 0;
-
-    let LivenessDag {
-        mut nodes,
-        block_data: liveness,
-    } = dag;
 
     let mut new_nodes = RevVecFiller::new(nodes.len());
 
@@ -293,25 +289,36 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 // We need a new allocation tracker for the loop body.
                 // It is derived from the current one, completely blocking the
                 // slots that are occupied for the duration of the loop.
-                let mut occupation_tracker = oa[0].occupation_tracker.make_sub_tracker(index);
+                let LivenessDag {
+                    nodes: loop_nodes,
+                    block_data: loop_liveness,
+                } = sub_dag;
+                let mut occupation_tracker = oa[0]
+                    .occupation_tracker
+                    .make_sub_tracker(index, loop_liveness);
 
                 // There is an heuristic we can do here to minimize copies: for each loop input, if this
                 // is the last usage of the value, or if the loop body does not change the input and just
                 // forwards it unchanged to the next iteration, we can fix the allocation of the input to
                 // the current one, saving a copy.
-                let loop_liveness = &sub_dag.block_data;
                 for (input_idx, input) in node.inputs.iter().enumerate() {
                     let origin = unwrap_ref(input, "loop inputs must be references");
 
                     // Check if we can fix this allocation for the loop input.
-                    let last_usage = liveness.query_liveness(index, origin.node, origin.output_idx);
+                    let last_usage = oa[0].occupation_tracker.liveness().query_liveness(
+                        index,
+                        origin.node,
+                        origin.output_idx,
+                    );
                     if (last_usage <= index && {
                         assert_eq!(
                             last_usage, index,
                             "liveness bug: last usage is before a node that uses the value"
                         );
                         true
-                    }) || loop_liveness.query_if_input_is_redirected(input_idx as u32)
+                    }) || occupation_tracker
+                        .liveness()
+                        .query_if_input_is_redirected(input_idx as u32)
                     {
                         // We can fix the allocation of this input to the current one,
                         // because either we don't care if it is rewritten by the loop,
@@ -336,7 +343,8 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 };
                 oa.push_front(loop_oa);
 
-                let (loop_nodes, loop_saved_copies) = recursive_block_allocation::<S>(sub_dag, oa);
+                let (loop_nodes, loop_saved_copies) =
+                    recursive_block_allocation::<S>(loop_nodes, oa);
 
                 // Pop the loop allocation tracker.
                 let OptimisticAllocator {
@@ -446,13 +454,18 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
 pub fn optimistic_allocation<'a, S: Settings<'a>>(
     dag: LivenessDag<'a>,
 ) -> (AllocatedDag<'a>, usize) {
+    let LivenessDag {
+        nodes,
+        block_data: liveness,
+    } = dag;
+
     let mut oa = OptimisticAllocator {
-        occupation_tracker: OccupationTracker::new(),
+        occupation_tracker: OccupationTracker::new(liveness),
         labels: HashMap::new(),
     };
 
     // Fix the allocation of the function inputs first
-    let inputs = &dag.nodes[0];
+    let inputs = &nodes[0];
     let Operation::Inputs = &inputs.operation else {
         panic!("First node must be Inputs");
     };
@@ -471,7 +484,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
 
     // Do the allocation for the rest of the nodes, bottom up.
     let mut oa_stack = VecDeque::from([oa]);
-    let (nodes, number_of_saved_copies) = recursive_block_allocation::<S>(dag, &mut oa_stack);
+    let (nodes, number_of_saved_copies) = recursive_block_allocation::<S>(nodes, &mut oa_stack);
 
     // Generate the final allocation for this block
     let OptimisticAllocator {
@@ -505,6 +518,10 @@ fn unwrap_ref<'a>(input: &'a NodeInput, msg: &'static str) -> &'a ValueOrigin {
 fn type_of<'a>(nodes: &[liveness_dag::Node<'a>], origin: ValueOrigin) -> ValType {
     let node = &nodes[origin.node];
     node.output_types[origin.output_idx as usize]
+}
+
+fn assert_non_zero(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).expect("word count is non-zero")
 }
 
 /// Gets the word count of a value origin
