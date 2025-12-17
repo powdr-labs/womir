@@ -1,3 +1,5 @@
+mod occupation_tracker;
+
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     ops::Range,
@@ -12,7 +14,7 @@ use crate::{
         },
         dag::ValueOrigin,
         liveness_dag::{self, LivenessDag},
-        rw_flattening::Settings,
+        rw_flattening::{Settings, allocate_registers::occupation_tracker::OccupationTracker},
         word_count_type,
     },
     utils::rev_vec_filler::RevVecFiller,
@@ -58,69 +60,6 @@ impl Allocation {
 pub type AllocatedDag<'a> = GenericBlocklessDag<'a, Allocation>;
 
 pub type Node<'a> = GenericNode<'a, Allocation>;
-
-/// Tracks what registers are currently occupied by what values.
-struct OccupationTracker {
-    // TODO
-}
-
-impl OccupationTracker {
-    fn new() -> Self {
-        todo!()
-    }
-
-    fn make_sub_tracker(&self, sub_block_index: usize) -> Self {
-        todo!()
-    }
-
-    /// Allocates the value exactly at the given register range.
-    fn set_allocation(&mut self, origin: ValueOrigin, reg_range: Range<u32>) -> Result<(), ()> {
-        todo!()
-    }
-
-    /// Tries to allocate the value at the given register range, if not already allocated.
-    /// Returns false if the value was already allocated.
-    /// If not possible to allocate on hint, allocates elsewhere and returns false.
-    /// Returns true if allocation happened at hint.
-    fn try_allocate_with_hint(&mut self, origin: ValueOrigin, hint: Range<u32>) -> bool {
-        todo!()
-    }
-
-    /// Allocates a value wherever there is space, if not already allocated.
-    ///
-    /// Returns the range allocated for the value.
-    fn try_allocate(&mut self, origin: ValueOrigin, size: u32) -> Range<u32> {
-        todo!()
-    }
-
-    /// Gets the current allocation of a value.
-    fn get_allocation(&self, origin: ValueOrigin) -> Option<Range<u32>> {
-        todo!()
-    }
-
-    /// Returns the start of a function call frame.
-    ///
-    /// I.e., the first register after the last allocated one at this point,
-    /// so everything from there on is free for the function call.
-    fn allocate_fn_call(&self, call_index: usize) -> u32 {
-        todo!()
-    }
-
-    /// Blocks the registers occupied in the sub-tracker from being used
-    /// in this tracker.
-    fn project_from_sub_tracker(
-        &mut self,
-        sub_block_index: usize,
-        sub_tracker: &OccupationTracker,
-    ) {
-        todo!()
-    }
-
-    /// Generates the final allocations map.
-    fn into_allocations(self) -> BTreeMap<ValueOrigin, Range<u32>> {
-        todo!()
-    }
-}
 
 struct OptimisticAllocator {
     occupation_tracker: OccupationTracker,
