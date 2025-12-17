@@ -1,10 +1,12 @@
 use crate::loader::{dag::ValueOrigin, liveness_dag::Liveness};
 use iset::IntervalMap;
 use itertools::Itertools;
-use std::{collections::BTreeMap, num::NonZeroU32, ops::Range};
+use std::{collections::BTreeMap, iter::FusedIterator, num::NonZeroU32, ops::Range};
 
 enum AllocationType {
     FunctionFrame,
+    SubBlockInternal,
+    BlockedRegistersAtParent,
     // A normal value allocation
     Value(ValueOrigin),
 }
@@ -15,7 +17,6 @@ struct AllocationEntry {
     /// Since the standard Range is exclusive at the end, this works nicely to prevent
     /// overlapping when the node who consumes the value immediately produces another
     /// at the same register.
-    live_range: Range<usize>,
     reg_range: Range<u32>,
 }
 
@@ -26,6 +27,42 @@ pub struct OccupationTracker {
     origin_map: BTreeMap<ValueOrigin, usize>,
     allocations: Vec<AllocationEntry>,
 }
+
+// Iterates over the consolidated ranges of a given set of overlapping ranges.
+struct RangeConsolidationIterator<T> {
+    reverse_sorted_ranges: Vec<Range<T>>,
+}
+
+impl<T: Ord> RangeConsolidationIterator<T> {
+    fn new(occupied_ranges: Vec<Range<T>>) -> Self {
+        let mut reverse_sorted_ranges = occupied_ranges;
+        reverse_sorted_ranges.sort_unstable_by(|a, b| b.start.cmp(&a.start));
+        Self {
+            reverse_sorted_ranges,
+        }
+    }
+}
+
+impl<T: Ord> Iterator for RangeConsolidationIterator<T> {
+    type Item = Range<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut curr = self.reverse_sorted_ranges.pop()?;
+
+        while let Some(next) = self.reverse_sorted_ranges.last() {
+            if next.start <= curr.end {
+                // Overlaps/adjacent: extend current range
+                let next = self.reverse_sorted_ranges.pop().unwrap();
+                curr.end = curr.end.max(next.end);
+            } else {
+                break;
+            }
+        }
+        Some(curr)
+    }
+}
+
+impl<T: Ord> FusedIterator for RangeConsolidationIterator<T> {}
 
 impl OccupationTracker {
     pub fn new(liveness: Liveness) -> Self {
@@ -172,8 +209,24 @@ impl OccupationTracker {
         frame_start
     }
 
+    /// Creates a new occupation tracker, with all the allocations crossing the given
+    /// sub-block index expanded into the sub-tracker, so that those slots are blocked from
+    /// being used in the sub-tracker.
     pub fn make_sub_tracker(&self, sub_block_index: usize, sub_liveness: Liveness) -> Self {
-        todo!()
+        let mut sub_tracker = OccupationTracker::new(sub_liveness);
+
+        let sub_range = sub_block_index..(sub_block_index + 1);
+        let sub_occupation = self.reg_occupation(&sub_range).cloned().collect_vec();
+
+        let whole_range = 0..usize::MAX;
+        for reg_range in RangeConsolidationIterator::new(sub_occupation) {
+            sub_tracker.insert(
+                AllocationType::BlockedRegistersAtParent,
+                reg_range,
+                whole_range.clone(),
+            );
+        }
+        sub_tracker
     }
 
     /// Blocks the registers occupied in the sub-tracker from being used
@@ -183,12 +236,33 @@ impl OccupationTracker {
         sub_block_index: usize,
         sub_tracker: &OccupationTracker,
     ) {
-        todo!()
+        let projection = sub_tracker
+            .allocations
+            .iter()
+            .filter_map(|alloc| match alloc.kind {
+                AllocationType::BlockedRegistersAtParent => None,
+                _ => Some(alloc.reg_range.clone()),
+            })
+            .collect_vec();
+
+        for alloc in RangeConsolidationIterator::new(projection) {
+            self.insert(
+                AllocationType::SubBlockInternal,
+                alloc,
+                sub_block_index..(sub_block_index + 1),
+            );
+        }
     }
 
     /// Generates the final allocations map.
     pub fn into_allocations(self) -> BTreeMap<ValueOrigin, Range<u32>> {
-        todo!()
+        let mut result = BTreeMap::new();
+        for alloc in self.allocations {
+            if let AllocationType::Value(origin) = alloc.kind {
+                result.insert(origin, alloc.reg_range);
+            }
+        }
+        result
     }
 
     fn allocate_where_possible(
@@ -196,25 +270,18 @@ impl OccupationTracker {
         origin: ValueOrigin,
         size: NonZeroU32,
         live_range: Range<usize>,
-        mut existing_entries: Vec<Range<u32>>,
+        existing_entries: Vec<Range<u32>>,
     ) {
-        existing_entries.sort_unstable_by_key(|r| r.start);
-
         // Track the end of the current occupied space
         let mut curr_end = 0;
 
-        for r in existing_entries {
-            if r.start > curr_end {
-                // Found a gap: [curr_end, r.start)
-                let gap = r.start - curr_end;
-                if gap >= size.get() {
-                    break;
-                }
-                curr_end = r.end;
-            } else {
-                // Overlaps/adjacent: extend merged block
-                curr_end = curr_end.max(r.end);
+        for r in RangeConsolidationIterator::new(existing_entries) {
+            let gap_size = r.start.saturating_sub(curr_end);
+            if gap_size >= size.get() {
+                // Found a gap that fits: [curr_end, r.start)
+                break;
             }
+            curr_end = r.end;
         }
 
         // Allocate at the first gap found (or at the end).
@@ -230,11 +297,7 @@ impl OccupationTracker {
         if let AllocationType::Value(origin) = kind {
             self.origin_map.insert(origin, entry_idx);
         }
-        self.allocations.push(AllocationEntry {
-            kind,
-            reg_range,
-            live_range: live_range.clone(),
-        });
+        self.allocations.push(AllocationEntry { kind, reg_range });
         // Force insert because live ranges are not unique.
         self.alive_interval_map.force_insert(live_range, entry_idx);
     }
