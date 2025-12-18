@@ -1,5 +1,4 @@
 use crate::loader::{dag::ValueOrigin, rwm::liveness_dag::Liveness};
-use core::alloc;
 use iset::IntervalMap;
 use itertools::Itertools;
 use std::io::Write;
