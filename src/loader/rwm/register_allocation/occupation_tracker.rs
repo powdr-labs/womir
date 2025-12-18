@@ -7,6 +7,7 @@ enum AllocationType {
     FunctionFrame,
     SubBlockInternal,
     BlockedRegistersAtParent,
+    ExplicitlyBlocked,
     // A normal value allocation
     Value(ValueOrigin),
 }
@@ -99,6 +100,12 @@ impl OccupationTracker {
 
         self.insert(AllocationType::Value(origin), reg_range, live_range);
         Ok(())
+    }
+
+    /// Reserve a given register range, blocking it from being used.
+    pub fn reserve_range(&mut self, reg_range: Range<u32>) {
+        let whole_range = 0..usize::MAX;
+        self.insert(AllocationType::ExplicitlyBlocked, reg_range, whole_range);
     }
 
     /// Tries to allocate the value at the given register range, if not already allocated.

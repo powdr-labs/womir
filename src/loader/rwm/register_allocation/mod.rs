@@ -15,8 +15,8 @@ use crate::{
         },
         dag::ValueOrigin,
         rwm::{
-            allocate_registers::occupation_tracker::OccupationTracker,
             liveness_dag::{self, LivenessDag},
+            register_allocation::occupation_tracker::OccupationTracker,
         },
         settings::Settings,
         wom::flattening::word_count_type,
@@ -488,6 +488,9 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
             .unwrap();
         next_reg += num_words;
     }
+
+    // Reserve the space for the return address and frame pointer.
+    oa.occupation_tracker.reserve_range(next_reg..next_reg + 2);
 
     // Do the allocation for the rest of the nodes, bottom up.
     let mut oa_stack = VecDeque::from([oa]);

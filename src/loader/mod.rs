@@ -3,6 +3,7 @@ pub mod rwm;
 pub mod settings;
 pub mod wom;
 
+use crate::loader::rwm::{liveness_dag::LivenessDag, register_allocation::AllocatedDag};
 use core::panic;
 use itertools::Itertools;
 use passes::{
@@ -26,8 +27,6 @@ use wasmparser::{
     WasmFeatures,
 };
 use wom::flattening::WriteOnceAsm;
-
-use crate::loader::rwm::liveness_dag::LivenessDag;
 
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
@@ -414,6 +413,7 @@ pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
     DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
     // Read-write memory stages
     LivenessDag(LivenessDag<'a>),
+    RegisterAllocatedDag(AllocatedDag<'a>),
 }
 
 pub trait LabelGenerator {
@@ -537,7 +537,16 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 // Processing is complete. Just return itself.
                 FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
             }
-            FunctionProcessingStage::LivenessDag(generic_blockless_dag) => {
+            FunctionProcessingStage::LivenessDag(liveness_dag) => {
+                // Allocate read-write registers using the liveness information.
+                let (allocated_dag, copies_saved) =
+                    rwm::register_allocation::optimistic_allocation::<S>(liveness_dag);
+                if let Some(stats) = stats {
+                    stats.register_copies_saved += copies_saved;
+                }
+                FunctionProcessingStage::RegisterAllocatedDag(allocated_dag)
+            }
+            FunctionProcessingStage::RegisterAllocatedDag(allocated_dag) => {
                 // TODO: further process the RW pipeline
                 // For now, returning a fake empty flat asm.
                 let flat_asm = WriteOnceAsm {
