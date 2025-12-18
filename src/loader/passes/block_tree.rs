@@ -2,9 +2,7 @@ use std::{collections::BTreeSet, iter::Peekable, sync::Arc};
 
 use wasmparser::{BlockType, Operator, OperatorsIterator, OperatorsReader, ValType};
 
-use crate::loader::{FuncType, Global};
-
-use super::{Block, BlockKind, Element, Instruction, Module};
+use crate::loader::{Block, BlockKind, Element, FuncType, Global, Instruction, Module};
 
 /// BlockTree is a simplified representation of a WASM function.
 ///

@@ -1,6 +1,6 @@
 //! This module generates an assembly-like representation, flattening
-//! the DAG structure and allocating arbitrarily many write-once registers
-//! for the operations.
+//! the DAG structure and allocating arbitrarily many read-write
+//! registers for the operations.
 //!
 //! The algorithm works in 2 passes, and goes like this:
 //!
@@ -35,11 +35,11 @@ use crate::loader::{
     FunctionRef, LabelGenerator, Module,
     blockless_dag::{BreakTarget, Node, TargetType},
     dag::ValueOrigin,
+    rwm::allocate_registers::Error,
     settings::{
         ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
         WasmOpInput,
     },
-    wom_flattening::allocate_registers::Error,
 };
 
 use super::blockless_dag::{BlocklessDag, NodeInput, Operation};

@@ -1,14 +1,17 @@
-pub mod block_tree;
-pub mod blockless_dag;
-pub mod dag;
-pub mod dumb_jump_removal;
-pub mod liveness_dag;
-pub mod locals_data_flow;
-pub mod rw_flattening;
+pub mod passes;
+pub mod rwm;
 pub mod settings;
-pub mod wom_flattening;
+pub mod wom;
 
 use core::panic;
+use itertools::Itertools;
+use passes::{
+    block_tree::BlockTree,
+    blockless_dag::{self, BlocklessDag, BreakTarget},
+    dag::{self, Dag, NodeInput, ValueOrigin},
+    locals_data_flow::{self, LiftedBlockTree},
+};
+use settings::Settings;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt::{Display, Formatter},
@@ -17,26 +20,14 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicU32, mpsc::channel},
     thread, vec,
 };
-
-use block_tree::BlockTree;
-use dag::Dag;
-use itertools::Itertools;
 use wasmparser::{
     CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, LocalsReader,
     MemoryType, Operator, Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator,
     WasmFeatures,
 };
-use wom_flattening::WriteOnceAsm;
+use wom::flattening::WriteOnceAsm;
 
-use crate::loader::{
-    blockless_dag::{BlocklessDag, BreakTarget},
-    dag::{NodeInput, ValueOrigin},
-    liveness_dag::LivenessDag,
-    locals_data_flow::LiftedBlockTree,
-    settings::Settings,
-};
-
-pub use wom_flattening::{func_idx_to_label, word_count_type};
+use crate::loader::rwm::liveness_dag::LivenessDag;
 
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
@@ -520,7 +511,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                     FunctionProcessingStage::LivenessDag(liveness_dag)
                 } else {
                     // Flatten the blockless DAG into assembly-like representation.
-                    let (flat_asm, copies_saved) = wom_flattening::flatten_dag(
+                    let (flat_asm, copies_saved) = wom::flattening::flatten_dag(
                         settings,
                         ctx,
                         label_gen,
@@ -535,7 +526,8 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
             }
             FunctionProcessingStage::PlainFlatAsm(mut flat_asm) => {
                 // Optimization pass: remove useless jumps.
-                let jumps_removed = dumb_jump_removal::remove_dumb_jumps(settings, &mut flat_asm);
+                let jumps_removed =
+                    wom::dumb_jump_removal::remove_dumb_jumps(settings, &mut flat_asm);
                 if let Some(stats) = stats {
                     stats.useless_jumps_removed += jumps_removed;
                 }

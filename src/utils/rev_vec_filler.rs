@@ -7,6 +7,11 @@ pub struct RevVecFiller<T> {
     remaining_space: usize,
 }
 
+#[derive(Debug)]
+pub struct NotEnoughSpaceError<T>(T);
+#[derive(Debug)]
+pub struct NotCompletelyFilledError;
+
 impl<T> RevVecFiller<T> {
     pub fn new(size: usize) -> Self {
         Self {
@@ -16,10 +21,10 @@ impl<T> RevVecFiller<T> {
         }
     }
 
-    pub fn try_push_front(&mut self, value: T) -> Result<(), T> {
+    pub fn try_push_front(&mut self, value: T) -> Result<(), NotEnoughSpaceError<T>> {
         let idx = match self.remaining_space.checked_sub(1) {
             Some(i) => i,
-            None => return Err(value),
+            None => return Err(NotEnoughSpaceError(value)),
         };
 
         let spare = self.vec.spare_capacity_mut();
@@ -37,9 +42,9 @@ impl<T> RevVecFiller<T> {
         Ok(())
     }
 
-    pub fn try_into_vec(self) -> Result<Vec<T>, ()> {
+    pub fn try_into_vec(self) -> Result<Vec<T>, NotCompletelyFilledError> {
         if self.remaining_space != 0 {
-            return Err(());
+            return Err(NotCompletelyFilledError);
         }
 
         // We are taking ownership of self.vec, so we no longer want the

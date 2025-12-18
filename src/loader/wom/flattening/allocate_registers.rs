@@ -10,7 +10,7 @@ use wasmparser::Operator as Op;
 use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget, NodeInput, Operation, TargetType},
     dag::ValueOrigin,
-    wom_flattening::Settings,
+    settings::Settings,
 };
 
 use super::RegisterGenerator;

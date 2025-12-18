@@ -1,9 +1,9 @@
 use crate::{
-    linker,
     loader::{
-        wom_flattening::{Context, TrapReason, Tree},
         settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings, WasmOpInput},
+        wom::flattening::{Context, TrapReason, Tree},
     },
+    wom_interpreter::linker,
 };
 use std::{fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};

@@ -1,4 +1,4 @@
-use crate::loader::{dag::ValueOrigin, liveness_dag::Liveness};
+use crate::loader::{dag::ValueOrigin, rwm::liveness_dag::Liveness};
 use iset::IntervalMap;
 use itertools::Itertools;
 use std::{collections::BTreeMap, iter::FusedIterator, num::NonZeroU32, ops::Range};
@@ -112,7 +112,7 @@ impl OccupationTracker {
             return false;
         }
 
-        let existing_entries = self.reg_occupation(&live_range).cloned().collect_vec();
+        let existing_entries = self.reg_occupation_vec(&live_range);
         if overlaps_any(existing_entries.iter(), &hint) {
             // Cannot allocate at hint, allocate elsewhere
             self.allocate_where_possible(
@@ -139,7 +139,7 @@ impl OccupationTracker {
             return;
         }
 
-        let existing_entries = self.reg_occupation(&live_range).cloned().collect_vec();
+        let existing_entries = self.reg_occupation_vec(&live_range);
         self.allocate_where_possible(origin, size, live_range, existing_entries);
     }
 
@@ -216,7 +216,7 @@ impl OccupationTracker {
         let mut sub_tracker = OccupationTracker::new(sub_liveness);
 
         let sub_range = sub_block_index..(sub_block_index + 1);
-        let sub_occupation = self.reg_occupation(&sub_range).cloned().collect_vec();
+        let sub_occupation = self.reg_occupation_vec(&sub_range);
 
         let whole_range = 0..usize::MAX;
         for reg_range in RangeConsolidationIterator::new(sub_occupation) {
@@ -321,14 +321,11 @@ impl OccupationTracker {
     fn reg_occupation(&self, live_range: &Range<usize>) -> impl Iterator<Item = &Range<u32>> {
         self.alive_interval_map
             .values(live_range.clone())
-            .into_iter()
             .map(move |entry_idx| &self.allocations[*entry_idx].reg_range)
     }
 
-    fn sorted_reg_occupation(&self, live_range: &Range<usize>) -> Vec<Range<u32>> {
-        let mut regs = self.reg_occupation(live_range).cloned().collect_vec();
-        regs.sort_unstable_by_key(|r| r.start);
-        regs
+    fn reg_occupation_vec(&self, live_range: &Range<usize>) -> Vec<Range<u32>> {
+        self.reg_occupation(live_range).cloned().collect_vec()
     }
 }
 
@@ -336,7 +333,7 @@ fn overlaps_any<'a, T>(mut set: impl Iterator<Item = &'a Range<T>>, target: &Ran
 where
     T: Ord + Copy + 'a,
 {
-    set.any(|range| ranges_intersection(&range, target).is_some())
+    set.any(|range| ranges_intersection(range, target).is_some())
 }
 
 fn ranges_intersection<T>(range_a: &Range<T>, range_b: &Range<T>) -> Option<Range<T>>

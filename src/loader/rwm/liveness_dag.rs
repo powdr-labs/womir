@@ -67,7 +67,7 @@ fn process_block<'a>(
     dag: BlocklessDag<'a>,
     control_stack: &mut VecDeque<ControlStackEntry>,
 ) -> LivenessDag<'a> {
-    use super::blockless_dag::Operation::*;
+    use crate::loader::passes::blockless_dag::Operation::*;
 
     /// Tests if the iteration inputs are being redirected as-is.
     fn handle_iteration_inputs<'b>(

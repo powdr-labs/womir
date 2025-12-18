@@ -1,6 +1,6 @@
 //! This module generates an assembly-like representation, flattening
-//! the DAG structure and allocating arbitrarily many read-write
-//! registers for the operations.
+//! the DAG structure and allocating arbitrarily many write-once registers
+//! for the operations.
 //!
 //! The algorithm works in 2 passes, and goes like this:
 //!
@@ -33,16 +33,14 @@ use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
     FunctionRef, LabelGenerator, Module,
-    blockless_dag::{BreakTarget, Node, TargetType},
-    dag::ValueOrigin,
-    rw_flattening::allocate_registers::Error,
+    blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
+    dag::{NodeInput, ValueOrigin},
     settings::{
         ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
         WasmOpInput,
     },
+    wom::flattening::allocate_registers::Error,
 };
-
-use super::blockless_dag::{BlocklessDag, NodeInput, Operation};
 
 /// An assembly-like representation for a write-once memory machine.
 #[derive(Debug, Clone)]

@@ -10,10 +10,9 @@ use std::{
 use itertools::Itertools;
 use wasmparser::{FuncType, Ieee32, Ieee64, Operator as Op, RefType, V128, ValType};
 
-use crate::loader::Global;
-
-use super::{
-    Block, BlockKind, Element, Instruction as Ins, Module, locals_data_flow::LiftedBlockTree,
+use crate::loader::{
+    Block, BlockKind, Element, Global, Instruction as Ins, Module,
+    locals_data_flow::LiftedBlockTree,
 };
 
 #[derive(Debug)]

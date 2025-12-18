@@ -5,9 +5,10 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use womir::{
-    generic_ir::GenericIrSetting,
-    interpreter::{ExternalFunctions, Interpreter, MemoryAccessor},
     loader::Program,
+    wom_interpreter::{
+        ExternalFunctions, Interpreter, MemoryAccessor, generic_ir::GenericIrSetting,
+    },
 };
 
 struct DataInput {
@@ -181,7 +182,7 @@ mod tests {
     use std::process::Command;
     use tempfile::NamedTempFile;
     use test_log::test;
-    use womir::interpreter::NULL_REF;
+    use womir::wom_interpreter::NULL_REF;
 
     fn test_interpreter(
         path: &str,

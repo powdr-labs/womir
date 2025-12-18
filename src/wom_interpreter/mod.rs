@@ -1,16 +1,18 @@
+pub mod generic_ir;
+pub mod linker;
+
+use generic_ir::{Directive, GenericIrSetting as S};
+
+use crate::loader::{
+    FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE,
+    wom::flattening::{func_idx_to_label, word_count_type},
+};
+use crate::word_count_types;
 use core::panic;
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::ops::Range;
-
-use itertools::Itertools;
 use wasmparser::Operator as Op;
-
-use crate::generic_ir::{Directive, GenericIrSetting as S};
-use crate::loader::{
-    FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE, func_idx_to_label,
-    word_count_type,
-};
-use crate::{linker, word_count_types};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VRomValue {

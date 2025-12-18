@@ -14,9 +14,12 @@ use crate::{
             BreakTarget, GenericBlocklessDag, GenericNode, NodeInput, Operation, TargetType,
         },
         dag::ValueOrigin,
-        liveness_dag::{self, LivenessDag},
-        rw_flattening::{Settings, allocate_registers::occupation_tracker::OccupationTracker},
-        word_count_type,
+        rwm::{
+            allocate_registers::occupation_tracker::OccupationTracker,
+            liveness_dag::{self, LivenessDag},
+        },
+        settings::Settings,
+        wom::flattening::word_count_type,
     },
     utils::rev_vec_filler::RevVecFiller,
 };
@@ -77,7 +80,7 @@ impl OptimisticAllocator {
         for input in inputs {
             if let NodeInput::Reference(origin) = input {
                 self.occupation_tracker
-                    .try_allocate(*origin, assert_non_zero(word_count::<S>(&nodes, *origin)));
+                    .try_allocate(*origin, assert_non_zero(word_count::<S>(nodes, *origin)));
             }
         }
     }
@@ -117,7 +120,7 @@ fn handle_break<'a, S: Settings<'a>>(
             let mut next_reg = 0u32;
             for input in inputs {
                 let origin = unwrap_ref(input, "break inputs must be references");
-                let num_words = word_count::<S>(&nodes, *origin);
+                let num_words = word_count::<S>(nodes, *origin);
                 if oa[0]
                     .occupation_tracker
                     .try_allocate_with_hint(*origin, next_reg..next_reg + num_words)
@@ -246,7 +249,11 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                         // start of the called function frame. From there, two slots are
                         // reserved for return address and frame pointer, and then come
                         // the arguments.
-                        let arg_start = oa[0].occupation_tracker.allocate_fn_call(index) + 2;
+                        let output_sizes =
+                            node.output_types.iter().map(|ty| word_count_type::<S>(*ty));
+                        let arg_start = oa[0]
+                            .occupation_tracker
+                            .allocate_fn_call(index, output_sizes);
 
                         for input in &node.inputs {
                             let origin =
