@@ -540,7 +540,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
             FunctionProcessingStage::LivenessDag(liveness_dag) => {
                 // Allocate read-write registers using the liveness information.
                 let (allocated_dag, copies_saved) =
-                    rwm::register_allocation::optimistic_allocation::<S>(liveness_dag);
+                    rwm::register_allocation::optimistic_allocation::<S>(func_idx, liveness_dag);
                 if let Some(stats) = stats {
                     stats.register_copies_saved += copies_saved;
                 }

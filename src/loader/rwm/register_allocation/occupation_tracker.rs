@@ -1,8 +1,14 @@
 use crate::loader::{dag::ValueOrigin, rwm::liveness_dag::Liveness};
+use core::alloc;
 use iset::IntervalMap;
 use itertools::Itertools;
-use std::{collections::BTreeMap, iter::FusedIterator, num::NonZeroU32, ops::Range};
+use std::io::Write;
+use std::{
+    collections::BTreeMap, fs::File, io::BufWriter, iter::FusedIterator, num::NonZeroU32,
+    ops::Range, path::Path,
+};
 
+#[derive(Debug)]
 enum AllocationType {
     FunctionFrame,
     SubBlockInternal,
@@ -12,6 +18,7 @@ enum AllocationType {
     Value(ValueOrigin),
 }
 
+#[derive(Debug)]
 struct AllocationEntry {
     kind: AllocationType,
     /// Starts at the node that creates the value, ends at the last node that uses it.
@@ -81,25 +88,16 @@ impl OccupationTracker {
 
     /// Allocates the value exactly at the given register range.
     ///
-    /// Returns Err if not possible (overlap with existing allocation).
-    pub fn set_allocation(&mut self, origin: ValueOrigin, reg_range: Range<u32>) -> Result<(), ()> {
+    /// Warning: this function doesn't check for overlaps with other existing allocations!
+    pub fn set_allocation(&mut self, origin: ValueOrigin, reg_range: Range<u32>) {
         let live_range = self.natural_liveness(origin);
 
         if let Some(alloc_idx) = self.origin_map.get(&origin) {
             let existing_alloc = &self.allocations[*alloc_idx];
-            if existing_alloc.reg_range == reg_range {
-                return Ok(());
-            } else {
-                return Err(());
-            }
-        }
-
-        if overlaps_any(self.reg_occupation(&live_range), &reg_range) {
-            return Err(());
+            assert_eq!(existing_alloc.reg_range, reg_range);
         }
 
         self.insert(AllocationType::Value(origin), reg_range, live_range);
-        Ok(())
     }
 
     /// Reserve a given register range, blocking it from being used.
@@ -270,6 +268,23 @@ impl OccupationTracker {
             }
         }
         result
+    }
+
+    pub fn dump(&self, path: &Path) {
+        let mut file =
+            BufWriter::new(File::create(path).expect("could not create allocation dump file"));
+        for (life_range, alloc) in self.alive_interval_map.unsorted_iter() {
+            let alloc = &self.allocations[*alloc];
+            writeln!(
+                file,
+                "A {} {} {} {}",
+                life_range.start,
+                alloc.reg_range.start,
+                life_range.end - 1,
+                alloc.reg_range.end - 1
+            )
+            .expect("could not write allocation dump");
+        }
     }
 
     fn allocate_where_possible(

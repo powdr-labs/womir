@@ -128,7 +128,7 @@ fn main() -> wasmparser::Result<()> {
         Command::Compile { wasm_file } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
             let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?
-                .default_par_process_all_functions(cli.rw_pipeline)?;
+                .default_process_all_functions(cli.rw_pipeline)?;
 
             if let Err(err) = dump_ir(&program) {
                 log::error!("Failed to dump IR: {err}");

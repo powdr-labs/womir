@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     num::NonZeroU32,
     ops::Range,
+    path::Path,
 };
 
 use wasmparser::{Operator as Op, ValType};
@@ -210,11 +211,7 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
         let operation = match node.operation {
             Operation::Inputs => {
                 assert_eq!(index, 0);
-
-                // Allocate whatever output was not allocated yet.
-                // (can happen for loop inputs that are not used inside the body)
-                oa[0].allocate_outputs::<S>(index, &node.output_types);
-
+                // All node outputs must have been allocated already.
                 Operation::Inputs
             }
             Operation::WASMOp(operator) => {
@@ -332,22 +329,24 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                         // or we have the guarantee that it won't be changed.
                         let allocation = oa[0].occupation_tracker.get_allocation(*origin).unwrap();
                         number_of_saved_copies += allocation.len();
-                        occupation_tracker
-                            .set_allocation(
-                                ValueOrigin {
-                                    node: 0,
-                                    output_idx: input_idx as u32,
-                                },
-                                allocation,
-                            )
-                            .unwrap();
+
+                        occupation_tracker.set_allocation(
+                            ValueOrigin {
+                                node: 0,
+                                output_idx: input_idx as u32,
+                            },
+                            allocation,
+                        )
                     }
                 }
 
-                let loop_oa = OptimisticAllocator {
+                let mut loop_oa = OptimisticAllocator {
                     occupation_tracker,
                     labels: HashMap::new(),
                 };
+
+                // Allocate the rest of the inputs.
+                loop_oa.allocate_outputs::<S>(0, &loop_nodes[0].output_types);
                 oa.push_front(loop_oa);
 
                 let (loop_nodes, loop_saved_copies) =
@@ -410,17 +409,25 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
             }
             Operation::Br(break_target) => {
                 number_of_saved_copies +=
-                    handle_break::<S>(&nodes, oa, &node.inputs, &break_target);
+                    handle_break::<S>(&nodes, oa, node.inputs.as_slice(), &break_target);
                 Operation::Br(break_target)
             }
             Operation::BrIf(break_target) => {
-                number_of_saved_copies +=
-                    handle_break::<S>(&nodes, oa, &node.inputs, &break_target);
+                number_of_saved_copies += handle_break::<S>(
+                    &nodes,
+                    oa,
+                    &node.inputs[..&node.inputs.len() - 1],
+                    &break_target,
+                );
                 Operation::BrIf(break_target)
             }
             Operation::BrIfZero(break_target) => {
-                number_of_saved_copies +=
-                    handle_break::<S>(&nodes, oa, &node.inputs, &break_target);
+                number_of_saved_copies += handle_break::<S>(
+                    &nodes,
+                    oa,
+                    &node.inputs[..&node.inputs.len() - 1],
+                    &break_target,
+                );
                 Operation::BrIfZero(break_target)
             }
             Operation::BrTable { targets } => {
@@ -459,6 +466,7 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
 /// proposing register assignment for future nodes (so to avoid copies), but
 /// leaving a final assignment for the traversed nodes.
 pub fn optimistic_allocation<'a, S: Settings<'a>>(
+    func_idx: u32,
     dag: LivenessDag<'a>,
 ) -> (AllocatedDag<'a>, usize) {
     let LivenessDag {
@@ -484,8 +492,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
         };
         let num_words = word_count_type::<S>(*input);
         oa.occupation_tracker
-            .set_allocation(origin, next_reg..next_reg + num_words)
-            .unwrap();
+            .set_allocation(origin, next_reg..next_reg + num_words);
         next_reg += num_words;
     }
 
@@ -501,6 +508,9 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
         occupation_tracker,
         labels,
     } = oa_stack.pop_front().unwrap();
+
+    let dump_path = format!("dump/func_{}_allocation.txt", func_idx);
+    occupation_tracker.dump(Path::new(&dump_path));
 
     let allocation = Allocation {
         nodes_outputs: occupation_tracker.into_allocations(),
