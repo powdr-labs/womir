@@ -19,7 +19,7 @@ use crate::{
             register_allocation::occupation_tracker::OccupationTracker,
         },
         settings::Settings,
-        wom::flattening::word_count_type,
+        word_count_type,
     },
     utils::rev_vec_filler::RevVecFiller,
 };

@@ -17,7 +17,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt::{Display, Formatter},
     marker::PhantomData,
-    ops::AddAssign,
+    ops::{AddAssign, Range},
     sync::{Arc, Mutex, atomic::AtomicU32, mpsc::channel},
     thread, vec,
 };
@@ -1635,4 +1635,30 @@ impl<'a> From<Block<'a>> for Element<'a> {
     fn from(block: Block<'a>) -> Self {
         Element::Block(block)
     }
+}
+
+pub fn byte_size<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
+    match ty {
+        ValType::I32 | ValType::F32 => 4,
+        ValType::I64 | ValType::F64 => 8,
+        ValType::V128 => 16,
+        ValType::Ref(..) => FunctionRef::<S>::total_byte_size(),
+    }
+}
+
+/// Returns the number of words needed to store the given types.
+pub fn word_count_types<'a, S: Settings<'a>>(types: &[ValType]) -> u32 {
+    types.iter().map(|ty| word_count_type::<S>(*ty)).sum()
+}
+
+pub fn word_count<'a, S: Settings<'a> + ?Sized>(byte_size: u32) -> u32 {
+    byte_size.div_ceil(S::bytes_per_word())
+}
+
+pub fn assert_ptr_size<'a, S: Settings<'a> + ?Sized>(ptr: &Range<u32>) {
+    assert_eq!(ptr.len(), S::words_per_ptr() as usize);
+}
+
+pub fn word_count_type<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
+    word_count::<S>(byte_size::<S>(ty))
 }

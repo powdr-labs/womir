@@ -32,14 +32,16 @@ use std::{
 use wasmparser::{Operator as Op, ValType};
 
 use crate::loader::{
-    FunctionRef, LabelGenerator, Module,
+    FunctionRef, LabelGenerator, Module, assert_ptr_size,
     blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
+    byte_size,
     dag::{NodeInput, ValueOrigin},
     settings::{
         ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
         WasmOpInput,
     },
     wom::flattening::allocate_registers::Error,
+    word_count, word_count_type,
 };
 
 /// An assembly-like representation for a write-once memory machine.
@@ -1340,15 +1342,6 @@ pub fn func_idx_to_label(func_idx: u32) -> String {
     format_label(func_idx, LabelType::Function)
 }
 
-fn byte_size<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
-    match ty {
-        ValType::I32 | ValType::F32 => 4,
-        ValType::I64 | ValType::F64 => 8,
-        ValType::V128 => 16,
-        ValType::Ref(..) => FunctionRef::<S>::total_byte_size(),
-    }
-}
-
 fn split_func_ref_regs<'a, S: Settings<'a>>(func_ref_reg: Range<u32>) -> [Range<u32>; 3] {
     let i32_word_count = word_count_type::<S>(ValType::I32);
 
@@ -1359,16 +1352,4 @@ fn split_func_ref_regs<'a, S: Settings<'a>>(func_ref_reg: Range<u32>) -> [Range<
     assert_eq!(func_frame_size.end, func_ref_reg.end);
 
     [type_index, func_addr, func_frame_size]
-}
-
-fn word_count<'a, S: Settings<'a> + ?Sized>(byte_size: u32) -> u32 {
-    byte_size.div_ceil(S::bytes_per_word())
-}
-
-fn assert_ptr_size<'a, S: Settings<'a> + ?Sized>(ptr: &Range<u32>) {
-    assert_eq!(ptr.len(), S::words_per_ptr() as usize);
-}
-
-pub fn word_count_type<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
-    word_count::<S>(byte_size::<S>(ty))
 }
