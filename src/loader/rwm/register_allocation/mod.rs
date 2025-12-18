@@ -248,20 +248,22 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                         // the arguments.
                         let output_sizes =
                             node.output_types.iter().map(|ty| word_count_type::<S>(*ty));
-                        let arg_start = oa[0]
+                        let mut next_arg = oa[0]
                             .occupation_tracker
                             .allocate_fn_call(index, output_sizes);
 
+                        // Try to place the function inputs at the expected argument slots.
                         for input in &node.inputs {
                             let origin =
                                 unwrap_ref(input, "function call inputs must be references");
                             let num_words = word_count::<S>(&nodes, *origin);
                             if oa[0]
                                 .occupation_tracker
-                                .try_allocate_with_hint(*origin, arg_start..arg_start + num_words)
+                                .try_allocate_with_hint(*origin, next_arg..next_arg + num_words)
                             {
                                 number_of_saved_copies += num_words as usize;
                             }
+                            next_arg += num_words;
                         }
                     }
                     _ => {
