@@ -275,9 +275,17 @@ impl OccupationTracker {
             BufWriter::new(File::create(path).expect("could not create allocation dump file"));
         for (life_range, alloc) in self.alive_interval_map.unsorted_iter() {
             let alloc = &self.allocations[*alloc];
+
+            let ty = match &alloc.kind {
+                AllocationType::FunctionFrame => 'U',
+                AllocationType::SubBlockInternal => 'S',
+                AllocationType::BlockedRegistersAtParent => 'B',
+                AllocationType::ExplicitlyBlocked => 'E',
+                AllocationType::Value(_) => 'A',
+            };
             writeln!(
                 file,
-                "A {} {} {} {}",
+                "{ty} {} {} {} {}",
                 life_range.start,
                 alloc.reg_range.start,
                 life_range.end - 1,

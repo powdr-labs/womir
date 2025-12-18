@@ -65,7 +65,6 @@
         
         #canvas {
             position: absolute;
-            left: 60px;
             cursor: grab;
             background: white;
         }
@@ -74,19 +73,11 @@
             cursor: grabbing;
         }
         
-        #x-headers {
+        #x-headers-container {
             position: absolute;
-            top: 0;
             left: 60px;
             background: #e8e8e8;
-            border-bottom: 2px solid #333;
             overflow: hidden;
-        }
-        
-        .x-header-layer {
-            height: 40px;
-            position: relative;
-            border-bottom: 1px solid #999;
         }
         
         #y-header {
@@ -103,15 +94,14 @@
             top: 0;
             left: 0;
             width: 60px;
-            height: 40px;
             background: #d0d0d0;
             border-right: 2px solid #333;
-            border-bottom: 2px solid #333;
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 12px;
             color: #666;
+            z-index: 10;
         }
     </style>
 </head>
@@ -123,7 +113,7 @@
     </div>
     <div id="container">
         <div id="corner">0</div>
-        <div id="x-headers"></div>
+        <div id="x-headers-container"></div>
         <canvas id="y-header"></canvas>
         <canvas id="canvas"></canvas>
     </div>
@@ -132,10 +122,15 @@
         const CELL_SIZE = 30;
         const GRID_COLOR = '#ddd';
         const HEADER_TEXT_COLOR = '#333';
+        const HEADER_HEIGHT = 40;
         
         // Define colors for different rectangle types
         const TYPE_COLORS = {
             'A': 'rgba(52, 152, 219, 0.7)',  // Blue
+            'U': 'rgba(46, 204, 113, 0.7)',  // Green
+            'S': 'rgba(155, 89, 182, 0.7)',  // Purple
+            'B': 'rgba(241, 196, 15, 0.7)',  // Yellow
+            'E': 'rgba(231, 76, 60, 0.7)',   // Red
             'F': 'rgba(230, 126, 34, 0.7)',  // Orange
             'default': 'rgba(149, 165, 166, 0.7)' // Gray
         };
@@ -144,9 +139,10 @@
             constructor() {
                 this.canvas = document.getElementById('canvas');
                 this.ctx = this.canvas.getContext('2d');
-                this.xHeadersContainer = document.getElementById('x-headers');
+                this.xHeadersContainer = document.getElementById('x-headers-container');
                 this.yHeader = document.getElementById('y-header');
                 this.yHeaderCtx = this.yHeader.getContext('2d');
+                this.corner = document.getElementById('corner');
                 
                 this.offsetX = 0;
                 this.offsetY = 0;
@@ -157,10 +153,9 @@
                 this.dragOffsetY = 0;
                 
                 this.rectangles = [];
-                this.expandedLBlocks = new Set(); // Track which L blocks are expanded
-                this.headerLayers = []; // Store header information for each depth level
-                this.columnMapping = []; // Map visual columns to actual data
-                this.totalHeaderHeight = 40; // Will be updated based on layers
+                this.expandedLBlocks = new Set();
+                this.xMapping = []; // Maps visual X coordinates to actual coordinates
+                this.headerLayers = [];
                 
                 this.setupCanvas();
                 this.setupEventListeners();
@@ -197,13 +192,12 @@
                 let lBlockCounter = 0;
                 
                 // Parse recursively with support for L blocks
-                const parseLines = (lineList, xOffset = 0, parentPath = '') => {
+                const parseLines = (lineList, parentPath = '') => {
                     const result = [];
                     let i = 0;
                     
                     while (i < lineList.length) {
                         const line = lineList[i];
-                        // Remove comments and trim
                         const cleanLine = line.split('#')[0].trim();
                         
                         if (cleanLine === '') {
@@ -212,7 +206,6 @@
                         }
                         
                         if (cleanLine === '}') {
-                            // End of L block
                             return result;
                         }
                         
@@ -220,7 +213,6 @@
                         const type = parts[0];
                         
                         if (type === 'L' && parts.length >= 2 && cleanLine.endsWith('{')) {
-                            // Type L: container block - L x {
                             const localX = parseInt(parts[1]);
                             if (!isNaN(localX)) {
                                 const lBlockId = `L${lBlockCounter++}`;
@@ -229,12 +221,14 @@
                                 const lBlock = {
                                     type: 'L',
                                     id: fullPath,
-                                    x1: xOffset + localX,
-                                    localX: localX,
+                                    x: localX,
                                     children: [],
                                     containedA: [],
-                                    containedF: [],
-                                    width: 0 // Will be calculated based on contents
+                                    containedU: [],
+                                    containedS: [],
+                                    containedB: [],
+                                    containedE: [],
+                                    containedF: []
                                 };
                                 
                                 // Parse contents of L block
@@ -254,31 +248,33 @@
                                     i++;
                                 }
                                 
-                                // Recursively parse inner content - inner blocks use local coordinates starting from 0
-                                lBlock.children = parseLines(innerLines, 0, fullPath);
+                                lBlock.children = parseLines(innerLines, fullPath);
                                 
-                                // Calculate width needed for this L block
-                                const calculateWidth = (blocks) => {
-                                    let maxX = 0;
-                                    for (const block of blocks) {
-                                        if (block.type === 'A') {
-                                            maxX = Math.max(maxX, block.x2 + 1);
-                                        } else if (block.type === 'F') {
-                                            maxX = Math.max(maxX, block.x1 + 1);
-                                        } else if (block.type === 'L') {
-                                            maxX = Math.max(maxX, block.localX + block.width);
-                                        }
-                                    }
-                                    return maxX;
-                                };
-                                
-                                lBlock.width = calculateWidth(lBlock.children);
-                                
-                                // Recursively collect all A and F blocks for projection
+                                // Recursively collect all blocks for projection
                                 const collectBlocks = (blocks) => {
                                     for (const block of blocks) {
                                         if (block.type === 'A') {
                                             lBlock.containedA.push({
+                                                y1: block.y1,
+                                                y2: block.y2
+                                            });
+                                        } else if (block.type === 'U') {
+                                            lBlock.containedU.push({
+                                                y1: block.y1,
+                                                y2: block.y2
+                                            });
+                                        } else if (block.type === 'S') {
+                                            lBlock.containedS.push({
+                                                y1: block.y1,
+                                                y2: block.y2
+                                            });
+                                        } else if (block.type === 'B') {
+                                            lBlock.containedB.push({
+                                                y1: block.y1,
+                                                y2: block.y2
+                                            });
+                                        } else if (block.type === 'E') {
+                                            lBlock.containedE.push({
                                                 y1: block.y1,
                                                 y2: block.y2
                                             });
@@ -287,7 +283,6 @@
                                                 y: block.y1
                                             });
                                         } else if (block.type === 'L') {
-                                            // Recursively collect from nested L blocks
                                             collectBlocks(block.children);
                                         }
                                     }
@@ -298,29 +293,25 @@
                             }
                             i++;
                         } else if (type === 'F' && parts.length >= 3) {
-                            // Type F: vertical dashed line - F x y
                             const rect = {
                                 type: 'F',
-                                x1: xOffset + parseInt(parts[1]),
+                                x1: parseInt(parts[1]),
                                 y1: parseInt(parts[2])
                             };
                             
-                            // Validate numbers
                             if (!isNaN(rect.x1) && !isNaN(rect.y1)) {
                                 result.push(rect);
                             }
                             i++;
-                        } else if (type === 'A' && parts.length >= 5) {
-                            // Type A: rectangle - A x1 y1 x2 y2
+                        } else if ((type === 'A' || type === 'U' || type === 'S' || type === 'B' || type === 'E') && parts.length >= 5) {
                             const rect = {
-                                type: 'A',
-                                x1: xOffset + parseInt(parts[1]),
+                                type: type,
+                                x1: parseInt(parts[1]),
                                 y1: parseInt(parts[2]),
-                                x2: xOffset + parseInt(parts[3]),
+                                x2: parseInt(parts[3]),
                                 y2: parseInt(parts[4])
                             };
                             
-                            // Validate numbers
                             if (!isNaN(rect.x1) && !isNaN(rect.y1) && 
                                 !isNaN(rect.x2) && !isNaN(rect.y2)) {
                                 result.push(rect);
@@ -334,78 +325,193 @@
                     return result;
                 };
                 
-                this.rectangles = parseLines(lines, 0, '');
-                this.buildColumnMapping();
+                this.rectangles = parseLines(lines);
+                this.buildXMapping();
                 this.render();
             }
             
-            buildColumnMapping() {
-                // Build a column mapping based on expanded L blocks
-                this.columnMapping = [];
+            buildXMapping() {
+                // Build the X coordinate mapping based on expanded L blocks
                 this.headerLayers = [];
                 
-                const processBlocks = (blocks, depth = 0, xBase = 0) => {
-                    let currentX = xBase;
-                    
-                    for (const block of blocks) {
-                        if (block.type === 'L') {
-                            const isExpanded = this.expandedLBlocks.has(block.id);
-                            
-                            if (isExpanded) {
-                                // Add header layer info
-                                if (!this.headerLayers[depth + 1]) {
-                                    this.headerLayers[depth + 1] = [];
-                                }
-                                this.headerLayers[depth + 1].push({
-                                    startX: currentX + block.localX,
-                                    width: block.width,
-                                    id: block.id
-                                });
-                                
-                                // Process children recursively
-                                processBlocks(block.children, depth + 1, currentX + block.localX);
-                                currentX += block.localX + block.width;
-                            } else {
-                                // Collapsed - just takes 1 column
-                                this.columnMapping.push({
-                                    visualX: currentX + block.x1,
-                                    block: block,
-                                    type: 'L-collapsed'
-                                });
-                                currentX = Math.max(currentX, block.x1 + 1);
-                            }
-                        } else if (block.type === 'A') {
-                            // Regular A block
-                            currentX = Math.max(currentX, block.x2 + 1);
-                        } else if (block.type === 'F') {
-                            // Regular F block
-                            currentX = Math.max(currentX, block.x1 + 1);
+                // Find all expanded L blocks and build header layers
+                const processLBlock = (lBlock, depth) => {
+                    const layerIndex = depth - 1;
+                    if (layerIndex >= 0) {
+                        if (!this.headerLayers[layerIndex]) {
+                            this.headerLayers[layerIndex] = [];
                         }
+                        this.headerLayers[layerIndex].push(lBlock);
                     }
                     
-                    return currentX;
+                    // Process nested expanded L blocks
+                    for (const child of lBlock.children) {
+                        if (child.type === 'L' && this.expandedLBlocks.has(child.id)) {
+                            processLBlock(child, depth + 1);
+                        }
+                    }
                 };
                 
-                processBlocks(this.rectangles, 0, 0);
+                // Process all top-level expanded L blocks
+                for (const block of this.rectangles) {
+                    if (block.type === 'L' && this.expandedLBlocks.has(block.id)) {
+                        processLBlock(block, 1);
+                    }
+                }
+            }
+            
+            // Map a visual column to actual coordinates considering expansions
+            getColumnInfo(visualCol) {
+                // Find the actual coordinate by checking each position
+                for (let actualX = 0; actualX <= visualCol + 100; actualX++) {
+                    const visualX = this.actualToVisualX(actualX);
+                    
+                    // Check if this actual position maps exactly to our visual column
+                    if (visualX === visualCol) {
+                        const lBlock = this.rectangles.find(b => 
+                            b.type === 'L' && b.x === actualX);
+                        return {
+                            actualX: actualX,
+                            isExpanded: lBlock ? this.expandedLBlocks.has(lBlock.id) : false,
+                            isInsideExpansion: false,
+                            lBlock: lBlock || null
+                        };
+                    }
+                    
+                    // Check if we've passed the target - means we're in an expansion
+                    if (visualX > visualCol) {
+                        // Look for an expanded L block at the previous actual position
+                        for (let checkX = actualX - 1; checkX >= 0; checkX--) {
+                            const lBlock = this.rectangles.find(b => 
+                                b.type === 'L' && b.x === checkX && this.expandedLBlocks.has(b.id));
+                            
+                            if (lBlock) {
+                                const lVisualX = this.actualToVisualX(checkX);
+                                const expansionWidth = this.getExpandedWidth(lBlock);
+                                const expansionStart = lVisualX - expansionWidth;
+                                
+                                if (visualCol >= expansionStart && visualCol < lVisualX) {
+                                    return {
+                                        actualX: checkX,
+                                        localX: visualCol - expansionStart,
+                                        isExpanded: true,
+                                        isInsideExpansion: true,
+                                        lBlock: lBlock
+                                    };
+                                }
+                            }
+                        }
+                        // Shouldn't happen, but return a default
+                        return {
+                            actualX: actualX,
+                            isExpanded: false,
+                            isInsideExpansion: false,
+                            lBlock: null
+                        };
+                    }
+                }
+                
+                // Fallback for columns beyond the range
+                return {
+                    actualX: visualCol,
+                    isExpanded: false,
+                    isInsideExpansion: false,
+                    lBlock: null
+                };
+            }
+            
+            // Convert actual X coordinate to visual X coordinate accounting for expansions
+            actualToVisualX(actualX) {
+                let visualX = actualX; // Start with the actual position
+                
+                // Add extra space for each expanded L block at or before this position
+                for (const block of this.rectangles) {
+                    if (block.type === 'L' && block.x <= actualX && this.expandedLBlocks.has(block.id)) {
+                        // This L block is expanded and is at or before our target position
+                        // Add its expansion width (the expansion happens BEFORE the L block column)
+                        visualX += this.getExpandedWidth(block);
+                    }
+                }
+                
+                return visualX;
+            }
+            
+            getExpandedWidth(lBlock) {
+                // Calculate the VISUAL width of an L block when expanded
+                // This must account for ALL nested expansions pushing content right
+                let maxX = 0;
+                let currentX = 0;
+                
+                // Process children in order to account for expansions
+                const children = [...lBlock.children].sort((a, b) => {
+                    const aX = a.x || a.x1 || 0;
+                    const bX = b.x || b.x1 || 0;
+                    return aX - bX;
+                });
+                
+                for (const child of children) {
+                    if (child.type === 'A' || child.type === 'U' || child.type === 'S' || child.type === 'B' || child.type === 'E') {
+                        maxX = Math.max(maxX, child.x2 + 1);
+                    } else if (child.type === 'F') {
+                        maxX = Math.max(maxX, child.x1 + 1);
+                    } else if (child.type === 'L') {
+                        if (this.expandedLBlocks.has(child.id)) {
+                            // Expanded nested L: adds its width BEFORE its position
+                            const childWidth = this.getExpandedWidth(child);
+                            // Everything after this L gets pushed by childWidth
+                            maxX = Math.max(maxX, child.x + childWidth + 1);
+                            
+                            // Also check if any content after this L needs more space
+                            for (const sibling of lBlock.children) {
+                                const sibX = sibling.x || sibling.x1 || 0;
+                                if (sibX > child.x) {
+                                    // This sibling is pushed right by the expansion
+                                    if (sibling.type === 'A' || sibling.type === 'U' || sibling.type === 'S' || sibling.type === 'B' || sibling.type === 'E') {
+                                        maxX = Math.max(maxX, sibling.x2 + childWidth + 1);
+                                    } else if (sibling.type === 'F') {
+                                        maxX = Math.max(maxX, sibling.x1 + childWidth + 1);
+                                    } else if (sibling.type === 'L') {
+                                        const sibWidth = this.expandedLBlocks.has(sibling.id) ? 
+                                            this.getExpandedWidth(sibling) : 1;
+                                        maxX = Math.max(maxX, sibling.x + childWidth + sibWidth);
+                                    }
+                                }
+                            }
+                        } else {
+                            maxX = Math.max(maxX, child.x + 1);
+                        }
+                    }
+                }
+                
+                return Math.max(maxX, 1);
             }
             
             setupCanvas() {
                 const resize = () => {
                     const container = document.getElementById('container');
+                    // Number of headers is 1 (base) plus the number of expansion levels
+                    const numHeaders = 1 + this.headerLayers.length;
+                    const headerHeight = numHeaders * HEADER_HEIGHT;
+                    
+                    // Update positions
+                    this.xHeadersContainer.style.top = '0px';
+                    this.xHeadersContainer.style.height = headerHeight + 'px';
+                    this.canvas.style.top = headerHeight + 'px';
+                    this.yHeader.style.top = headerHeight + 'px';
+                    this.corner.style.height = headerHeight + 'px';
+                    
                     const width = container.clientWidth - 60;
-                    const height = container.clientHeight - 40;
+                    const height = container.clientHeight - headerHeight;
                     
                     // Main canvas
                     this.canvas.width = width;
                     this.canvas.height = height;
                     this.canvas.style.width = width + 'px';
                     this.canvas.style.height = height + 'px';
+                    this.canvas.style.left = '60px';
                     
-                    // X header
-                    this.xHeader.width = width;
-                    this.xHeader.height = 40;
-                    this.xHeader.style.width = width + 'px';
-                    this.xHeader.style.height = '40px';
+                    // X headers container
+                    this.xHeadersContainer.style.width = width + 'px';
                     
                     // Y header
                     this.yHeader.width = 60;
@@ -421,6 +527,7 @@
             }
             
             setupEventListeners() {
+                // Canvas dragging
                 this.canvas.addEventListener('mousedown', (e) => {
                     this.isDragging = true;
                     this.canvas.classList.add('grabbing');
@@ -439,7 +546,6 @@
                     this.offsetX = this.dragOffsetX + dx;
                     this.offsetY = this.dragOffsetY + dy;
                     
-                    // Prevent dragging too far into negative space
                     this.offsetX = Math.min(this.offsetX, 0);
                     this.offsetY = Math.min(this.offsetY, 0);
                     
@@ -451,19 +557,107 @@
                     this.canvas.classList.remove('grabbing');
                 });
                 
-                // Wheel zoom (optional, commented out for now)
-                /*
-                this.canvas.addEventListener('wheel', (e) => {
-                    e.preventDefault();
-                    // Future zoom functionality
+                // Header clicking for L block expansion
+                this.xHeadersContainer.addEventListener('click', (e) => {
+                    const rect = this.xHeadersContainer.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const y = e.clientY - rect.top;
+                    
+                    const col = Math.floor((x - this.offsetX) / CELL_SIZE);
+                    const layer = Math.floor(y / HEADER_HEIGHT);
+                    
+                    if (col >= 0 && layer >= 0) {
+                        // Find which L block was clicked by traversing the hierarchy
+                        let blockToToggle = null;
+                        
+                        // Helper to find L block at specific position and layer
+                        const findLBlockAt = (blocks, targetCol, targetLayer, currentLayer = 0, parentOffset = 0) => {
+                            for (const block of blocks) {
+                                if (block.type === 'L') {
+                                    // Calculate visual position with unified logic
+                                    const blockVisualX = currentLayer === 0 ?
+                                        this.actualToVisualX(block.x) :
+                                        parentOffset + this.getVisualOffsetInParent(block, blocks);
+                                    
+                                    if (this.expandedLBlocks.has(block.id)) {
+                                        const width = this.getExpandedWidth(block);
+                                        // Unified: expansion ALWAYS goes BEFORE the L column
+                                        const expansionStart = blockVisualX - width;
+                                        const expansionEnd = blockVisualX - 1;
+                                        
+                                        if (targetCol >= expansionStart && targetCol <= expansionEnd) {
+                                            // Click is inside this L's expansion
+                                            if (currentLayer + 1 === targetLayer) {
+                                                // This expansion is at the target layer
+                                                const localX = targetCol - expansionStart;
+                                                const nestedL = block.children.find(c => 
+                                                    c.type === 'L' && c.x === localX);
+                                                if (nestedL) {
+                                                    return nestedL;
+                                                }
+                                            } else if (currentLayer + 1 < targetLayer) {
+                                                // Need to go deeper
+                                                const result = findLBlockAt(
+                                                    block.children, 
+                                                    targetCol, 
+                                                    targetLayer, 
+                                                    currentLayer + 1, 
+                                                    expansionStart
+                                                );
+                                                if (result) return result;
+                                            }
+                                        } else if (targetCol === blockVisualX && currentLayer === targetLayer) {
+                                            // Click on L column itself
+                                        }
+                                    } else {
+                                        // L is collapsed
+                                        if (targetCol === blockVisualX && currentLayer === targetLayer) {
+                                            return block;
+                                        }
+                                    }
+                                }
+                            }
+                            return null;
+                        };
+                        
+                        blockToToggle = findLBlockAt(this.rectangles, col, layer);
+                        
+                        if (blockToToggle) {
+                            // Toggle expansion
+                            if (this.expandedLBlocks.has(blockToToggle.id)) {
+                                this.expandedLBlocks.delete(blockToToggle.id);
+                                // Also collapse all children
+                                const collapseChildren = (block) => {
+                                    for (const child of block.children) {
+                                        if (child.type === 'L') {
+                                            this.expandedLBlocks.delete(child.id);
+                                            collapseChildren(child);
+                                        }
+                                    }
+                                };
+                                collapseChildren(blockToToggle);
+                            } else {
+                                this.expandedLBlocks.add(blockToToggle.id);
+                            }
+                            
+                            this.buildXMapping();
+                            this.setupCanvas(); // Resize everything and re-render
+                        }
+                    }
                 });
-                */
             }
             
             render() {
                 this.renderGrid();
-                this.renderXHeader();
+                this.renderXHeaders();
                 this.renderYHeader();
+                this.updateCorner();
+            }
+            
+            updateCorner() {
+                // Show the maximum depth of expanded L blocks
+                const depth = this.headerLayers.length;
+                this.corner.textContent = depth.toString();
             }
             
             renderGrid() {
@@ -473,17 +667,14 @@
                 // Clear canvas
                 this.ctx.clearRect(0, 0, width, height);
                 
-                // Calculate visible range
-                const startCol = Math.max(0, Math.floor(-this.offsetX / CELL_SIZE));
-                const endCol = Math.ceil((width - this.offsetX) / CELL_SIZE);
-                const startRow = Math.max(0, Math.floor(-this.offsetY / CELL_SIZE));
-                const endRow = Math.ceil((height - this.offsetY) / CELL_SIZE);
-                
-                // Draw grid lines
+                // Draw grid lines - infinite grid
                 this.ctx.strokeStyle = GRID_COLOR;
                 this.ctx.lineWidth = 1;
                 
-                // Vertical lines
+                // Vertical lines - draw as many as fit on screen
+                const startCol = Math.max(0, Math.floor(-this.offsetX / CELL_SIZE));
+                const endCol = Math.ceil((width - this.offsetX) / CELL_SIZE);
+                
                 for (let col = startCol; col <= endCol; col++) {
                     const x = col * CELL_SIZE + this.offsetX;
                     this.ctx.beginPath();
@@ -493,6 +684,8 @@
                 }
                 
                 // Horizontal lines
+                const startRow = Math.max(0, Math.floor(-this.offsetY / CELL_SIZE));
+                const endRow = Math.ceil((height - this.offsetY) / CELL_SIZE);
                 for (let row = startRow; row <= endRow; row++) {
                     const y = row * CELL_SIZE + this.offsetY;
                     this.ctx.beginPath();
@@ -501,136 +694,13 @@
                     this.ctx.stroke();
                 }
                 
-                // Draw rectangles and L blocks
-                for (const rect of this.rectangles) {
-                    if (rect.type === 'L') {
-                        // Type L: Draw vertical lines for contained A blocks and F dots
-                        const x = rect.x1 * CELL_SIZE + this.offsetX;
-                        
-                        // Skip if completely outside visible area
-                        if (x < -10 || x > width + 10) continue;
-                        
-                        // Draw thick vertical lines for each contained A block
-                        if (rect.containedA && rect.containedA.length > 0) {
-                            this.ctx.strokeStyle = 'rgba(100, 100, 100, 0.8)'; // Dark gray
-                            this.ctx.lineWidth = 5;
-                            
-                            for (const aBlock of rect.containedA) {
-                                const y1 = aBlock.y1 * CELL_SIZE + this.offsetY;
-                                const y2 = (aBlock.y2 + 1) * CELL_SIZE + this.offsetY;
-                                
-                                // Draw vertical line on left side of the A block's Y range
-                                this.ctx.beginPath();
-                                this.ctx.moveTo(x, Math.max(0, y1));
-                                this.ctx.lineTo(x, Math.min(height, y2));
-                                this.ctx.stroke();
-                            }
-                        }
-                        
-                        // Handle F blocks: draw dots and a single dashed line from highest dot
-                        if (rect.containedF && rect.containedF.length > 0) {
-                            // Find the highest (minimum Y) F block
-                            let minY = rect.containedF[0].y;
-                            for (const fBlock of rect.containedF) {
-                                minY = Math.min(minY, fBlock.y);
-                            }
-                            
-                            // Draw all red dots
-                            for (const fBlock of rect.containedF) {
-                                const dotY = fBlock.y * CELL_SIZE + this.offsetY;
-                                
-                                if (dotY >= -10 && dotY <= height + 10) {
-                                    this.ctx.fillStyle = 'rgba(231, 76, 60, 1)'; // Red
-                                    this.ctx.beginPath();
-                                    this.ctx.arc(x, dotY, 8, 0, 2 * Math.PI);
-                                    this.ctx.fill();
-                                    
-                                    // Add border to the dot
-                                    this.ctx.strokeStyle = '#c0392b'; // Darker red
-                                    this.ctx.lineWidth = 2;
-                                    this.ctx.stroke();
-                                }
-                            }
-                            
-                            // Draw single dashed line from the highest dot downward
-                            const startY = minY * CELL_SIZE + this.offsetY;
-                            this.ctx.strokeStyle = TYPE_COLORS['F'] || TYPE_COLORS['default'];
-                            this.ctx.lineWidth = 3;
-                            this.ctx.setLineDash([10, 5]); // 10px dash, 5px gap
-                            this.ctx.beginPath();
-                            this.ctx.moveTo(x, Math.max(startY, 0));
-                            this.ctx.lineTo(x, height);
-                            this.ctx.stroke();
-                            this.ctx.setLineDash([]); // Reset dash pattern
-                        }
-                    } else if (rect.type === 'A') {
-                        // Type A: Draw as rectangle
-                        const x = rect.x1 * CELL_SIZE + this.offsetX;
-                        const y = rect.y1 * CELL_SIZE + this.offsetY;
-                        const w = (rect.x2 - rect.x1 + 1) * CELL_SIZE;
-                        const h = (rect.y2 - rect.y1 + 1) * CELL_SIZE;
-                        
-                        // Skip if rectangle is completely outside visible area
-                        if (x + w < 0 || x > width || y + h < 0 || y > height) continue;
-                        
-                        // Get color for type
-                        const color = TYPE_COLORS[rect.type] || TYPE_COLORS['default'];
-                        
-                        // Draw filled rectangle
-                        this.ctx.fillStyle = color;
-                        this.ctx.fillRect(x, y, w, h);
-                        
-                        // Draw border
-                        this.ctx.strokeStyle = color.replace('0.7', '1');
-                        this.ctx.lineWidth = 2;
-                        this.ctx.strokeRect(x, y, w, h);
-                        
-                        // Draw type label if rectangle is large enough
-                        if (w >= 20 && h >= 20) {
-                            this.ctx.fillStyle = '#333';
-                            this.ctx.font = 'bold 12px sans-serif';
-                            this.ctx.textAlign = 'center';
-                            this.ctx.textBaseline = 'middle';
-                            this.ctx.fillText(rect.type, x + w/2, y + h/2);
-                        }
-                    } else if (rect.type === 'F') {
-                        // Type F: Draw as vertical dashed line with red dot at start
-                        const x = rect.x1 * CELL_SIZE + this.offsetX;
-                        const startY = rect.y1 * CELL_SIZE + this.offsetY;
-                        
-                        // Skip if line is completely outside visible area horizontally
-                        if (x < -10 || x > width + 10) continue;
-                        
-                        // Draw dashed vertical line extending down from the start point
-                        this.ctx.strokeStyle = TYPE_COLORS['F'] || TYPE_COLORS['default'];
-                        this.ctx.lineWidth = 3;
-                        this.ctx.setLineDash([10, 5]); // 10px dash, 5px gap
-                        this.ctx.beginPath();
-                        this.ctx.moveTo(x, Math.max(startY, 0));
-                        this.ctx.lineTo(x, height);
-                        this.ctx.stroke();
-                        this.ctx.setLineDash([]); // Reset dash pattern
-                        
-                        // Draw big red dot at the start if visible
-                        if (startY >= -10 && startY <= height + 10) {
-                            this.ctx.fillStyle = 'rgba(231, 76, 60, 1)'; // Red
-                            this.ctx.beginPath();
-                            this.ctx.arc(x, startY, 8, 0, 2 * Math.PI);
-                            this.ctx.fill();
-                            
-                            // Add border to the dot
-                            this.ctx.strokeStyle = '#c0392b'; // Darker red
-                            this.ctx.lineWidth = 2;
-                            this.ctx.stroke();
-                        }
-                    }
-                }
+                // Render blocks
+                this.renderBlocks(this.rectangles);
                 
-                // Draw thicker lines at origin (on top of rectangles)
+                // Draw origin lines
                 this.ctx.strokeStyle = '#666';
                 this.ctx.lineWidth = 2;
                 
-                // Y-axis
                 if (this.offsetX > -2 && this.offsetX < width) {
                     this.ctx.beginPath();
                     this.ctx.moveTo(this.offsetX, 0);
@@ -638,7 +708,6 @@
                     this.ctx.stroke();
                 }
                 
-                // X-axis
                 if (this.offsetY > -2 && this.offsetY < height) {
                     this.ctx.beginPath();
                     this.ctx.moveTo(0, this.offsetY);
@@ -647,72 +716,447 @@
                 }
             }
             
-            renderXHeader() {
-                const width = this.xHeader.width;
-                const height = this.xHeader.height;
+            renderBlocks(blocks, visualXOffset = -1, insideExpanded = false, depth = 0) {
+                // Render blocks with proper visual offset
+                for (const block of blocks) {
+                    if (block.type === 'L') {
+                        const isExpanded = this.expandedLBlocks.has(block.id);
+                        
+                        if (isExpanded) {
+                            const expansionWidth = this.getExpandedWidth(block);
+                            
+                            let lVisualX, expansionStartX;
+                            
+                            if (!insideExpanded) {
+                                // Top-level: expansion goes BEFORE the L column
+                                lVisualX = this.actualToVisualX(block.x);
+                                expansionStartX = lVisualX - expansionWidth;
+                            } else {
+                                // Nested: expansion REPLACES the L column
+                                lVisualX = visualXOffset + this.getVisualOffsetInParent(block, blocks);
+                                expansionStartX = lVisualX;  // Expansion AT the L position
+                            }
+                            
+                            this.renderBlocks(block.children, expansionStartX, true, depth + 1);
+                        } else {
+                            // Render collapsed L block projection
+                            const x = insideExpanded ? 
+                                (visualXOffset + block.x) * CELL_SIZE + this.offsetX :
+                                this.actualToVisualX(block.x) * CELL_SIZE + this.offsetX;
+                            
+                            // Draw vertical lines for all rectangle block types
+                            const blockTypes = [
+                                { name: 'A', blocks: block.containedA, color: TYPE_COLORS['A'] },
+                                { name: 'U', blocks: block.containedU, color: TYPE_COLORS['U'] },
+                                { name: 'S', blocks: block.containedS, color: TYPE_COLORS['S'] },
+                                { name: 'B', blocks: block.containedB, color: TYPE_COLORS['B'] },
+                                { name: 'E', blocks: block.containedE, color: TYPE_COLORS['E'] }
+                            ];
+                            
+                            for (const typeInfo of blockTypes) {
+                                if (typeInfo.blocks.length > 0) {
+                                    this.ctx.strokeStyle = typeInfo.color.replace('0.7', '0.8');
+                                    this.ctx.lineWidth = 5;
+                                    
+                                    for (const rectBlock of typeInfo.blocks) {
+                                        const y1 = rectBlock.y1 * CELL_SIZE + this.offsetY;
+                                        const y2 = (rectBlock.y2 + 1) * CELL_SIZE + this.offsetY;
+                                        
+                                        this.ctx.beginPath();
+                                        this.ctx.moveTo(x, Math.max(0, y1));
+                                        this.ctx.lineTo(x, Math.min(this.canvas.height, y2));
+                                        this.ctx.stroke();
+                                    }
+                                }
+                            }
+                            
+                            // Draw F dots and dashed line
+                            if (block.containedF.length > 0) {
+                                let minY = block.containedF[0].y;
+                                for (const fBlock of block.containedF) {
+                                    minY = Math.min(minY, fBlock.y);
+                                    
+                                    const dotY = fBlock.y * CELL_SIZE + this.offsetY;
+                                    if (dotY >= -10 && dotY <= this.canvas.height + 10) {
+                                        this.ctx.fillStyle = 'rgba(231, 76, 60, 1)';
+                                        this.ctx.beginPath();
+                                        this.ctx.arc(x, dotY, 8, 0, 2 * Math.PI);
+                                        this.ctx.fill();
+                                        
+                                        this.ctx.strokeStyle = '#c0392b';
+                                        this.ctx.lineWidth = 2;
+                                        this.ctx.stroke();
+                                    }
+                                }
+                                
+                                const startY = minY * CELL_SIZE + this.offsetY;
+                                this.ctx.strokeStyle = TYPE_COLORS['F'];
+                                this.ctx.lineWidth = 3;
+                                this.ctx.setLineDash([10, 5]);
+                                this.ctx.beginPath();
+                                this.ctx.moveTo(x, Math.max(startY, 0));
+                                this.ctx.lineTo(x, this.canvas.height);
+                                this.ctx.stroke();
+                                this.ctx.setLineDash([]);
+                            }
+                        }
+                    } else if (block.type === 'A' || block.type === 'U' || block.type === 'S' || block.type === 'B' || block.type === 'E') {
+                        // Rectangle block - use visual offset if inside expanded L, otherwise use actualToVisualX
+                        const x1 = insideExpanded ? 
+                            (visualXOffset + block.x1) * CELL_SIZE + this.offsetX :
+                            this.actualToVisualX(block.x1) * CELL_SIZE + this.offsetX;
+                        const x2 = insideExpanded ? 
+                            (visualXOffset + block.x2) * CELL_SIZE + this.offsetX :
+                            this.actualToVisualX(block.x2) * CELL_SIZE + this.offsetX;
+                        const y = block.y1 * CELL_SIZE + this.offsetY;
+                        const w = x2 - x1 + CELL_SIZE;
+                        const h = (block.y2 - block.y1 + 1) * CELL_SIZE;
+                        
+                        if (x2 >= 0 && x1 <= this.canvas.width && 
+                            y + h >= 0 && y <= this.canvas.height) {
+                            
+                            this.ctx.fillStyle = TYPE_COLORS[block.type];
+                            this.ctx.fillRect(x1, y, w, h);
+                            
+                            this.ctx.strokeStyle = TYPE_COLORS[block.type].replace('0.7', '1');
+                            this.ctx.lineWidth = 2;
+                            this.ctx.strokeRect(x1, y, w, h);
+                            
+                            if (w >= 20 && h >= 20) {
+                                this.ctx.fillStyle = '#333';
+                                this.ctx.font = 'bold 12px sans-serif';
+                                this.ctx.textAlign = 'center';
+                                this.ctx.textBaseline = 'middle';
+                                this.ctx.fillText(block.type, x1 + w/2, y + h/2);
+                            }
+                        }
+                    } else if (block.type === 'F') {
+                        // F block - use visual offset if inside expanded L, otherwise use actualToVisualX
+                        const x = insideExpanded ?
+                            (visualXOffset + block.x1) * CELL_SIZE + this.offsetX :
+                            this.actualToVisualX(block.x1) * CELL_SIZE + this.offsetX;
+                        const startY = block.y1 * CELL_SIZE + this.offsetY;
+                        
+                        if (x >= -10 && x <= this.canvas.width + 10) {
+                            this.ctx.strokeStyle = TYPE_COLORS['F'];
+                            this.ctx.lineWidth = 3;
+                            this.ctx.setLineDash([10, 5]);
+                            this.ctx.beginPath();
+                            this.ctx.moveTo(x, Math.max(startY, 0));
+                            this.ctx.lineTo(x, this.canvas.height);
+                            this.ctx.stroke();
+                            this.ctx.setLineDash([]);
+                            
+                            if (startY >= -10 && startY <= this.canvas.height + 10) {
+                                this.ctx.fillStyle = 'rgba(231, 76, 60, 1)';
+                                this.ctx.beginPath();
+                                this.ctx.arc(x, startY, 8, 0, 2 * Math.PI);
+                                this.ctx.fill();
+                                
+                                this.ctx.strokeStyle = '#c0392b';
+                                this.ctx.lineWidth = 2;
+                                this.ctx.stroke();
+                            }
+                        }
+                    }
+                }
+            }
+            
+            renderXHeaders() {
+                // Clear existing headers
+                this.xHeadersContainer.innerHTML = '';
                 
-                // Clear header
-                this.xHeaderCtx.clearRect(0, 0, width, height);
+                // Build complete expansion map with proper depth tracking
+                const expansionsByDepth = new Map();
                 
-                // Background
-                this.xHeaderCtx.fillStyle = '#e8e8e8';
-                this.xHeaderCtx.fillRect(0, 0, width, height);
+                const mapExpansions = (blocks, depth, parentExpansionStart) => {
+                    for (const block of blocks) {
+                        if (block.type === 'L' && this.expandedLBlocks.has(block.id)) {
+                            const width = this.getExpandedWidth(block);
+                            
+                            let blockVisualX, expansionStart, expansionEnd, lColumn;
+                            
+                            if (depth === 0) {
+                                // Top-level: expansion goes BEFORE the L column
+                                blockVisualX = this.actualToVisualX(block.x);
+                                expansionStart = blockVisualX - width;
+                                expansionEnd = blockVisualX - 1;
+                                lColumn = blockVisualX;
+                            } else {
+                                // Nested: expansion REPLACES the L column
+                                // Calculate the L's position within parent
+                                blockVisualX = parentExpansionStart + this.getVisualOffsetInParent(block, blocks);
+                                // For nested L, expansion starts AT the L position
+                                expansionStart = blockVisualX;
+                                expansionEnd = blockVisualX + width - 1;
+                                lColumn = -1; // No separate L column for nested (it's replaced by expansion)
+                            }
+                            
+                            if (!expansionsByDepth.has(depth)) {
+                                expansionsByDepth.set(depth, []);
+                            }
+                            
+                            expansionsByDepth.get(depth).push({
+                                block: block,
+                                start: expansionStart,
+                                end: expansionEnd,
+                                lColumn: lColumn
+                            });
+                            
+                            // Recurse for children - they are positioned relative to THIS block's expansion start
+                            mapExpansions(block.children, depth + 1, expansionStart);
+                        }
+                    }
+                };
+                
+                // Helper to calculate visual offset accounting for sibling expansions
+                this.getVisualOffsetInParent = (targetBlock, siblings) => {
+                    let offset = targetBlock.x;
+                    
+                    // Add space for any expanded L blocks before this one
+                    for (const sibling of siblings) {
+                        if (sibling.type === 'L' && sibling.x < targetBlock.x && this.expandedLBlocks.has(sibling.id)) {
+                            offset += this.getExpandedWidth(sibling);
+                        }
+                    }
+                    
+                    return offset;
+                };
+                
+                // Also add top-level expansions to the map for consistent handling
+                expansionsByDepth.set(-1, []);
+                for (const block of this.rectangles) {
+                    if (block.type === 'L' && this.expandedLBlocks.has(block.id)) {
+                        const width = this.getExpandedWidth(block);
+                        const blockVisualX = this.actualToVisualX(block.x);
+                        expansionsByDepth.get(-1).push({
+                            block: block,
+                            start: blockVisualX - width,
+                            end: blockVisualX - 1,
+                            lColumn: blockVisualX
+                        });
+                    }
+                }
+                
+                mapExpansions(this.rectangles, 0, 0);
+                
+                const numLayers = expansionsByDepth.size + 1;
+                const width = this.xHeadersContainer.clientWidth;
                 
                 // Calculate visible columns
                 const startCol = Math.max(0, Math.floor(-this.offsetX / CELL_SIZE));
                 const endCol = Math.ceil((width - this.offsetX) / CELL_SIZE);
                 
-                // Draw column numbers
-                this.xHeaderCtx.fillStyle = HEADER_TEXT_COLOR;
-                this.xHeaderCtx.font = '12px sans-serif';
-                this.xHeaderCtx.textAlign = 'center';
-                this.xHeaderCtx.textBaseline = 'middle';
-                
-                for (let col = startCol; col <= endCol; col++) {
-                    const x = col * CELL_SIZE + this.offsetX + CELL_SIZE / 2;
-                    this.xHeaderCtx.fillText(col.toString(), x, height / 2);
+                for (let layer = 0; layer < numLayers; layer++) {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = HEADER_HEIGHT;
+                    canvas.style.position = 'absolute';
+                    canvas.style.top = (layer * HEADER_HEIGHT) + 'px';
+                    canvas.style.left = '0';
                     
-                    // Draw grid lines
-                    this.xHeaderCtx.strokeStyle = GRID_COLOR;
-                    this.xHeaderCtx.lineWidth = 1;
-                    this.xHeaderCtx.beginPath();
-                    this.xHeaderCtx.moveTo(col * CELL_SIZE + this.offsetX, 0);
-                    this.xHeaderCtx.lineTo(col * CELL_SIZE + this.offsetX, height);
-                    this.xHeaderCtx.stroke();
+                    const ctx = canvas.getContext('2d');
+                    
+                    // Background
+                    ctx.fillStyle = '#e8e8e8';
+                    ctx.fillRect(0, 0, canvas.width, HEADER_HEIGHT);
+                    
+                    // Draw grid lines and content
+                    for (let col = startCol; col <= endCol; col++) {
+                        const x = col * CELL_SIZE + this.offsetX;
+                        
+                        // Draw grid line
+                        ctx.strokeStyle = GRID_COLOR;
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(x, 0);
+                        ctx.lineTo(x, HEADER_HEIGHT);
+                        ctx.stroke();
+                        
+                        let content = { type: 'empty' };
+                        
+                        // Check for expansions at THIS layer's depth
+                        const currentLayerExpansions = layer === 0 ? 
+                            (expansionsByDepth.get(-1) || []) : 
+                            (expansionsByDepth.get(layer - 1) || []);
+                        
+                        let inCurrentLayerExpansion = false;
+                        
+                        // First check if we're in an expansion at this layer
+                        for (const exp of currentLayerExpansions) {
+                            if (col >= exp.start && col <= exp.end) {
+                                // In an expansion at this layer - show the local coordinate
+                                const localX = col - exp.start;
+                                content = { type: 'number', value: localX };
+                                inCurrentLayerExpansion = true;
+                                break;
+                            } else if (col === exp.lColumn && exp.lColumn >= 0) {
+                                content = { type: 'gap' };
+                                inCurrentLayerExpansion = true;
+                                break;
+                            }
+                        }
+                        
+                        // If not in an expansion at this layer, check if we need to show content
+                        if (!inCurrentLayerExpansion) {
+                            if (layer === 0) {
+                                // Base layer: show actual coordinates or collapsed L blocks
+                                const colInfo = this.getColumnInfo(col);
+                                if (colInfo.isInsideExpansion) {
+                                    // Inside an expansion - show local coordinate
+                                    content = { type: 'number', value: colInfo.localX };
+                                } else if (colInfo.lBlock && !this.expandedLBlocks.has(colInfo.lBlock.id)) {
+                                    content = { type: 'collapsed-L', block: colInfo.lBlock };
+                                } else {
+                                    content = { type: 'number', value: colInfo.actualX };
+                                }
+                            } else {
+                                // For layer > 0, check if we're inside a parent expansion
+                                // and show that expansion's content
+                                const parentLayerExpansions = expansionsByDepth.get(layer - 2) || [];
+                                
+                                // For layer 1, also check top-level expansions
+                                const expansionsToCheck = layer === 1 ? 
+                                    expansionsByDepth.get(-1) || [] :
+                                    parentLayerExpansions;
+                                
+                                for (const parentExp of expansionsToCheck) {
+                                    if (col >= parentExp.start && col <= parentExp.end) {
+                                        const localX = col - parentExp.start;
+                                        
+                                        // For nested L blocks, check their actual position
+                                        // accounting for the fact that they expand AT their position, not before
+                                        let foundContent = false;
+                                        for (const child of parentExp.block.children) {
+                                            if (child.type === 'L') {
+                                                const childPos = this.getVisualOffsetInParent(child, parentExp.block.children);
+                                                
+                                                if (this.expandedLBlocks.has(child.id)) {
+                                                    // Expanded nested L - its expansion is AT childPos
+                                                    const childWidth = this.getExpandedWidth(child);
+                                                    if (localX >= childPos && localX < childPos + childWidth) {
+                                                        // We're in the nested expansion area - leave empty
+                                                        content = { type: 'empty' };
+                                                        foundContent = true;
+                                                        break;
+                                                    }
+                                                } else if (localX === childPos) {
+                                                    // Collapsed L at this position
+                                                    content = { type: 'collapsed-L', block: child };
+                                                    foundContent = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        
+                                        if (!foundContent) {
+                                            content = { type: 'number', value: localX };
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        const displayContent = content;
+                        
+                        // Render content
+                        if (displayContent.type === 'collapsed-L') {
+                            // Draw + button
+                            ctx.strokeStyle = '#666';
+                            ctx.lineWidth = 3;
+                            ctx.beginPath();
+                            ctx.moveTo(x + CELL_SIZE/2, 0);
+                            ctx.lineTo(x + CELL_SIZE/2, HEADER_HEIGHT);
+                            ctx.stroke();
+                            
+                            ctx.fillStyle = 'white';
+                            ctx.beginPath();
+                            ctx.arc(x + CELL_SIZE/2, HEADER_HEIGHT/2, 10, 0, 2 * Math.PI);
+                            ctx.fill();
+                            
+                            ctx.strokeStyle = '#333';
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                            
+                            ctx.fillStyle = '#333';
+                            ctx.font = 'bold 16px sans-serif';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText('+', x + CELL_SIZE/2, HEADER_HEIGHT/2);
+                        } else if (displayContent.type === 'number') {
+                            // Show number
+                            ctx.fillStyle = HEADER_TEXT_COLOR;
+                            ctx.font = '12px sans-serif';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(displayContent.value.toString(), x + CELL_SIZE/2, HEADER_HEIGHT/2);
+                        } else if (displayContent.type === 'gap') {
+                            // Visual gap indicator
+                            ctx.fillStyle = '#f5f5f5';
+                            ctx.fillRect(x, 0, CELL_SIZE, HEADER_HEIGHT);
+                            
+                            // Draw subtle vertical line to indicate expansion boundary
+                            ctx.strokeStyle = '#ddd';
+                            ctx.lineWidth = 2;
+                            ctx.beginPath();
+                            ctx.moveTo(x + CELL_SIZE/2, HEADER_HEIGHT * 0.2);
+                            ctx.lineTo(x + CELL_SIZE/2, HEADER_HEIGHT * 0.8);
+                            ctx.stroke();
+                        }
+                        // 'empty' type cells remain blank
+                    }
+                    
+                    // Draw bottom border
+                    ctx.strokeStyle = '#333';
+                    ctx.lineWidth = layer === numLayers - 1 ? 2 : 1;
+                    ctx.beginPath();
+                    ctx.moveTo(0, HEADER_HEIGHT - 1);
+                    ctx.lineTo(canvas.width, HEADER_HEIGHT - 1);
+                    ctx.stroke();
+                    
+                    this.xHeadersContainer.appendChild(canvas);
                 }
+            }
+            
+            getNestedColumnInfo(parentLBlock, localX, layer) {
+                // Find nested L blocks within parent and check if localX falls within them
+                for (const child of parentLBlock.children) {
+                    if (child.type === 'L' && this.expandedLBlocks.has(child.id)) {
+                        const childWidth = this.getExpandedWidth(child);
+                        if (localX >= child.x && localX < child.x + childWidth) {
+                            return { localX: localX - child.x };
+                        }
+                    }
+                }
+                return null;
             }
             
             renderYHeader() {
                 const width = this.yHeader.width;
                 const height = this.yHeader.height;
                 
-                // Clear header
                 this.yHeaderCtx.clearRect(0, 0, width, height);
-                
-                // Background
                 this.yHeaderCtx.fillStyle = '#e8e8e8';
                 this.yHeaderCtx.fillRect(0, 0, width, height);
                 
-                // Calculate visible rows
                 const startRow = Math.max(0, Math.floor(-this.offsetY / CELL_SIZE));
                 const endRow = Math.ceil((height - this.offsetY) / CELL_SIZE);
                 
-                // Draw row numbers
                 this.yHeaderCtx.fillStyle = HEADER_TEXT_COLOR;
                 this.yHeaderCtx.font = '12px sans-serif';
                 this.yHeaderCtx.textAlign = 'center';
                 this.yHeaderCtx.textBaseline = 'middle';
                 
                 for (let row = startRow; row <= endRow; row++) {
-                    const y = row * CELL_SIZE + this.offsetY + CELL_SIZE / 2;
-                    this.yHeaderCtx.fillText(row.toString(), width / 2, y);
+                    const y = row * CELL_SIZE + this.offsetY;
+                    this.yHeaderCtx.fillText(row.toString(), width / 2, y + CELL_SIZE / 2);
                     
-                    // Draw grid lines
                     this.yHeaderCtx.strokeStyle = GRID_COLOR;
                     this.yHeaderCtx.lineWidth = 1;
                     this.yHeaderCtx.beginPath();
-                    this.yHeaderCtx.moveTo(0, row * CELL_SIZE + this.offsetY);
-                    this.yHeaderCtx.lineTo(width, row * CELL_SIZE + this.offsetY);
+                    this.yHeaderCtx.moveTo(0, y);
+                    this.yHeaderCtx.lineTo(width, y);
                     this.yHeaderCtx.stroke();
                 }
             }
