@@ -106,45 +106,57 @@ impl OccupationTracker {
     }
 
     /// Tries to allocate the value at the given register range, if not already allocated.
-    /// Returns false if the value was already allocated.
+    ///
     /// If not possible to allocate on hint, allocates elsewhere and returns false.
-    /// Returns true if allocation happened at hint.
-    pub fn try_allocate_with_hint(&mut self, origin: ValueOrigin, hint: Range<u32>) -> bool {
+    ///
+    /// Returns if allocation happened at hint, and the liveness end if allocated at all.
+    pub fn try_allocate_with_hint(
+        &mut self,
+        origin: ValueOrigin,
+        hint: Range<u32>,
+    ) -> (bool, Option<usize>) {
         let live_range = self.natural_liveness(origin);
 
         if self.origin_map.contains_key(&origin) {
-            return false;
+            return (false, None);
         }
 
+        let end_of_liveness = Some(live_range.end);
         let existing_entries = self.reg_occupation_vec(&live_range);
-        if overlaps_any(existing_entries.iter(), &hint) {
-            // Cannot allocate at hint, allocate elsewhere
-            self.allocate_where_possible(
-                origin,
-                NonZeroU32::new(hint.len() as u32).expect("size must be non-zero"),
-                live_range,
-                existing_entries,
-            );
-            false
-        } else {
-            // Can allocate at hint
-            self.insert(AllocationType::Value(origin), hint, live_range);
-            true
-        }
+        (
+            if overlaps_any(existing_entries.iter(), &hint) {
+                // Cannot allocate at hint, allocate elsewhere
+                self.allocate_where_possible(
+                    origin,
+                    NonZeroU32::new(hint.len() as u32).expect("size must be non-zero"),
+                    live_range,
+                    existing_entries,
+                );
+                false
+            } else {
+                // Can allocate at hint
+                self.insert(AllocationType::Value(origin), hint, live_range);
+                true
+            },
+            end_of_liveness,
+        )
     }
 
     /// Allocates a value wherever there is space, if not already allocated.
     ///
-    /// Returns the range allocated for the value.
-    pub fn try_allocate(&mut self, origin: ValueOrigin, size: NonZeroU32) {
+    /// Returns the end of liveness range if the value was allocated.
+    pub fn try_allocate(&mut self, origin: ValueOrigin, size: NonZeroU32) -> Option<usize> {
         let live_range = self.natural_liveness(origin);
+        let end_of_liveness = live_range.end;
 
         if self.origin_map.contains_key(&origin) {
-            return;
+            return None;
         }
 
         let existing_entries = self.reg_occupation_vec(&live_range);
         self.allocate_where_possible(origin, size, live_range, existing_entries);
+
+        Some(end_of_liveness)
     }
 
     /// Gets the current allocation of a value.

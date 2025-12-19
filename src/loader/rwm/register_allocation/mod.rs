@@ -77,13 +77,24 @@ impl OptimisticAllocator {
     /// Allocates the inputs of a node that have not been allocated yet.
     fn allocate_inputs<'a, S: Settings<'a>>(
         &mut self,
+        node_index: usize,
         inputs: &[NodeInput],
         nodes: &[liveness_dag::Node<'a>],
     ) {
         for input in inputs {
             if let NodeInput::Reference(origin) = input {
-                self.occupation_tracker
+                let end_of_liveness = self
+                    .occupation_tracker
                     .try_allocate(*origin, assert_non_zero(word_count::<S>(nodes, *origin)));
+
+                // If the input was just allocated, it must end its life at this node.
+                // Otherwise, it should already have been allocated.
+                if let Some(end_of_liveness) = end_of_liveness {
+                    assert_eq!(
+                        end_of_liveness, node_index,
+                        "liveness bug: value allocated after its last usage"
+                    );
+                }
             }
         }
     }
@@ -93,6 +104,7 @@ impl OptimisticAllocator {
         &mut self,
         node_index: usize,
         output_types: &[ValType],
+        outputs_may_live: bool,
     ) {
         for (output_idx, output_type) in output_types.iter().enumerate() {
             let origin = ValueOrigin {
@@ -100,18 +112,41 @@ impl OptimisticAllocator {
                 output_idx: output_idx as u32,
             };
             let num_words = assert_non_zero(word_count_type::<S>(*output_type));
-            self.occupation_tracker.try_allocate(origin, num_words);
+            let end_of_liveness = self.occupation_tracker.try_allocate(origin, num_words);
+
+            // If the output was just allocated, usually it has no users and ends its life
+            // at this node. However, in some cases (like loop inputs), the output may live
+            // beyond this node.
+            if !outputs_may_live && let Some(end_of_liveness) = end_of_liveness {
+                assert_eq!(
+                    end_of_liveness,
+                    node_index + 1,
+                    "liveness bug: value allocated after its last usage"
+                );
+            }
         }
     }
 }
 
 /// Allocates the inputs for a break node.
 fn handle_break<'a, S: Settings<'a>>(
+    node_index: usize,
     nodes: &[liveness_dag::Node<'a>],
     oa: &mut VecDeque<OptimisticAllocator>,
     inputs: &[NodeInput],
     break_target: &BreakTarget,
+    is_conditional: bool,
 ) -> usize {
+    // For conditional breaks, the last input is the condition,
+    // which is not tied to the break target.
+    let inputs = if is_conditional {
+        let (break_inputs, condition) = inputs.split_at(inputs.len() - 1);
+        oa[0].allocate_inputs::<S>(node_index, condition, nodes);
+        break_inputs
+    } else {
+        inputs
+    };
+
     let mut number_of_saved_copies = 0;
 
     let curr_depth = oa.len() as u32 - 1;
@@ -124,10 +159,7 @@ fn handle_break<'a, S: Settings<'a>>(
             for input in inputs {
                 let origin = unwrap_ref(input, "break inputs must be references");
                 let num_words = word_count::<S>(nodes, *origin);
-                if oa[0]
-                    .occupation_tracker
-                    .try_allocate_with_hint(*origin, next_reg..next_reg + num_words)
-                {
+                if try_allocate_with_hint(oa, node_index, *origin, next_reg..next_reg + num_words) {
                     number_of_saved_copies += num_words as usize;
                 }
                 next_reg += num_words;
@@ -149,10 +181,8 @@ fn handle_break<'a, S: Settings<'a>>(
                     .expect("loop input must be allocated");
                 let num_words = loop_input_allocation.len();
                 let break_origin = unwrap_ref(break_input, "break inputs must be references");
-                if oa[0]
-                    .occupation_tracker
-                    .try_allocate_with_hint(*break_origin, loop_input_allocation)
-                {
+
+                if try_allocate_with_hint(oa, node_index, *break_origin, loop_input_allocation) {
                     number_of_saved_copies += num_words;
                 }
             }
@@ -186,10 +216,8 @@ fn handle_break<'a, S: Settings<'a>>(
 
                 // Value origin at the current level we are setting the allocation for.
                 let break_origin = unwrap_ref(break_input, "break inputs must be references");
-                if oa[0]
-                    .occupation_tracker
-                    .try_allocate_with_hint(*break_origin, label_allocation)
-                {
+
+                if try_allocate_with_hint(oa, node_index, *break_origin, label_allocation) {
                     number_of_saved_copies += num_words;
                 }
             }
@@ -260,10 +288,12 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                             let origin =
                                 unwrap_ref(input, "function call inputs must be references");
                             let num_words = word_count::<S>(&nodes, *origin);
-                            if oa[0]
-                                .occupation_tracker
-                                .try_allocate_with_hint(*origin, next_arg..next_arg + num_words)
-                            {
+                            if try_allocate_with_hint(
+                                oa,
+                                index,
+                                *origin,
+                                next_arg..next_arg + num_words,
+                            ) {
                                 number_of_saved_copies += num_words as usize;
                             }
                             next_arg += num_words;
@@ -271,8 +301,8 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                     }
                     _ => {
                         // This is the general case. Allocates inputs and outputs that have not been allocated yet.
-                        oa[0].allocate_inputs::<S>(&node.inputs, &nodes);
-                        oa[0].allocate_outputs::<S>(index, &node.output_types);
+                        oa[0].allocate_inputs::<S>(index, &node.inputs, &nodes);
+                        oa[0].allocate_outputs::<S>(index, &node.output_types, false);
                     }
                 };
 
@@ -283,7 +313,7 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                 oa[0].labels.insert(id, index);
 
                 // Allocate any remaining output that was not allocated yet.
-                oa[0].allocate_outputs::<S>(index, &node.output_types);
+                oa[0].allocate_outputs::<S>(index, &node.output_types, false);
 
                 Operation::Label { id }
             }
@@ -293,7 +323,7 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
             } => {
                 // As with the general case, we allocate the inputs of the loop node.
                 // It has no outputs that would require allocation.
-                oa[0].allocate_inputs::<S>(&node.inputs, &nodes);
+                oa[0].allocate_inputs::<S>(index, &node.inputs, &nodes);
 
                 // We need a new allocation tracker for the loop body.
                 // It is derived from the current one, completely blocking the
@@ -351,8 +381,8 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                     index_in_parent: Some(index),
                 };
 
-                // Allocate the rest of the inputs.
-                loop_oa.allocate_outputs::<S>(0, &loop_nodes[0].output_types);
+                // Allocate the rest of the input node values (inside the loop body).
+                loop_oa.allocate_outputs::<S>(0, &loop_nodes[0].output_types, true);
                 oa.push_front(loop_oa);
 
                 let (loop_nodes, loop_saved_copies) =
@@ -393,30 +423,6 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
 
                 number_of_saved_copies += loop_saved_copies;
 
-                // We have to set the allocations for the inputs of the loop node, mirroring
-                // the allocations set in the loop body.
-                for (input_idx, input) in node.inputs.iter().enumerate() {
-                    // Get the allocation assigned to the loop input inside the body.
-                    let preferred_alloc = loop_dag
-                        .block_data
-                        .nodes_outputs
-                        .get(&ValueOrigin {
-                            node: 0,
-                            output_idx: input_idx as u32,
-                        })
-                        .unwrap()
-                        .clone();
-                    let alloc_len = preferred_alloc.len();
-
-                    let origin = unwrap_ref(input, "loop inputs must be references");
-                    if oa[0]
-                        .occupation_tracker
-                        .try_allocate_with_hint(*origin, preferred_alloc)
-                    {
-                        number_of_saved_copies += alloc_len;
-                    }
-                }
-
                 Operation::Loop {
                     sub_dag: loop_dag,
                     break_targets,
@@ -424,25 +430,17 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
             }
             Operation::Br(break_target) => {
                 number_of_saved_copies +=
-                    handle_break::<S>(&nodes, oa, node.inputs.as_slice(), &break_target);
+                    handle_break::<S>(index, &nodes, oa, &node.inputs, &break_target, false);
                 Operation::Br(break_target)
             }
             Operation::BrIf(break_target) => {
-                number_of_saved_copies += handle_break::<S>(
-                    &nodes,
-                    oa,
-                    &node.inputs[..&node.inputs.len() - 1],
-                    &break_target,
-                );
+                number_of_saved_copies +=
+                    handle_break::<S>(index, &nodes, oa, &node.inputs, &break_target, true);
                 Operation::BrIf(break_target)
             }
             Operation::BrIfZero(break_target) => {
-                number_of_saved_copies += handle_break::<S>(
-                    &nodes,
-                    oa,
-                    &node.inputs[..&node.inputs.len() - 1],
-                    &break_target,
-                );
+                number_of_saved_copies +=
+                    handle_break::<S>(index, &nodes, oa, &node.inputs, &break_target, true);
                 Operation::BrIfZero(break_target)
             }
             Operation::BrTable { targets } => {
@@ -456,8 +454,12 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                             .map(|&idx| node.inputs[idx as usize].clone()),
                     );
                     number_of_saved_copies +=
-                        handle_break::<S>(&nodes, oa, &inputs, &target.target);
+                        handle_break::<S>(index, &nodes, oa, &inputs, &target.target, false);
                 }
+                // Allocate the selector input
+                let selector_input = &node.inputs[node.inputs.len() - 1..];
+                oa[0].allocate_inputs::<S>(index, selector_input, &nodes);
+
                 Operation::BrTable { targets }
             }
         };
@@ -472,6 +474,26 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
     }
 
     (new_nodes.try_into_vec().unwrap(), number_of_saved_copies)
+}
+
+fn try_allocate_with_hint(
+    oa: &mut VecDeque<OptimisticAllocator>,
+    node_index: usize,
+    origin: ValueOrigin,
+    hint: Range<u32>,
+) -> bool {
+    let (at_hint, end_of_liveness) = oa[0]
+        .occupation_tracker
+        .try_allocate_with_hint(origin, hint);
+
+    if let Some(end_of_liveness) = end_of_liveness {
+        assert_eq!(
+            end_of_liveness, node_index,
+            "liveness bug: value allocated after its last usage"
+        );
+    }
+
+    at_hint
 }
 
 /// Allocates registers for a given function DAG. It is not optimal, but it tries
