@@ -44,7 +44,7 @@ The way a function call happens is this:
   where the caller's `RA` and `FP` are to be stored;
 - the `CALL` instruction sets up the callee frame pointer, saves the caller's `RA` and `FP` at the specified offset, and jumps to the callee code.
 - when the callee must return, it issues the `RET` instruction, passing as argument the offset where the caller's `RA` and `FP` are stored;
-- the `RET`` instruction restores the caller's`FP` and jumps to the return address stored in the callee frame.
+- the `RET`` instruction restores the caller's `FP` and jumps to the return address stored in the callee frame.
 - the caller can then read the output words from same offset where it wrote the input words.
 
 Two alternatives were considered, which have trade-offs, but it is not clear if they are better overall:
