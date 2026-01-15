@@ -539,7 +539,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 // Processing is complete. Just return itself.
                 FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
             }
-            FunctionProcessingStage::LivenessDag(generic_blockless_dag) => {
+            FunctionProcessingStage::LivenessDag(_generic_blockless_dag) => {
                 // TODO: further process the RW pipeline
                 // For now, returning a fake empty flat asm.
                 let flat_asm = WriteOnceAsm {
