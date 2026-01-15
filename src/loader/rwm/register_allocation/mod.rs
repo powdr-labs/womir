@@ -75,7 +75,7 @@ struct OptimisticAllocator {
 
 impl OptimisticAllocator {
     /// Allocates the inputs of a node that have not been allocated yet.
-    fn allocate_inputs<'a, S: Settings<'a>>(
+    fn allocate_inputs<'a, S: Settings>(
         &mut self,
         node_index: usize,
         inputs: &[NodeInput],
@@ -100,7 +100,7 @@ impl OptimisticAllocator {
     }
 
     /// Allocates the outputs of a node that have not been allocated yet.
-    fn allocate_outputs<'a, S: Settings<'a>>(
+    fn allocate_outputs<'a, S: Settings>(
         &mut self,
         node_index: usize,
         output_types: &[ValType],
@@ -129,7 +129,7 @@ impl OptimisticAllocator {
 }
 
 /// Allocates the inputs for a break node.
-fn handle_break<'a, S: Settings<'a>>(
+fn handle_break<'a, S: Settings>(
     node_index: usize,
     nodes: &[liveness_dag::Node<'a>],
     oa: &mut VecDeque<OptimisticAllocator>,
@@ -228,7 +228,7 @@ fn handle_break<'a, S: Settings<'a>>(
     number_of_saved_copies
 }
 
-fn recursive_block_allocation<'a, S: Settings<'a>>(
+fn recursive_block_allocation<'a, S: Settings>(
     func_idx: u32,
     mut nodes: Vec<liveness_dag::Node<'a>>,
     oa: &mut VecDeque<OptimisticAllocator>,
@@ -483,7 +483,7 @@ fn try_allocate_with_hint(
 /// Does the allocation bottom up, following the execution paths independently,
 /// proposing register assignment for future nodes (so to avoid copies), but
 /// leaving a final assignment for the traversed nodes.
-pub fn optimistic_allocation<'a, S: Settings<'a>>(
+pub fn optimistic_allocation<'a, S: Settings>(
     func_idx: u32,
     dag: LivenessDag<'a>,
 ) -> (AllocatedDag<'a>, usize) {
@@ -566,6 +566,6 @@ fn assert_non_zero(value: u32) -> NonZeroU32 {
 }
 
 /// Gets the word count of a value origin
-fn word_count<'a, S: Settings<'a>>(nodes: &[liveness_dag::Node<'a>], origin: ValueOrigin) -> u32 {
+fn word_count<'a, S: Settings>(nodes: &[liveness_dag::Node<'a>], origin: ValueOrigin) -> u32 {
     word_count_type::<S>(type_of(nodes, origin))
 }

@@ -1,7 +1,12 @@
 use crate::{
     loader::{
-        settings::{ComparisonFunction, JumpCondition, ReturnInfosToCopy, Settings, WasmOpInput},
-        wom::flattening::{Context, TrapReason, Tree},
+        settings::{JumpCondition, Settings},
+        wom::{
+            flattening::{Context, TrapReason, Tree},
+            settings::{
+                ComparisonFunction, ReturnInfosToCopy, Settings as WomSettings, WasmOpInput,
+            },
+        },
     },
     wom_interpreter::linker,
 };
@@ -12,10 +17,7 @@ type Ctx<'a, 'b> = Context<'a, 'b, GenericIrSetting>;
 
 pub struct GenericIrSetting;
 
-#[allow(refining_impl_trait)]
-impl<'a> Settings<'a> for GenericIrSetting {
-    type Directive = Directive<'a>;
-
+impl Settings for GenericIrSetting {
     fn bytes_per_word() -> u32 {
         4
     }
@@ -31,6 +33,11 @@ impl<'a> Settings<'a> for GenericIrSetting {
     fn is_relative_jump_available() -> bool {
         true
     }
+}
+
+#[allow(refining_impl_trait)]
+impl<'a> WomSettings<'a> for GenericIrSetting {
+    type Directive = Directive<'a>;
 
     fn use_non_deterministic_function_outputs() -> bool {
         true

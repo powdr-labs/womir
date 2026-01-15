@@ -1,4 +1,8 @@
 //! Pass that takes a blockless dag and calculates liveness information for each node.
+//!
+//! TODO: I think there is a way to merge this pass with register allocation, by using
+//! the same bottom-up algorithm used in wom::flattening::allocate_registers, keeping
+//! track of the state independently for each execution path.
 
 use std::collections::{HashMap, VecDeque};
 

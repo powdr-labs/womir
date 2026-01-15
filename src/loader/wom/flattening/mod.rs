@@ -36,11 +36,11 @@ use crate::loader::{
     blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
     byte_size,
     dag::{NodeInput, ValueOrigin},
-    settings::{
-        ComparisonFunction, JumpCondition, LoopFrameLayout, ReturnInfosToCopy, Settings,
-        WasmOpInput,
+    settings::JumpCondition,
+    wom::{
+        flattening::allocate_registers::Error,
+        settings::{ComparisonFunction, LoopFrameLayout, ReturnInfosToCopy, Settings, WasmOpInput},
     },
-    wom::flattening::allocate_registers::Error,
     word_count, word_count_type,
 };
 

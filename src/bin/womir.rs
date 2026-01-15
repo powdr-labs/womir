@@ -127,7 +127,7 @@ fn main() -> wasmparser::Result<()> {
     match cli.command {
         Command::Compile { wasm_file } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
-            let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?
+            let program = womir::loader::load_wasm(&wasm_bytes)?
                 .default_par_process_all_functions(cli.rw_pipeline)?;
 
             if let Err(err) = dump_ir(&program) {
@@ -143,7 +143,7 @@ fn main() -> wasmparser::Result<()> {
             data_inputs,
         } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
-            let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?
+            let program = womir::loader::load_wasm(&wasm_bytes)?
                 .default_par_process_all_functions(cli.rw_pipeline)?;
 
             if let Err(err) = dump_ir(&program) {
@@ -195,7 +195,7 @@ mod tests {
             "Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}"
         );
         let wasm_file = std::fs::read(path).unwrap();
-        let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+        let program = womir::loader::load_wasm(&wasm_file)
             .unwrap()
             .default_process_all_functions(false)
             .unwrap();
@@ -524,7 +524,7 @@ mod tests {
                 for (mod_name, line, asserts) in modules {
                     println!("Testing module: {} at line {line}", mod_name.display());
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+                    let program = womir::loader::load_wasm(&wasm_file)
                         .unwrap()
                         .default_par_process_all_functions(false)
                         .unwrap();
