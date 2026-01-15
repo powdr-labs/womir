@@ -546,7 +546,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 }
                 FunctionProcessingStage::RegisterAllocatedDag(allocated_dag)
             }
-            FunctionProcessingStage::RegisterAllocatedDag(allocated_dag) => {
+            FunctionProcessingStage::RegisterAllocatedDag(_allocated_dag) => {
                 // TODO: further process the RW pipeline
                 // For now, returning a fake empty flat asm.
                 let flat_asm = WriteOnceAsm {
