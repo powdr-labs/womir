@@ -35,3 +35,7 @@ This files describes all the optimizations ideas we left out for now.
   to a tail call. We can even do this for calls where its outputs
   are not related to the return values, because we can set the
   return registers before the tail call.
+
+- [liveness]: calculate the liveness for all possible control flow paths,
+  releasing values earlier when possible, which may reduce register
+  pressure.
