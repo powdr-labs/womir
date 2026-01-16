@@ -172,6 +172,7 @@ fn handle_break<'a, S: Settings<'a>>(
             let target_idx = break_target.depth as usize;
             for (input_index, break_input) in inputs.iter().enumerate() {
                 let loop_input_origin = ValueOrigin {
+                    // Node 0 is always the input node of a block.
                     node: 0,
                     output_idx: input_index as u32,
                 };
@@ -250,28 +251,8 @@ fn recursive_block_allocation<'a, S: Settings<'a>>(
                     Op::Call { .. } | Op::CallIndirect { .. } => {
                         // TODO: implement a simple heuristic to try to avoid having to
                         // copy the function outputs to the slots allocated for them by
-                        // the nodes who uses them as inputs.
-                        //
-                        // The idea goes like this: we first check if an output slot
-                        // was specifically requested by the user node with a hint.
-                        // If it was, then we most likely have to do copy it anyway, so
-                        // we stop. If it wasn't, we check if between this call and the last
-                        // user of the output there are no other function calls (and we
-                        // must check inside the loop blocks as well). If there are not,
-                        // then we can set the output slots to the ones that naturally
-                        // follow from the function call, avoiding a register copy. In this
-                        // case, it is also possible that we can shift the call frame
-                        // itself some slots up, as the removal of the original output slots
-                        // might have freed up some space.
-                        //
-                        // The search can follow uncoditional breaks, skipping code that
-                        // will not be executed in this path.
-                        //
-                        // Since the search only happens in between function calls, this
-                        // heuristic is still linear in the number of nodes.
-                        //
-                        // It might leave holes in the register allocation, but the
-                        // optimization problem is NP-hard, so we must stop somewhere.
+                        // the nodes who uses them as inputs. The details are in
+                        // TODO-optimizations.txt.
 
                         // On a given node index, the one after the last used slot is the
                         // start of the called function frame. From there, two slots are

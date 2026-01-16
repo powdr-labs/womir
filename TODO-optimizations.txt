@@ -39,3 +39,27 @@ This files describes all the optimizations ideas we left out for now.
 - [liveness]: calculate the liveness for all possible control flow paths,
   releasing values earlier when possible, which may reduce register
   pressure.
+
+- [rw-register-allocation]: implement a simple heuristic to try to avoid
+  having to copy the function outputs to the slots allocated for them by
+  the nodes who uses them as inputs.
+  
+  The idea goes like this: we first check if an output slot was specifically
+  requested by the user node with a hint. If it was, then we most likely
+  have to do copy it anyway, so we stop. If it wasn't, we check if between
+  this call and the last user of the output there are no other function calls
+  (and we must check inside the loop blocks as well). If there are not,
+  then we can set the output slots to the ones that naturally
+  follow from the function call, avoiding a register copy. In this
+  case, it is also possible that we can shift the call frame
+  itself some slots up, as the removal of the original output slots
+  might have freed up some space.
+
+  The search can follow uncoditional breaks, skipping code that
+  will not be executed in this path.
+
+  Since the search only happens in between function calls, this
+  heuristic is still linear in the number of nodes.
+ 
+  It might leave holes in the register allocation, but the
+  optimization problem is NP-hard, so we must stop somewhere.
