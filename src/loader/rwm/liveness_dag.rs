@@ -12,6 +12,8 @@ use crate::loader::{
 #[derive(Debug)]
 pub struct Liveness {
     /// Last usage of a value produced by a node.
+    ///
+    /// Maps (node index, output index) to the index of the last node that uses it.
     last_usage: HashMap<(usize, u32), usize>,
 
     /// The set of outputs indexed from the Input node that are redirected
@@ -21,7 +23,7 @@ pub struct Liveness {
     ///
     /// This is useful to detect outer values that are read by the loop, but
     /// not written, so they can be preserved across the entire loop execution,
-    /// eliding uneccessary copies.
+    /// eliding unnecessary copies.
     ///
     /// On the toplevel block (which is not a loop), this is always empty.
     redirected_inputs: Vec<u32>,
@@ -106,9 +108,9 @@ fn process_block<'a>(
                         depth += 1;
                     }
 
-                    // If the mapped output index matches the input index, this
-                    // value was directly carried over from the matching iteration
-                    // input.
+                    // The value is being carried over as-is only if the mapped
+                    // output index matches the input index. If not, we mark it
+                    // as not redirected.
                     if output_idx != Some(input_idx as u32) {
                         control_stack[break_target.depth as usize].is_input_redirected[input_idx] =
                             false;
