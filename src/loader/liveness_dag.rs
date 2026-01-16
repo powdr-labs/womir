@@ -108,9 +108,9 @@ fn process_block<'a>(
                         depth += 1;
                     }
 
-                    // If the mapped output index matches the input index, this
-                    // value was directly carried over from the matching iteration
-                    // input.
+                    // The value is being carried over as-is only if the mapped
+                    // output index matches the input index. If not, we mark it
+                    // as not redirected.
                     if output_idx != Some(input_idx as u32) {
                         control_stack[break_target.depth as usize].is_input_redirected[input_idx] =
                             false;
