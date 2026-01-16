@@ -35,7 +35,7 @@ pub struct OccupationTracker {
     allocations: Vec<AllocationEntry>,
 }
 
-// Iterates over the consolidated ranges of a given set of overlapping ranges.
+/// Iterates over the consolidated ranges of a given set of overlapping ranges.
 struct RangeConsolidationIterator<T> {
     reverse_sorted_ranges: Vec<Range<T>>,
 }
