@@ -12,6 +12,8 @@ use crate::loader::{
 #[derive(Debug)]
 pub struct Liveness {
     /// Last usage of a value produced by a node.
+    ///
+    /// Maps (node index, output index) to the index of the last node that uses it.
     last_usage: HashMap<(usize, u32), usize>,
 
     /// The set of outputs indexed from the Input node that are redirected
@@ -21,7 +23,7 @@ pub struct Liveness {
     ///
     /// This is useful to detect outer values that are read by the loop, but
     /// not written, so they can be preserved across the entire loop execution,
-    /// eliding uneccessary copies.
+    /// eliding unnecessary copies.
     ///
     /// On the toplevel block (which is not a loop), this is always empty.
     redirected_inputs: Vec<u32>,

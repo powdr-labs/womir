@@ -514,7 +514,6 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
             FunctionProcessingStage::BlocklessDag(blockless_dag) => {
                 if use_rw {
                     // Convert the blockless DAG to a liveness DAG representation.
-                    println!("Generating liveness DAG for function {}", func_idx);
                     let liveness_dag = LivenessDag::new(blockless_dag);
                     FunctionProcessingStage::LivenessDag(liveness_dag)
                 } else {
