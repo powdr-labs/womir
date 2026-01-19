@@ -442,7 +442,7 @@ pub trait FunctionProcessingStage<'a, S: Settings>: Sized {
 ///
 /// The common passes betwen Wom and RWM.
 #[derive(Debug)]
-pub enum CommonFunctionProcessingStage<'a> {
+pub enum CommonStages<'a> {
     // Common stages
     Unparsed(FunctionBody<'a>),
     BlockTree {
@@ -460,7 +460,7 @@ pub enum CommonFunctionProcessingStage<'a> {
     BlocklessDag(BlocklessDag<'a>),
 }
 
-impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonFunctionProcessingStage<'a> {
+impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
     type LastStage = BlocklessDag<'a>;
 
     fn advance_stage(
@@ -571,7 +571,7 @@ pub struct PartiallyParsedProgram<'a, S: Settings> {
     /// refers to the functions defined in the module.
     ///
     /// Upon creation, the functions have not yet been parsed and processed.
-    pub functions: Vec<CommonFunctionProcessingStage<'a>>,
+    pub functions: Vec<CommonStages<'a>>,
 }
 
 impl<'a, S: Settings> PartiallyParsedProgram<'a, S> {
@@ -651,7 +651,7 @@ impl<'a, S: Settings> PartiallyParsedProgram<'a, S> {
         self,
     ) -> wasmparser::Result<Program<'a, FPS::LastStage>>
     where
-        FPS: FunctionProcessingStage<'a, S> + From<CommonFunctionProcessingStage<'a>>,
+        FPS: FunctionProcessingStage<'a, S> + From<CommonStages<'a>>,
     {
         let label_gen = AtomicU32::new(0);
         let mut stats = Statistics::default();
@@ -689,7 +689,7 @@ where
         stats: Option<&mut Statistics>,
     ) -> wasmparser::Result<Program<'a, FPS::LastStage>>
     where
-        FPS: FunctionProcessingStage<'a, S> + Send + From<CommonFunctionProcessingStage<'a>> + 'a,
+        FPS: FunctionProcessingStage<'a, S> + Send + From<CommonStages<'a>> + 'a,
         FPS::LastStage: Send + 'a,
         P: Fn(u32, FPS, &S, &Module<'a>, &AtomicU32, Option<&mut Statistics>) -> FPS::LastStage
             + Send
@@ -755,7 +755,7 @@ where
         self,
     ) -> wasmparser::Result<Program<'a, FPS::LastStage>>
     where
-        FPS: FunctionProcessingStage<'a, S> + Send + From<CommonFunctionProcessingStage<'a>> + 'a,
+        FPS: FunctionProcessingStage<'a, S> + Send + From<CommonStages<'a>> + 'a,
         FPS::LastStage: Send + 'a,
     {
         let mut stats = Statistics::default();
@@ -1014,8 +1014,7 @@ pub fn load_wasm<'a, S: Settings>(
                         // We generated a wrapper for each imported function so that it can be
                         // called indirectly. Direct calls are resolved statically.
                         let wrapper_func = generate_imported_func_wrapper(&ctx, func_idx);
-                        ctx.functions
-                            .push(CommonFunctionProcessingStage::BlocklessDag(wrapper_func));
+                        ctx.functions.push(CommonStages::BlocklessDag(wrapper_func));
                     } else if import.module == "spectest" {
                         // To run the tests, the runtime must provide a few basic imports
                         // of the `spectest` module.
@@ -1348,8 +1347,7 @@ pub fn load_wasm<'a, S: Settings>(
                 func_validator.validate(&function)?;
                 validator_allocs = func_validator.into_allocations();
 
-                ctx.functions
-                    .push(CommonFunctionProcessingStage::Unparsed(function));
+                ctx.functions.push(CommonStages::Unparsed(function));
             }
             Payload::DataSection(section) => {
                 log::debug!("Data Section found");

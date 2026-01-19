@@ -3,7 +3,7 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::loader::{
-    CommonFunctionProcessingStage, FunctionProcessingStage, Module, Statistics,
+    CommonStages, FunctionProcessingStage, Module, Statistics,
     rwm::{liveness_dag::LivenessDag, register_allocation::AllocatedDag},
     settings::Settings,
 };
@@ -14,13 +14,13 @@ pub mod register_allocation;
 
 /// The RWM-specific stages of function processing.
 #[derive(Debug)]
-pub enum RWMFunctionProcessingStage<'a> {
-    CommonStages(CommonFunctionProcessingStage<'a>),
+pub enum RWMStages<'a> {
+    CommonStages(CommonStages<'a>),
     LivenessDag(LivenessDag<'a>),
     RegisterAllocatedDag(AllocatedDag<'a>),
 }
 
-impl<'a, S: Settings> FunctionProcessingStage<'a, S> for RWMFunctionProcessingStage<'a> {
+impl<'a, S: Settings> FunctionProcessingStage<'a, S> for RWMStages<'a> {
     type LastStage = AllocatedDag<'a>;
 
     fn advance_stage(
@@ -33,7 +33,7 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for RWMFunctionProcessingSt
     ) -> wasmparser::Result<Self> {
         Ok(match self {
             Self::CommonStages(stage) => {
-                if let CommonFunctionProcessingStage::BlocklessDag(blockless_dag) = stage {
+                if let CommonStages::BlocklessDag(blockless_dag) = stage {
                     // Convert the blockless DAG to a liveness DAG representation.
                     let liveness_dag = LivenessDag::new(blockless_dag);
                     Self::LivenessDag(liveness_dag)
@@ -73,8 +73,8 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for RWMFunctionProcessingSt
     }
 }
 
-impl<'a> From<CommonFunctionProcessingStage<'a>> for RWMFunctionProcessingStage<'a> {
-    fn from(stage: CommonFunctionProcessingStage<'a>) -> Self {
+impl<'a> From<CommonStages<'a>> for RWMStages<'a> {
+    fn from(stage: CommonStages<'a>) -> Self {
         Self::CommonStages(stage)
     }
 }

@@ -7,8 +7,8 @@ use clap::{Parser, Subcommand};
 use womir::{
     loader::{
         Program,
-        rwm::RWMFunctionProcessingStage,
-        wom::{WomFunctionProcessingStage, flattening::WriteOnceAsm},
+        rwm::RWMStages,
+        wom::{WomStages, flattening::WriteOnceAsm},
     },
     wom_interpreter::{
         ExternalFunctions, Interpreter, MemoryAccessor,
@@ -134,9 +134,10 @@ fn main() -> wasmparser::Result<()> {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
             let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?;
             if cli.rw_pipeline {
-                program.default_par_process_all_functions::<RWMFunctionProcessingStage>()?;
+                program.default_par_process_all_functions::<RWMStages>()?;
             } else {
-                let program = program.default_par_process_all_functions::<WomFunctionProcessingStage<GenericIrSetting>>()?;
+                let program =
+                    program.default_par_process_all_functions::<WomStages<GenericIrSetting>>()?;
                 if let Err(err) = dump_ir(&program) {
                     log::error!("Failed to dump IR: {err}");
                 }
@@ -153,13 +154,12 @@ fn main() -> wasmparser::Result<()> {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
             let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?;
             if cli.rw_pipeline {
-                let _program =
-                    program.default_par_process_all_functions::<RWMFunctionProcessingStage>()?;
+                let _program = program.default_par_process_all_functions::<RWMStages>()?;
                 // TODO: interpret the program in RWM mode
                 unimplemented!("RWM interpreter not implemented yet");
             } else {
-                let program = program
-                    .default_par_process_all_functions::<WomFunctionProcessingStage<GenericIrSetting>>()?;
+                let program =
+                    program.default_par_process_all_functions::<WomStages<GenericIrSetting>>()?;
 
                 if let Err(err) = dump_ir(&program) {
                     log::error!("Failed to dump IR: {err}");
@@ -213,7 +213,7 @@ mod tests {
         let wasm_file = std::fs::read(path).unwrap();
         let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
             .unwrap()
-            .default_process_all_functions::<WomFunctionProcessingStage<GenericIrSetting>>()
+            .default_process_all_functions::<WomStages<GenericIrSetting>>()
             .unwrap();
         let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
         let got_output = interpreter.run(main_function, func_inputs);
@@ -542,7 +542,7 @@ mod tests {
                     let wasm_file = std::fs::read(mod_name).unwrap();
                     let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
                         .unwrap()
-                        .default_par_process_all_functions::<WomFunctionProcessingStage<GenericIrSetting>>()
+                        .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
                         .unwrap();
                     let mut interpreter = Interpreter::new(program, SpectestExternalFunctions);
 

@@ -3,7 +3,7 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::loader::{
-    CommonFunctionProcessingStage, FunctionProcessingStage, Module, Statistics,
+    CommonStages, FunctionProcessingStage, Module, Statistics,
     wom::{flattening::WriteOnceAsm, settings::Settings},
 };
 
@@ -13,13 +13,13 @@ pub mod settings;
 
 /// The Wom-specific stages of function processing.
 #[derive(Debug)]
-pub enum WomFunctionProcessingStage<'a, S: Settings<'a>> {
-    CommonStages(CommonFunctionProcessingStage<'a>),
+pub enum WomStages<'a, S: Settings<'a>> {
+    CommonStages(CommonStages<'a>),
     PlainFlatAsm(WriteOnceAsm<S::Directive>),
     DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
 }
 
-impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> for WomFunctionProcessingStage<'a, S> {
+impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> for WomStages<'a, S> {
     type LastStage = WriteOnceAsm<S::Directive>;
 
     fn advance_stage(
@@ -32,7 +32,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> for WomFunctionProcessi
     ) -> wasmparser::Result<Self> {
         Ok(match self {
             Self::CommonStages(stage) => {
-                if let CommonFunctionProcessingStage::BlocklessDag(blockless_dag) = stage {
+                if let CommonStages::BlocklessDag(blockless_dag) = stage {
                     // Flatten the blockless DAG into assembly-like representation.
                     let (flat_asm, copies_saved) =
                         flattening::flatten_dag(settings, ctx, label_gen, blockless_dag, func_idx);
@@ -75,10 +75,8 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> for WomFunctionProcessi
     }
 }
 
-impl<'a, S: Settings<'a>> From<CommonFunctionProcessingStage<'a>>
-    for WomFunctionProcessingStage<'a, S>
-{
-    fn from(stage: CommonFunctionProcessingStage<'a>) -> Self {
+impl<'a, S: Settings<'a>> From<CommonStages<'a>> for WomStages<'a, S> {
+    fn from(stage: CommonStages<'a>) -> Self {
         Self::CommonStages(stage)
     }
 }
