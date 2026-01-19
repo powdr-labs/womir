@@ -1,8 +1,8 @@
 use wasmparser::Operator as Op;
 
 use crate::loader::{
-    dag::WasmValue,
-    flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree},
+    passes::dag::WasmValue,
+    wom::flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree},
 };
 use std::{
     cell::Cell,

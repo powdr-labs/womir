@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, VecDeque};
 use itertools::Itertools;
 use wasmparser::Operator;
 
-use super::{Block, BlockKind, Element, Instruction as Ins, block_tree::BlockTree};
+use crate::loader::{Block, BlockKind, Element, Instruction as Ins, passes::block_tree::BlockTree};
 
 #[derive(Debug)]
 pub struct LiftedBlockTree<'a> {

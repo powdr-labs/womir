@@ -1,41 +1,32 @@
-pub mod block_tree;
-pub mod blockless_dag;
-pub mod dag;
-pub mod dumb_jump_removal;
-pub mod flattening;
-pub mod liveness_dag;
-pub mod locals_data_flow;
+pub mod passes;
+pub mod rwm;
 pub mod settings;
+pub mod wom;
 
+use crate::loader::rwm::{liveness_dag::LivenessDag, register_allocation::AllocatedDag};
 use core::panic;
+use itertools::Itertools;
+use passes::{
+    block_tree::BlockTree,
+    blockless_dag::{self, BlocklessDag, BreakTarget},
+    dag::{self, Dag, NodeInput, ValueOrigin},
+    locals_data_flow::{self, LiftedBlockTree},
+};
+use settings::Settings;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt::{Display, Formatter},
     marker::PhantomData,
-    ops::AddAssign,
+    ops::{AddAssign, Range},
     sync::{Arc, Mutex, atomic::AtomicU32, mpsc::channel},
     thread, vec,
 };
-
-use block_tree::BlockTree;
-use dag::Dag;
-use flattening::WriteOnceAsm;
-use itertools::Itertools;
 use wasmparser::{
     CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, LocalsReader,
     MemoryType, Operator, Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator,
     WasmFeatures,
 };
-
-use crate::loader::{
-    blockless_dag::{BlocklessDag, BreakTarget},
-    dag::{NodeInput, ValueOrigin},
-    liveness_dag::LivenessDag,
-    locals_data_flow::LiftedBlockTree,
-    settings::Settings,
-};
-
-pub use flattening::{func_idx_to_label, word_count_type};
+use wom::flattening::WriteOnceAsm;
 
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
@@ -422,6 +413,7 @@ pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
     DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
     // Read-write memory stages
     LivenessDag(LivenessDag<'a>),
+    RegisterAllocatedDag(AllocatedDag<'a>),
 }
 
 pub trait LabelGenerator {
@@ -518,8 +510,13 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                     FunctionProcessingStage::LivenessDag(liveness_dag)
                 } else {
                     // Flatten the blockless DAG into assembly-like representation.
-                    let (flat_asm, copies_saved) =
-                        flattening::flatten_dag(settings, ctx, label_gen, blockless_dag, func_idx);
+                    let (flat_asm, copies_saved) = wom::flattening::flatten_dag(
+                        settings,
+                        ctx,
+                        label_gen,
+                        blockless_dag,
+                        func_idx,
+                    );
                     if let Some(stats) = stats {
                         stats.register_copies_saved += copies_saved;
                     }
@@ -528,7 +525,8 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
             }
             FunctionProcessingStage::PlainFlatAsm(mut flat_asm) => {
                 // Optimization pass: remove useless jumps.
-                let jumps_removed = dumb_jump_removal::remove_dumb_jumps(settings, &mut flat_asm);
+                let jumps_removed =
+                    wom::dumb_jump_removal::remove_dumb_jumps(settings, &mut flat_asm);
                 if let Some(stats) = stats {
                     stats.useless_jumps_removed += jumps_removed;
                 }
@@ -538,7 +536,16 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                 // Processing is complete. Just return itself.
                 FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
             }
-            FunctionProcessingStage::LivenessDag(_generic_blockless_dag) => {
+            FunctionProcessingStage::LivenessDag(liveness_dag) => {
+                // Allocate read-write registers using the liveness information.
+                let (allocated_dag, copies_saved) =
+                    rwm::register_allocation::optimistic_allocation::<S>(func_idx, liveness_dag);
+                if let Some(stats) = stats {
+                    stats.register_copies_saved += copies_saved;
+                }
+                FunctionProcessingStage::RegisterAllocatedDag(allocated_dag)
+            }
+            FunctionProcessingStage::RegisterAllocatedDag(_allocated_dag) => {
                 // TODO: further process the RW pipeline
                 // For now, returning a fake empty flat asm.
                 let flat_asm = WriteOnceAsm {
@@ -1627,4 +1634,30 @@ impl<'a> From<Block<'a>> for Element<'a> {
     fn from(block: Block<'a>) -> Self {
         Element::Block(block)
     }
+}
+
+pub fn byte_size<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
+    match ty {
+        ValType::I32 | ValType::F32 => 4,
+        ValType::I64 | ValType::F64 => 8,
+        ValType::V128 => 16,
+        ValType::Ref(..) => FunctionRef::<S>::total_byte_size(),
+    }
+}
+
+/// Returns the number of words needed to store the given types.
+pub fn word_count_types<'a, S: Settings<'a>>(types: &[ValType]) -> u32 {
+    types.iter().map(|ty| word_count_type::<S>(*ty)).sum()
+}
+
+pub fn word_count<'a, S: Settings<'a> + ?Sized>(byte_size: u32) -> u32 {
+    byte_size.div_ceil(S::bytes_per_word())
+}
+
+pub fn assert_ptr_size<'a, S: Settings<'a> + ?Sized>(ptr: &Range<u32>) {
+    assert_eq!(ptr.len(), S::words_per_ptr() as usize);
+}
+
+pub fn word_count_type<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
+    word_count::<S>(byte_size::<S>(ty))
 }
