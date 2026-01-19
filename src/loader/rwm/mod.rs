@@ -8,9 +8,10 @@ use crate::loader::{
     settings::Settings,
 };
 
+pub mod flattening;
 pub mod liveness_dag;
 pub mod register_allocation;
-// pub mod flattening;
+pub mod settings;
 
 /// The RWM-specific stages of function processing.
 #[derive(Debug)]
