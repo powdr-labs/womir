@@ -3,7 +3,6 @@ pub mod rwm;
 pub mod settings;
 pub mod wom;
 
-use crate::loader::rwm::{liveness_dag::LivenessDag, register_allocation::AllocatedDag};
 use core::panic;
 use itertools::Itertools;
 use passes::{
@@ -26,8 +25,6 @@ use wasmparser::{
     MemoryType, Operator, Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator,
     WasmFeatures,
 };
-use wom::flattening::WriteOnceAsm;
-use wom::settings::Settings as WomSettings;
 
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
@@ -88,7 +85,7 @@ impl MemoryAllocator {
         MemoryAllocator { next_free: 0 }
     }
 
-    fn allocate_var<'a, S: Settings + ?Sized>(&mut self, val_type: ValType) -> AllocatedVar {
+    fn allocate_var<S: Settings + ?Sized>(&mut self, val_type: ValType) -> AllocatedVar {
         let var = AllocatedVar {
             val_type,
             address: self.next_free,
@@ -555,137 +552,6 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonFunctionProcessin
     }
 }
 
-/// The Wom-specific stages of function processing.
-#[derive(Debug)]
-pub enum WomFunctionProcessingStage<'a, S: WomSettings<'a>> {
-    CommonStages(CommonFunctionProcessingStage<'a>),
-    PlainFlatAsm(WriteOnceAsm<S::Directive>),
-    DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
-}
-
-impl<'a, S: WomSettings<'a>> FunctionProcessingStage<'a, S> for WomFunctionProcessingStage<'a, S> {
-    type LastStage = WriteOnceAsm<S::Directive>;
-
-    fn advance_stage(
-        self,
-        settings: &S,
-        ctx: &Module<'a>,
-        func_idx: u32,
-        label_gen: &AtomicU32,
-        mut stats: Option<&mut Statistics>,
-    ) -> wasmparser::Result<Self> {
-        Ok(match self {
-            Self::CommonStages(stage) => {
-                if let CommonFunctionProcessingStage::BlocklessDag(blockless_dag) = stage {
-                    // Flatten the blockless DAG into assembly-like representation.
-                    let (flat_asm, copies_saved) = wom::flattening::flatten_dag(
-                        settings,
-                        ctx,
-                        label_gen,
-                        blockless_dag,
-                        func_idx,
-                    );
-                    if let Some(stats) = stats {
-                        stats.register_copies_saved += copies_saved;
-                    }
-                    Self::PlainFlatAsm(flat_asm)
-                } else {
-                    // Advance the common stage first.
-                    Self::CommonStages(stage.advance_stage(
-                        settings,
-                        ctx,
-                        func_idx,
-                        label_gen,
-                        stats.as_deref_mut(),
-                    )?)
-                }
-            }
-            Self::PlainFlatAsm(mut flat_asm) => {
-                // Optimization pass: remove useless jumps.
-                let jumps_removed =
-                    wom::dumb_jump_removal::remove_dumb_jumps(settings, &mut flat_asm);
-                if let Some(stats) = stats {
-                    stats.useless_jumps_removed += jumps_removed;
-                }
-                Self::DumbJumpOptFlatAsm(flat_asm)
-            }
-            Self::DumbJumpOptFlatAsm(flat_asm) => {
-                // Processing is complete. Just return itself.
-                Self::DumbJumpOptFlatAsm(flat_asm)
-            }
-        })
-    }
-
-    fn consume_last_stage(self) -> Result<Self::LastStage, Self> {
-        if let Self::DumbJumpOptFlatAsm(flat_asm) = self {
-            Ok(flat_asm)
-        } else {
-            Err(self)
-        }
-    }
-}
-
-/// The RWM-specific stages of function processing.
-#[derive(Debug)]
-pub enum RWMFunctionProcessingStage<'a> {
-    CommonStages(CommonFunctionProcessingStage<'a>),
-    LivenessDag(LivenessDag<'a>),
-    RegisterAllocatedDag(AllocatedDag<'a>),
-}
-
-impl<'a, S: Settings> FunctionProcessingStage<'a, S> for RWMFunctionProcessingStage<'a> {
-    type LastStage = AllocatedDag<'a>;
-
-    fn advance_stage(
-        self,
-        settings: &S,
-        ctx: &Module<'a>,
-        func_idx: u32,
-        label_gen: &AtomicU32,
-        mut stats: Option<&mut Statistics>,
-    ) -> wasmparser::Result<Self> {
-        Ok(match self {
-            Self::CommonStages(stage) => {
-                if let CommonFunctionProcessingStage::BlocklessDag(blockless_dag) = stage {
-                    // Convert the blockless DAG to a liveness DAG representation.
-                    let liveness_dag = LivenessDag::new(blockless_dag);
-                    Self::LivenessDag(liveness_dag)
-                } else {
-                    // Advance the common stage first.
-                    Self::CommonStages(stage.advance_stage(
-                        settings,
-                        ctx,
-                        func_idx,
-                        label_gen,
-                        stats.as_deref_mut(),
-                    )?)
-                }
-            }
-            Self::LivenessDag(liveness_dag) => {
-                // Allocate read-write registers using the liveness information.
-                let (allocated_dag, copies_saved) =
-                    rwm::register_allocation::optimistic_allocation::<S>(func_idx, liveness_dag);
-                if let Some(stats) = stats {
-                    stats.register_copies_saved += copies_saved;
-                }
-                Self::RegisterAllocatedDag(allocated_dag)
-            }
-            Self::RegisterAllocatedDag(allocated_dag) => {
-                // TODO: There are more steps to come, but for now, just return itself.
-                Self::RegisterAllocatedDag(allocated_dag)
-            }
-        })
-    }
-
-    fn consume_last_stage(self) -> Result<Self::LastStage, Self> {
-        if let Self::RegisterAllocatedDag(allocated_dag) = self {
-            Ok(allocated_dag)
-        } else {
-            Err(self)
-        }
-    }
-}
-
 /// A partially loaded WASM program, with all the functions in some processing stage.
 ///
 /// To fully process the functions, call `process_all_functions()`.
@@ -913,7 +779,7 @@ pub struct Program<'a, F> {
 }
 
 /// Type size, in bytes
-fn sz<'a, S: Settings + ?Sized>(val_type: ValType) -> u32 {
+fn sz<S: Settings + ?Sized>(val_type: ValType) -> u32 {
     match val_type {
         ValType::I32 => 4,
         ValType::I64 => 8,
@@ -1746,7 +1612,7 @@ impl<'a> From<Block<'a>> for Element<'a> {
     }
 }
 
-pub fn byte_size<'a, S: Settings + ?Sized>(ty: ValType) -> u32 {
+pub fn byte_size<S: Settings + ?Sized>(ty: ValType) -> u32 {
     match ty {
         ValType::I32 | ValType::F32 => 4,
         ValType::I64 | ValType::F64 => 8,
@@ -1756,18 +1622,18 @@ pub fn byte_size<'a, S: Settings + ?Sized>(ty: ValType) -> u32 {
 }
 
 /// Returns the number of words needed to store the given types.
-pub fn word_count_types<'a, S: Settings>(types: &[ValType]) -> u32 {
+pub fn word_count_types<S: Settings + ?Sized>(types: &[ValType]) -> u32 {
     types.iter().map(|ty| word_count_type::<S>(*ty)).sum()
 }
 
-pub fn word_count<'a, S: Settings + ?Sized>(byte_size: u32) -> u32 {
+pub fn word_count<S: Settings + ?Sized>(byte_size: u32) -> u32 {
     byte_size.div_ceil(S::bytes_per_word())
 }
 
-pub fn assert_ptr_size<'a, S: Settings + ?Sized>(ptr: &Range<u32>) {
+pub fn assert_ptr_size<S: Settings + ?Sized>(ptr: &Range<u32>) {
     assert_eq!(ptr.len(), S::words_per_ptr() as usize);
 }
 
-pub fn word_count_type<'a, S: Settings + ?Sized>(ty: ValType) -> u32 {
+pub fn word_count_type<S: Settings + ?Sized>(ty: ValType) -> u32 {
     word_count::<S>(byte_size::<S>(ty))
 }

@@ -19,7 +19,7 @@ use crate::loader::{
 /// implemented by the user.
 ///
 /// Returns the number of constants collapsed.
-pub fn constant_collapse<'a, S: Settings>(dag: &mut Dag) -> usize {
+pub fn constant_collapse<S: Settings>(dag: &mut Dag) -> usize {
     if let Some(processor) = S::get_const_collapse_processor() {
         let mut finder = ConstantInputFinder::new();
         recursive_constant_collapse(&mut finder, &processor, &mut dag.nodes, HashMap::new())

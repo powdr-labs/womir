@@ -100,7 +100,7 @@ impl OptimisticAllocator {
     }
 
     /// Allocates the outputs of a node that have not been allocated yet.
-    fn allocate_outputs<'a, S: Settings>(
+    fn allocate_outputs<S: Settings>(
         &mut self,
         node_index: usize,
         output_types: &[ValType],
