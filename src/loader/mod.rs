@@ -3,7 +3,6 @@ pub mod rwm;
 pub mod settings;
 pub mod wom;
 
-use crate::loader::rwm::{liveness_dag::LivenessDag, register_allocation::AllocatedDag};
 use core::panic;
 use itertools::Itertools;
 use passes::{
@@ -26,7 +25,6 @@ use wasmparser::{
     MemoryType, Operator, Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator,
     WasmFeatures,
 };
-use wom::flattening::WriteOnceAsm;
 
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
@@ -87,7 +85,7 @@ impl MemoryAllocator {
         MemoryAllocator { next_free: 0 }
     }
 
-    fn allocate_var<'a, S: Settings<'a> + ?Sized>(&mut self, val_type: ValType) -> AllocatedVar {
+    fn allocate_var<S: Settings + ?Sized>(&mut self, val_type: ValType) -> AllocatedVar {
         let var = AllocatedVar {
             val_type,
             address: self.next_free,
@@ -166,7 +164,7 @@ impl InitialMemory {
 }
 
 /// The table entry high level layout.
-pub enum FunctionRef<'a, S: Settings<'a> + ?Sized> {
+pub enum FunctionRef<'a, S: Settings + ?Sized> {
     Null,
     NonNull {
         /// The unique type ID of the function type.
@@ -177,7 +175,7 @@ pub enum FunctionRef<'a, S: Settings<'a> + ?Sized> {
     },
 }
 
-impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
+impl<'a, S: Settings + ?Sized> FunctionRef<'a, S> {
     fn new(type_id: u32, func_index: u32) -> Self {
         FunctionRef::NonNull {
             type_id,
@@ -199,7 +197,7 @@ impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
 /// to the correct size in the implementations of the instructions that use function references.
 ///
 /// This struct is used to tell where, inside an entry, each of the values is stored.
-impl<'a, S: Settings<'a> + ?Sized> FunctionRef<'a, S> {
+impl<'a, S: Settings + ?Sized> FunctionRef<'a, S> {
     pub const TYPE_ID: usize = 0;
     pub const FUNC_FRAME_SIZE: usize = 1;
     pub const FUNC_ADDR: usize = 2;
@@ -391,8 +389,60 @@ impl<'a> Module<'a> {
     }
 }
 
+pub trait LabelGenerator {
+    fn next(&self) -> u32;
+}
+
+impl LabelGenerator for AtomicU32 {
+    fn next(&self) -> u32 {
+        self.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+pub trait FunctionProcessingStage<'a, S: Settings>: Sized {
+    type LastStage;
+
+    fn advance_stage(
+        self,
+        settings: &S,
+        ctx: &Module<'a>,
+        func_idx: u32,
+        label_gen: &AtomicU32,
+        stats: Option<&mut Statistics>,
+    ) -> wasmparser::Result<Self>;
+
+    fn consume_last_stage(self) -> Result<Self::LastStage, Self>;
+
+    fn advance_all_stages(
+        mut self,
+        settings: &S,
+        ctx: &Module<'a>,
+        func_idx: u32,
+        label_gen: &AtomicU32,
+        mut stats: Option<&mut Statistics>,
+    ) -> wasmparser::Result<Self::LastStage> {
+        loop {
+            match self.consume_last_stage() {
+                Ok(last_stage) => return Ok(last_stage),
+                Err(stage) => {
+                    self = stage.advance_stage(
+                        settings,
+                        ctx,
+                        func_idx,
+                        label_gen,
+                        stats.as_deref_mut(),
+                    )?;
+                }
+            }
+        }
+    }
+}
+
+/// Different stages of processing a function.
+///
+/// The common passes betwen Wom and RWM.
 #[derive(Debug)]
-pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
+pub enum CommonStages<'a> {
     // Common stages
     Unparsed(FunctionBody<'a>),
     BlockTree {
@@ -408,78 +458,61 @@ pub enum FunctionProcessingStage<'a, S: Settings<'a>> {
     ConstDedupDag(Dag<'a>),
     DanglingOptDag(Dag<'a>),
     BlocklessDag(BlocklessDag<'a>),
-    // Write-once memory stages
-    PlainFlatAsm(WriteOnceAsm<S::Directive>),
-    DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
-    // Read-write memory stages
-    LivenessDag(LivenessDag<'a>),
-    RegisterAllocatedDag(AllocatedDag<'a>),
 }
 
-pub trait LabelGenerator {
-    fn next(&self) -> u32;
-}
+impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
+    type LastStage = BlocklessDag<'a>;
 
-impl LabelGenerator for AtomicU32 {
-    fn next(&self) -> u32 {
-        self.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
-    pub fn advance_stage(
+    fn advance_stage(
         self,
-        // TODO: place the pipeline choice inside the settings
-        use_rw: bool,
-        settings: &S,
+        _settings: &S,
         ctx: &Module<'a>,
         func_idx: u32,
         label_gen: &AtomicU32,
         stats: Option<&mut Statistics>,
-    ) -> wasmparser::Result<FunctionProcessingStage<'a, S>> {
+    ) -> wasmparser::Result<Self> {
         Ok(match self {
-            FunctionProcessingStage::Unparsed(body) => {
+            Self::Unparsed(body) => {
                 // Loads the function to memory in the BlockTree format.
                 let func_type = ctx.get_func_type(func_idx);
                 let locals_types = read_locals(func_type, body.get_locals_reader()?)?;
                 let block_tree = BlockTree::load_function(ctx, body.get_operators_reader()?)?;
-                FunctionProcessingStage::BlockTree {
+                Self::BlockTree {
                     locals_types,
                     tree: block_tree,
                 }
             }
-            FunctionProcessingStage::BlockTree { locals_types, tree } => {
+            Self::BlockTree { locals_types, tree } => {
                 // Expose the reads and writes to locals inside blocks as inputs and outputs.
                 let lifted_tree = locals_data_flow::lift_data_flow(tree).unwrap();
-                FunctionProcessingStage::LiftedBlockTree {
+                Self::LiftedBlockTree {
                     local_types: locals_types,
                     tree: lifted_tree,
                 }
             }
-            FunctionProcessingStage::LiftedBlockTree { local_types, tree } => {
+            Self::LiftedBlockTree { local_types, tree } => {
                 // Build the DAG representation of the function.
                 let func_type = ctx.get_func_type(func_idx);
                 let dag = Dag::new(ctx, &func_type.ty, &local_types, tree)?;
-                FunctionProcessingStage::PlainDag(dag)
+                Self::PlainDag(dag)
             }
-            FunctionProcessingStage::PlainDag(mut dag) => {
+            Self::PlainDag(mut dag) => {
                 // Optimization pass: collapse constants into instructions that use them, if possible.
-                let constants_collapsed =
-                    dag::const_collapse::constant_collapse(settings, &mut dag);
+                let constants_collapsed = dag::const_collapse::constant_collapse::<S>(&mut dag);
                 if let Some(stats) = stats {
                     stats.constants_collapsed += constants_collapsed;
                 }
-                FunctionProcessingStage::ConstCollapsedDag(dag)
+                Self::ConstCollapsedDag(dag)
             }
-            FunctionProcessingStage::ConstCollapsedDag(mut dag) => {
+            Self::ConstCollapsedDag(mut dag) => {
                 // Optimization pass: deduplicate const definitions in the DAG.
                 let constants_deduplicated = dag::const_dedup::deduplicate_constants(&mut dag);
                 if let Some(stats) = stats {
                     stats.constants_deduplicated += constants_deduplicated;
                 }
-                FunctionProcessingStage::ConstDedupDag(dag)
+                Self::ConstDedupDag(dag)
             }
-            FunctionProcessingStage::ConstDedupDag(mut dag) => {
+            Self::ConstDedupDag(mut dag) => {
                 // Optimization passes: remove pure nodes that does not contribute to the output.
                 let mut removed_nodes = 0;
                 let mut removed_block_outputs = 0;
@@ -496,89 +529,25 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
                     stats.dangling_nodes_removed += removed_nodes;
                     stats.block_outputs_removed += removed_block_outputs;
                 }
-                FunctionProcessingStage::DanglingOptDag(dag)
+                Self::DanglingOptDag(dag)
             }
-            FunctionProcessingStage::DanglingOptDag(dag) => {
+            Self::DanglingOptDag(dag) => {
                 // Convert the DAG to a blockless DAG representation.
                 let blockless_dag = BlocklessDag::new(dag, label_gen);
-                FunctionProcessingStage::BlocklessDag(blockless_dag)
+                Self::BlocklessDag(blockless_dag)
             }
-            FunctionProcessingStage::BlocklessDag(blockless_dag) => {
-                if use_rw {
-                    // Convert the blockless DAG to a liveness DAG representation.
-                    let liveness_dag = LivenessDag::new(blockless_dag);
-                    FunctionProcessingStage::LivenessDag(liveness_dag)
-                } else {
-                    // Flatten the blockless DAG into assembly-like representation.
-                    let (flat_asm, copies_saved) = wom::flattening::flatten_dag(
-                        settings,
-                        ctx,
-                        label_gen,
-                        blockless_dag,
-                        func_idx,
-                    );
-                    if let Some(stats) = stats {
-                        stats.register_copies_saved += copies_saved;
-                    }
-                    FunctionProcessingStage::PlainFlatAsm(flat_asm)
-                }
-            }
-            FunctionProcessingStage::PlainFlatAsm(mut flat_asm) => {
-                // Optimization pass: remove useless jumps.
-                let jumps_removed =
-                    wom::dumb_jump_removal::remove_dumb_jumps(settings, &mut flat_asm);
-                if let Some(stats) = stats {
-                    stats.useless_jumps_removed += jumps_removed;
-                }
-                FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
-            }
-            FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm) => {
-                // Processing is complete. Just return itself.
-                FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
-            }
-            FunctionProcessingStage::LivenessDag(liveness_dag) => {
-                // Allocate read-write registers using the liveness information.
-                let (allocated_dag, copies_saved) =
-                    rwm::register_allocation::optimistic_allocation::<S>(func_idx, liveness_dag);
-                if let Some(stats) = stats {
-                    stats.register_copies_saved += copies_saved;
-                }
-                FunctionProcessingStage::RegisterAllocatedDag(allocated_dag)
-            }
-            FunctionProcessingStage::RegisterAllocatedDag(_allocated_dag) => {
-                // TODO: further process the RW pipeline
-                // For now, returning a fake empty flat asm.
-                let flat_asm = WriteOnceAsm {
-                    func_idx,
-                    frame_size: 0,
-                    directives: Vec::new(),
-                };
-                FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm)
+            Self::BlocklessDag(blockless_dag) => {
+                // This is the last stage in this part of the pipeline. Just return itself.
+                Self::BlocklessDag(blockless_dag)
             }
         })
     }
 
-    pub fn advance_all_stages(
-        mut self,
-        use_rw: bool,
-        settings: &S,
-        ctx: &Module<'a>,
-        func_idx: u32,
-        label_gen: &AtomicU32,
-        mut stats: Option<&mut Statistics>,
-    ) -> wasmparser::Result<WriteOnceAsm<S::Directive>> {
-        loop {
-            if let FunctionProcessingStage::DumbJumpOptFlatAsm(flat_asm) = self {
-                return Ok(flat_asm);
-            }
-            self = self.advance_stage(
-                use_rw,
-                settings,
-                ctx,
-                func_idx,
-                label_gen,
-                stats.as_deref_mut(),
-            )?;
+    fn consume_last_stage(self) -> Result<Self::LastStage, Self> {
+        if let Self::BlocklessDag(blockless_dag) = self {
+            Ok(blockless_dag)
+        } else {
+            Err(self)
         }
     }
 }
@@ -586,11 +555,11 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> {
 /// A partially loaded WASM program, with all the functions in some processing stage.
 ///
 /// To fully process the functions, call `process_all_functions()`.
-pub struct PartiallyParsedProgram<'a, S: Settings<'a>> {
+pub struct PartiallyParsedProgram<'a, S: Settings> {
     /// The settings used for the program.
     pub s: S,
 
-    /// Non-generic part of the program, separated to avoid generic code bloat.
+    /// Loaded WASM module.
     pub m: Module<'a>,
 
     /// The functions defined in the module.
@@ -602,10 +571,10 @@ pub struct PartiallyParsedProgram<'a, S: Settings<'a>> {
     /// refers to the functions defined in the module.
     ///
     /// Upon creation, the functions have not yet been parsed and processed.
-    pub functions: Vec<FunctionProcessingStage<'a, S>>,
+    pub functions: Vec<CommonStages<'a>>,
 }
 
-impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
+impl<'a, S: Settings> PartiallyParsedProgram<'a, S> {
     fn eval_const_op(
         &self,
         val_type: ValType,
@@ -678,7 +647,12 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
     /// Processes all the functions sequentially, returning a fully processed program.
     ///
     /// Prefer to use `default_par_process_all_functions()` if your Settings is `Send + Sync`.
-    pub fn default_process_all_functions(self, use_rw: bool) -> wasmparser::Result<Program<'a, S>> {
+    pub fn default_process_all_functions<FPS>(
+        self,
+    ) -> wasmparser::Result<Program<'a, FPS::LastStage>>
+    where
+        FPS: FunctionProcessingStage<'a, S> + From<CommonStages<'a>>,
+    {
         let label_gen = AtomicU32::new(0);
         let mut stats = Statistics::default();
         let functions = self
@@ -686,8 +660,7 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
             .into_iter()
             .enumerate()
             .map(|(i, func)| {
-                func.advance_all_stages(
-                    use_rw,
+                FPS::from(func).advance_all_stages(
                     &self.s,
                     &self.m,
                     i as u32,
@@ -708,23 +681,17 @@ impl<'a, S: Settings<'a>> PartiallyParsedProgram<'a, S> {
 
 impl<'a, S> PartiallyParsedProgram<'a, S>
 where
-    S: Settings<'a> + Send + Sync,
-    S::Directive: Send + Sync,
+    S: Settings + Sync + 'a,
 {
-    pub fn parallel_process_all_functions<P>(
+    pub fn parallel_process_all_functions<P, FPS>(
         self,
         processor: P,
         stats: Option<&mut Statistics>,
-    ) -> wasmparser::Result<Program<'a, S>>
+    ) -> wasmparser::Result<Program<'a, FPS::LastStage>>
     where
-        P: Fn(
-                u32,
-                FunctionProcessingStage<'a, S>,
-                &S,
-                &Module<'a>,
-                &AtomicU32,
-                Option<&mut Statistics>,
-            ) -> WriteOnceAsm<S::Directive>
+        FPS: FunctionProcessingStage<'a, S> + Send + From<CommonStages<'a>> + 'a,
+        FPS::LastStage: Send + 'a,
+        P: Fn(u32, FPS, &S, &Module<'a>, &AtomicU32, Option<&mut Statistics>) -> FPS::LastStage
             + Send
             + Sync,
     {
@@ -752,8 +719,14 @@ where
                         // This extra scope is needed to release the lock before processing the function.
                         unprocessed_funcs.lock().unwrap().next()
                     } {
-                        let func =
-                            processor(func_idx as u32, func, s, m, label_gen, stats.as_mut());
+                        let func = processor(
+                            func_idx as u32,
+                            FPS::from(func),
+                            s,
+                            m,
+                            label_gen,
+                            stats.as_mut(),
+                        );
 
                         processed_funcs_sender.send((func_idx, func)).unwrap();
                     }
@@ -778,14 +751,17 @@ where
     }
 
     /// Processes all the functions in parallel, returning a fully processed program.
-    pub fn default_par_process_all_functions(
+    pub fn default_par_process_all_functions<FPS>(
         self,
-        use_rw: bool,
-    ) -> wasmparser::Result<Program<'a, S>> {
+    ) -> wasmparser::Result<Program<'a, FPS::LastStage>>
+    where
+        FPS: FunctionProcessingStage<'a, S> + Send + From<CommonStages<'a>> + 'a,
+        FPS::LastStage: Send + 'a,
+    {
         let mut stats = Statistics::default();
         let funcs = self.parallel_process_all_functions(
-            |func_idx, func, settings, ctx, label_gen, stats| {
-                func.advance_all_stages(use_rw, settings, ctx, func_idx, label_gen, stats)
+            |func_idx, func: FPS, settings, ctx, label_gen, stats| {
+                func.advance_all_stages(settings, ctx, func_idx, label_gen, stats)
                     .unwrap()
             },
             Some(&mut stats),
@@ -797,13 +773,13 @@ where
     }
 }
 
-pub struct Program<'a, S: Settings<'a>> {
+pub struct Program<'a, F> {
     pub m: Module<'a>,
-    pub functions: Vec<WriteOnceAsm<S::Directive>>,
+    pub functions: Vec<F>,
 }
 
 /// Type size, in bytes
-fn sz<'a, S: Settings<'a> + ?Sized>(val_type: ValType) -> u32 {
+fn sz<S: Settings + ?Sized>(val_type: ValType) -> u32 {
     match val_type {
         ValType::I32 => 4,
         ValType::I64 => 8,
@@ -881,7 +857,7 @@ impl Display for Statistics {
     }
 }
 
-pub fn load_wasm<'a, S: Settings<'a>>(
+pub fn load_wasm<'a, S: Settings>(
     settings: S,
     wasm_file: &'a [u8],
 ) -> wasmparser::Result<PartiallyParsedProgram<'a, S>> {
@@ -1038,8 +1014,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                         // We generated a wrapper for each imported function so that it can be
                         // called indirectly. Direct calls are resolved statically.
                         let wrapper_func = generate_imported_func_wrapper(&ctx, func_idx);
-                        ctx.functions
-                            .push(FunctionProcessingStage::BlocklessDag(wrapper_func));
+                        ctx.functions.push(CommonStages::BlocklessDag(wrapper_func));
                     } else if import.module == "spectest" {
                         // To run the tests, the runtime must provide a few basic imports
                         // of the `spectest` module.
@@ -1372,8 +1347,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
                 func_validator.validate(&function)?;
                 validator_allocs = func_validator.into_allocations();
 
-                ctx.functions
-                    .push(FunctionProcessingStage::Unparsed(function));
+                ctx.functions.push(CommonStages::Unparsed(function));
             }
             Payload::DataSection(section) => {
                 log::debug!("Data Section found");
@@ -1516,7 +1490,7 @@ pub fn load_wasm<'a, S: Settings<'a>>(
 }
 
 /// Generates a wrapper function for an imported function.
-fn generate_imported_func_wrapper<'a, S: Settings<'a>>(
+fn generate_imported_func_wrapper<'a, S: Settings>(
     ctx: &PartiallyParsedProgram<'a, S>,
     function_idx: u32,
 ) -> BlocklessDag<'static> {
@@ -1636,7 +1610,7 @@ impl<'a> From<Block<'a>> for Element<'a> {
     }
 }
 
-pub fn byte_size<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
+pub fn byte_size<S: Settings + ?Sized>(ty: ValType) -> u32 {
     match ty {
         ValType::I32 | ValType::F32 => 4,
         ValType::I64 | ValType::F64 => 8,
@@ -1646,18 +1620,18 @@ pub fn byte_size<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
 }
 
 /// Returns the number of words needed to store the given types.
-pub fn word_count_types<'a, S: Settings<'a>>(types: &[ValType]) -> u32 {
+pub fn word_count_types<S: Settings + ?Sized>(types: &[ValType]) -> u32 {
     types.iter().map(|ty| word_count_type::<S>(*ty)).sum()
 }
 
-pub fn word_count<'a, S: Settings<'a> + ?Sized>(byte_size: u32) -> u32 {
+pub fn word_count<S: Settings + ?Sized>(byte_size: u32) -> u32 {
     byte_size.div_ceil(S::bytes_per_word())
 }
 
-pub fn assert_ptr_size<'a, S: Settings<'a> + ?Sized>(ptr: &Range<u32>) {
+pub fn assert_ptr_size<S: Settings + ?Sized>(ptr: &Range<u32>) {
     assert_eq!(ptr.len(), S::words_per_ptr() as usize);
 }
 
-pub fn word_count_type<'a, S: Settings<'a> + ?Sized>(ty: ValType) -> u32 {
+pub fn word_count_type<S: Settings + ?Sized>(ty: ValType) -> u32 {
     word_count::<S>(byte_size::<S>(ty))
 }

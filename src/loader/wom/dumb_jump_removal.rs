@@ -4,7 +4,7 @@
 //! This must be done after flattening, because breaks are important to
 //! generate the appropriate argument copy instructions.
 
-use crate::loader::{settings::Settings, wom::flattening::WriteOnceAsm};
+use crate::loader::wom::{flattening::WriteOnceAsm, settings::Settings};
 
 pub fn remove_dumb_jumps<'a, S: Settings<'a>>(
     s: &S,

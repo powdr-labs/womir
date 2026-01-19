@@ -3,6 +3,7 @@ pub mod linker;
 
 use generic_ir::{Directive, GenericIrSetting as S};
 
+use crate::loader::wom::flattening::WriteOnceAsm;
 use crate::loader::{
     FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE,
     wom::flattening::func_idx_to_label,
@@ -42,7 +43,7 @@ pub struct Interpreter<'a, E: ExternalFunctions> {
     future_assignments: HashMap<u32, u32>,
     vrom: Vec<VRomValue>,
     ram: Ram,
-    program: Program<'a, S>,
+    program: Program<'a, WriteOnceAsm<Directive<'a>>>,
     external_functions: E,
     flat_program: Vec<Directive<'a>>,
     labels: HashMap<String, linker::LabelValue>,
@@ -75,7 +76,7 @@ impl Ram {
 }
 
 impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
-    pub fn new(program: Program<'a, S>, external_functions: E) -> Self {
+    pub fn new(program: Program<'a, WriteOnceAsm<Directive<'a>>>, external_functions: E) -> Self {
         const START_ROM_ADDR: u32 = 0x1;
         let (flat_program, labels) = linker::link(&program.functions, START_ROM_ADDR);
 
