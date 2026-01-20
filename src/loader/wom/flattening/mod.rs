@@ -31,17 +31,20 @@ use std::{
 };
 use wasmparser::{Operator as Op, ValType};
 
-use crate::loader::{
-    FunctionRef, LabelGenerator, Module, assert_ptr_size,
-    blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
-    byte_size,
-    dag::{NodeInput, ValueOrigin},
-    settings::JumpCondition,
-    wom::{
-        flattening::allocate_registers::Error,
-        settings::{ComparisonFunction, LoopFrameLayout, ReturnInfosToCopy, Settings, WasmOpInput},
+use crate::{
+    loader::{
+        FunctionRef, LabelGenerator, Module, assert_ptr_size,
+        blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
+        byte_size,
+        dag::{NodeInput, ValueOrigin},
+        settings::{JumpCondition, LabelType, WasmOpInput, format_label},
+        wom::{
+            flattening::allocate_registers::Error,
+            settings::{ComparisonFunction, LoopFrameLayout, ReturnInfosToCopy, Settings},
+        },
+        word_count, word_count_type,
     },
-    word_count, word_count_type,
+    utils::tree::Tree,
 };
 
 /// An assembly-like representation for a write-once memory machine.
@@ -50,65 +53,6 @@ pub struct WriteOnceAsm<D> {
     pub func_idx: u32,
     pub frame_size: u32,
     pub directives: Vec<D>,
-}
-
-pub enum Tree<T> {
-    Empty,
-    Leaf(T),
-    VecLeaf(Vec<T>),
-    Node(Vec<Tree<T>>),
-}
-
-impl<T> From<T> for Tree<T> {
-    fn from(x: T) -> Self {
-        Tree::Leaf(x)
-    }
-}
-
-impl<T> From<Vec<T>> for Tree<T> {
-    fn from(vec: Vec<T>) -> Self {
-        Tree::VecLeaf(vec)
-    }
-}
-
-impl<T> From<Vec<Tree<T>>> for Tree<T> {
-    fn from(trees: Vec<Tree<T>>) -> Self {
-        if trees.is_empty() {
-            Tree::Empty
-        } else {
-            Tree::Node(trees)
-        }
-    }
-}
-
-impl<T> Tree<T> {
-    fn flatten(self) -> Vec<T> {
-        #[inline]
-        fn flatten_node<T>(node: Tree<T>, flat: &mut Vec<T>) {
-            match node {
-                Tree::Empty => {}
-                Tree::Leaf(x) => {
-                    flat.push(x);
-                }
-                Tree::VecLeaf(vec) => {
-                    flat.extend(vec);
-                }
-                Tree::Node(children) => {
-                    flatten_vec(children, flat);
-                }
-            }
-        }
-
-        fn flatten_vec<T>(nodes: Vec<Tree<T>>, flat: &mut Vec<T>) {
-            for node in nodes {
-                flatten_node(node, flat);
-            }
-        }
-
-        let mut flat = Vec::new();
-        flatten_node(self, &mut flat);
-        flat
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -1322,24 +1266,6 @@ fn jump_into_loop<'a, S: Settings<'a>>(
     );
 
     Ok(directives)
-}
-
-pub enum LabelType {
-    Function,
-    Local,
-    Loop,
-}
-
-fn format_label(label_id: u32, label_type: LabelType) -> String {
-    match label_type {
-        LabelType::Function => format!("__func_{label_id}"),
-        LabelType::Local => format!("__local_{label_id}"),
-        LabelType::Loop => format!("__loop_{label_id}"),
-    }
-}
-
-pub fn func_idx_to_label(func_idx: u32) -> String {
-    format_label(func_idx, LabelType::Function)
 }
 
 fn split_func_ref_regs<'a, S: Settings<'a>>(func_ref_reg: Range<u32>) -> [Range<u32>; 3] {

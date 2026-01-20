@@ -1,15 +1,16 @@
-use wasmparser::Operator as Op;
-
-use crate::loader::{
-    self,
-    passes::dag::WasmValue,
-    settings::JumpCondition,
-    wom::flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason, Tree},
+use crate::{
+    loader::{
+        self,
+        settings::{JumpCondition, WasmOpInput},
+        wom::flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason},
+    },
+    utils::tree::Tree,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
 };
+use wasmparser::Operator;
 
 pub enum ComparisonFunction {
     Equal,
@@ -33,28 +34,6 @@ pub struct ReturnInfosToCopy<'a> {
     pub src: &'a ReturnInfo,
     /// Destination return info, in a new frame.
     pub dest: &'a ReturnInfo,
-}
-
-#[derive(Debug, Clone)]
-pub enum WasmOpInput {
-    Register(Range<u32>),
-    Constant(WasmValue),
-}
-
-impl WasmOpInput {
-    pub fn as_register(&self) -> Option<&Range<u32>> {
-        match self {
-            WasmOpInput::Register(r) => Some(r),
-            WasmOpInput::Constant(_) => None,
-        }
-    }
-
-    pub fn as_constant(&self) -> Option<&WasmValue> {
-        match self {
-            WasmOpInput::Register(_) => None,
-            WasmOpInput::Constant(c) => Some(c),
-        }
-    }
 }
 
 /// Trait controlling the behavior of the flattening process.
@@ -280,7 +259,7 @@ pub trait Settings<'a>: loader::Settings {
     fn emit_wasm_op(
         &self,
         c: &mut Context<'a, '_, Self>,
-        op: Op<'a>,
+        op: Operator<'a>,
         inputs: Vec<WasmOpInput>,
         output: Option<Range<u32>>,
     ) -> impl Into<Tree<Self::Directive>>;
