@@ -8,9 +8,10 @@ use crate::loader::{
     settings::Settings,
 };
 
+pub mod flattening;
 pub mod liveness_dag;
 pub mod register_allocation;
-// pub mod flattening;
+pub mod settings;
 
 /// The RWM-specific stages of function processing.
 #[derive(Debug)]
@@ -51,7 +52,7 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for RWMStages<'a> {
             Self::LivenessDag(liveness_dag) => {
                 // Allocate read-write registers using the liveness information.
                 let (allocated_dag, copies_saved) =
-                    register_allocation::optimistic_allocation::<S>(func_idx, liveness_dag);
+                    register_allocation::optimistic_allocation::<S>(ctx, func_idx, liveness_dag);
                 if let Some(stats) = stats {
                     stats.register_copies_saved += copies_saved;
                 }

@@ -3,11 +3,9 @@ pub mod linker;
 
 use generic_ir::{Directive, GenericIrSetting as S};
 
+use crate::loader::settings::func_idx_to_label;
 use crate::loader::wom::flattening::WriteOnceAsm;
-use crate::loader::{
-    FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE,
-    wom::flattening::func_idx_to_label,
-};
+use crate::loader::{FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE};
 use crate::loader::{word_count_type, word_count_types};
 use core::panic;
 use itertools::Itertools;

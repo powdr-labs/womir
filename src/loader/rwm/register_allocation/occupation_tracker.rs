@@ -1,6 +1,7 @@
 use crate::loader::{dag::ValueOrigin, rwm::liveness_dag::Liveness};
 use iset::IntervalMap;
 use itertools::Itertools;
+use std::collections::HashMap;
 use std::io::Write;
 use std::{
     collections::BTreeMap, fs::File, io::BufWriter, iter::FusedIterator, num::NonZeroU32,
@@ -30,9 +31,12 @@ struct AllocationEntry {
 /// Tracks what registers are currently occupied by what values.
 pub struct OccupationTracker {
     liveness: Liveness,
+    /// Maps the range where the value is alive (in nodes)
+    /// to an index in the allocations vector.
     alive_interval_map: IntervalMap<usize, usize>,
     origin_map: BTreeMap<ValueOrigin, usize>,
     allocations: Vec<AllocationEntry>,
+    call_frames: HashMap<usize, u32>,
 }
 
 /// Iterates over the consolidated ranges of a given set of overlapping ranges.
@@ -78,6 +82,7 @@ impl OccupationTracker {
             alive_interval_map: IntervalMap::new(),
             origin_map: BTreeMap::new(),
             allocations: Vec::new(),
+            call_frames: HashMap::new(),
         }
     }
 
@@ -188,6 +193,8 @@ impl OccupationTracker {
             .max()
             .unwrap_or(0);
 
+        self.call_frames.insert(call_index, frame_start);
+
         // Either an output is already allocated, or it is not used, and its
         // liveness must be the current node only.
         let mut accumulated_offset = frame_start;
@@ -271,14 +278,14 @@ impl OccupationTracker {
     }
 
     /// Generates the final allocations map.
-    pub fn into_allocations(self) -> BTreeMap<ValueOrigin, Range<u32>> {
+    pub fn into_allocations(self) -> (HashMap<usize, u32>, BTreeMap<ValueOrigin, Range<u32>>) {
         let mut result = BTreeMap::new();
         for alloc in self.allocations {
             if let AllocationType::Value(origin) = alloc.kind {
                 result.insert(origin, alloc.reg_range);
             }
         }
-        result
+        (self.call_frames, result)
     }
 
     pub fn dump(&self, path: &Path) {

@@ -1635,3 +1635,7 @@ pub fn assert_ptr_size<S: Settings + ?Sized>(ptr: &Range<u32>) {
 pub fn word_count_type<S: Settings + ?Sized>(ty: ValType) -> u32 {
     word_count::<S>(byte_size::<S>(ty))
 }
+
+pub fn assert_reg<'a, S: Settings + ?Sized>(reg: &Range<u32>, ty: ValType) {
+    assert_eq!(reg.len(), word_count_type::<S>(ty) as usize);
+}
