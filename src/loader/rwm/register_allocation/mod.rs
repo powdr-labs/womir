@@ -40,13 +40,17 @@ pub struct Allocation {
     nodes_outputs: BTreeMap<ValueOrigin, Range<u32>>,
     /// The map of label id to its node index, for quick lookup on a break.
     pub labels: HashMap<u32, usize>,
+    /// The call frame start register for each call node index.
+    pub call_frames: HashMap<usize, u32>,
 }
 
 impl Allocation {
     fn new(occupation_tracker: OccupationTracker, labels: HashMap<u32, usize>) -> Self {
+        let (call_frames, nodes_outputs) = occupation_tracker.into_allocations();
         Self {
-            nodes_outputs: occupation_tracker.into_allocations(),
+            nodes_outputs,
             labels,
+            call_frames,
         }
     }
 
@@ -250,6 +254,7 @@ fn handle_break<'a, S: Settings>(
 }
 
 fn recursive_block_allocation<'a, S: Settings>(
+    prog: &Module<'a>,
     func_idx: u32,
     mut nodes: Vec<liveness_dag::Node<'a>>,
     oa: &mut VecDeque<OptimisticAllocator>,
@@ -269,7 +274,24 @@ fn recursive_block_allocation<'a, S: Settings>(
             }
             Operation::WASMOp(operator) => {
                 match &operator {
-                    Op::Call { .. } | Op::CallIndirect { .. } => {
+                    Op::Call { .. } | Op::CallIndirect { .. } => 'call_match: {
+                        let inputs = if let Op::Call { function_index } = &operator {
+                            // If this is an imported function, treat it as a generic operation.
+                            // We assume imported functions are kinda like system calls, and can
+                            // read and write to any register we choose here.
+                            if prog.get_imported_func(*function_index).is_some() {
+                                oa[0].allocate_inputs::<S>(index, &node.inputs, &nodes);
+                                oa[0].allocate_outputs::<S>(index, &node.output_types, false);
+                                break 'call_match;
+                            }
+                            &node.inputs
+                        } else {
+                            // This is an indirect call, we need allocate the last input separately.
+                            let (fn_inputs, fn_index) = node.inputs.split_at(node.inputs.len() - 1);
+                            oa[0].allocate_inputs::<S>(index, fn_index, &nodes);
+                            fn_inputs
+                        };
+
                         // TODO: implement a simple heuristic to try to avoid having to
                         // copy the function outputs to the slots allocated for them by
                         // the nodes who uses them as inputs. The details are in
@@ -286,7 +308,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                             .allocate_fn_call(index, output_sizes);
 
                         // Try to place the function inputs at the expected argument slots.
-                        for input in &node.inputs {
+                        for input in inputs {
                             let origin =
                                 unwrap_ref(input, "function call inputs must be references");
                             let num_words = word_count::<S>(&nodes, *origin);
@@ -388,7 +410,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                 oa.push_front(loop_oa);
 
                 let (loop_nodes, loop_saved_copies) =
-                    recursive_block_allocation::<S>(func_idx, loop_nodes, oa);
+                    recursive_block_allocation::<S>(prog, func_idx, loop_nodes, oa);
 
                 let dump_path = format!(
                     "dump/func_{}_loop_{}.txt",
@@ -547,7 +569,7 @@ pub fn optimistic_allocation<'a, S: Settings>(
     // Do the allocation for the rest of the nodes, bottom up.
     let mut oa_stack = VecDeque::from([oa]);
     let (nodes, number_of_saved_copies) =
-        recursive_block_allocation::<S>(func_idx, nodes, &mut oa_stack);
+        recursive_block_allocation::<S>(prog, func_idx, nodes, &mut oa_stack);
 
     // Generate the final allocation for this block
     let OptimisticAllocator {

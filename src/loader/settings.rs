@@ -97,3 +97,9 @@ pub fn format_label(label_id: u32, label_type: LabelType) -> String {
 pub fn func_idx_to_label(func_idx: u32) -> String {
     format_label(func_idx, LabelType::Function)
 }
+
+pub enum ComparisonFunction {
+    Equal,
+    GreaterThanOrEqualUnsigned,
+    LessThanUnsigned,
+}

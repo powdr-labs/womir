@@ -1,9 +1,9 @@
 use crate::{
     loader::{
-        settings::{JumpCondition, Settings, WasmOpInput},
+        settings::{ComparisonFunction, JumpCondition, Settings, WasmOpInput},
         wom::{
             flattening::{Context, TrapReason},
-            settings::{ComparisonFunction, ReturnInfosToCopy, Settings as WomSettings},
+            settings::{ReturnInfosToCopy, Settings as WomSettings},
         },
     },
     utils::tree::Tree,

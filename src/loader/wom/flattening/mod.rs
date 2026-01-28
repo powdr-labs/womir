@@ -33,16 +33,15 @@ use wasmparser::{Operator as Op, ValType};
 
 use crate::{
     loader::{
-        FunctionRef, LabelGenerator, Module, assert_ptr_size,
+        FunctionRef, LabelGenerator, Module, assert_ptr_size, assert_reg,
         blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
-        byte_size,
         dag::{NodeInput, ValueOrigin},
-        settings::{JumpCondition, LabelType, WasmOpInput, format_label},
+        settings::{ComparisonFunction, JumpCondition, LabelType, WasmOpInput, format_label},
         wom::{
             flattening::allocate_registers::Error,
-            settings::{ComparisonFunction, LoopFrameLayout, ReturnInfosToCopy, Settings},
+            settings::{LoopFrameLayout, ReturnInfosToCopy, Settings},
         },
-        word_count, word_count_type,
+        word_count_type,
     },
     utils::tree::Tree,
 };
@@ -646,12 +645,10 @@ fn translate_single_node<'a, S: Settings<'a>>(
                 let inputs = map_input_into_regs(node.inputs, curr_entry)?;
                 let outputs = (0..node.output_types.len())
                     .map(|output_idx| {
-                        curr_entry
-                            .allocation
-                            .get_as_reg(&NodeInput::Reference(ValueOrigin {
-                                node: node_idx,
-                                output_idx: output_idx as u32,
-                            }))
+                        curr_entry.allocation.get(&ValueOrigin {
+                            node: node_idx,
+                            output_idx: output_idx as u32,
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
@@ -804,11 +801,6 @@ fn translate_single_node<'a, S: Settings<'a>>(
         tree,
         saved_copies: number_of_saved_copies,
     })
-}
-
-fn assert_reg<'a, S: Settings<'a>>(reg: &Range<u32>, ty: ValType) {
-    let expected_size = byte_size::<S>(ty);
-    assert_eq!(reg.len(), word_count::<S>(expected_size) as usize);
 }
 
 fn map_input_into_regs(

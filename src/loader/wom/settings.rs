@@ -1,7 +1,7 @@
 use crate::{
     loader::{
         self,
-        settings::{JumpCondition, WasmOpInput},
+        settings::{ComparisonFunction, JumpCondition, WasmOpInput},
         wom::flattening::{Context, RegisterGenerator, ReturnInfo, TrapReason},
     },
     utils::tree::Tree,
@@ -11,12 +11,6 @@ use std::{
     ops::Range,
 };
 use wasmparser::Operator;
-
-pub enum ComparisonFunction {
-    Equal,
-    GreaterThanOrEqualUnsigned,
-    LessThanUnsigned,
-}
 
 #[derive(Debug)]
 pub struct LoopFrameLayout {
@@ -181,7 +175,7 @@ pub trait Settings<'a>: loader::Settings {
     /// Emits conditional jump to label in the same frame.
     ///
     /// The condition type will be one of the available, as per
-    /// `is_branch_if_zero_available()` and `is_branch_if_not_zero_available()`.
+    /// `loader::Settings::is_jump_condition_available()`.
     fn emit_conditional_jump(
         &self,
         c: &mut Context<'a, '_, Self>,
