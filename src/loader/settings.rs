@@ -30,6 +30,17 @@ impl WasmOpInput {
     }
 }
 
+#[derive(Clone, Debug)]
+#[repr(u32)]
+pub enum TrapReason {
+    UnreachableInstruction,
+    /// This trap happens if an instruction that was deemed unreachable
+    /// by the register allocator is actually executed. In this case,
+    /// there is necessarily a bug in the register allocator.
+    RegisterAllocatorBug,
+    WrongIndirectCallFunctionType,
+}
+
 /// Indicates whether the input for a Wasm node is a constant, and if so, its value.
 ///
 /// This is part of the interface for constant collapsing optimization.

@@ -36,7 +36,10 @@ use crate::{
         FunctionRef, LabelGenerator, Module, assert_ptr_size, assert_reg,
         blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
         dag::{NodeInput, ValueOrigin},
-        settings::{ComparisonFunction, JumpCondition, LabelType, WasmOpInput, format_label},
+        settings::{
+            ComparisonFunction, JumpCondition, LabelType, TrapReason, WasmOpInput, format_label,
+        },
+        split_func_ref_regs,
         wom::{
             flattening::allocate_registers::Error,
             settings::{LoopFrameLayout, ReturnInfosToCopy, Settings},
@@ -52,17 +55,6 @@ pub struct WriteOnceAsm<D> {
     pub func_idx: u32,
     pub frame_size: u32,
     pub directives: Vec<D>,
-}
-
-#[derive(Clone, Debug)]
-#[repr(u32)]
-pub enum TrapReason {
-    UnreachableInstruction,
-    /// This trap happens if an instruction that was deemed unreachable
-    /// by the register allocator is actually executed. In this case,
-    /// there is necessarily a bug in the register allocator.
-    RegisterAllocatorBug,
-    WrongIndirectCallFunctionType,
 }
 
 pub struct Context<'a, 'b, S: Settings<'a> + ?Sized> {
@@ -1258,16 +1250,4 @@ fn jump_into_loop<'a, S: Settings<'a>>(
     );
 
     Ok(directives)
-}
-
-fn split_func_ref_regs<'a, S: Settings<'a>>(func_ref_reg: Range<u32>) -> [Range<u32>; 3] {
-    let i32_word_count = word_count_type::<S>(ValType::I32);
-
-    let type_index = func_ref_reg.start..func_ref_reg.start + i32_word_count;
-    let func_addr = type_index.end..type_index.end + i32_word_count;
-    let func_frame_size = func_addr.end..func_addr.end + i32_word_count;
-
-    assert_eq!(func_frame_size.end, func_ref_reg.end);
-
-    [type_index, func_addr, func_frame_size]
 }

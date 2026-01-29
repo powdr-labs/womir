@@ -19,7 +19,7 @@ use crate::{
         dag::ValueOrigin,
         rwm::{
             liveness_dag::{self, LivenessDag},
-            register_allocation::occupation_tracker::OccupationTracker,
+            register_allocation::occupation_tracker::{Occupation, OccupationTracker},
         },
         settings::Settings,
         word_count_type, word_count_types,
@@ -38,6 +38,8 @@ pub enum Error {
 pub struct Allocation {
     /// The registers assigned to the nodes outputs.
     nodes_outputs: BTreeMap<ValueOrigin, Range<u32>>,
+    /// The full register occupation map.
+    occupation: Occupation,
     /// The map of label id to its node index, for quick lookup on a break.
     pub labels: HashMap<u32, usize>,
     /// The call frame start register for each call node index.
@@ -45,15 +47,6 @@ pub struct Allocation {
 }
 
 impl Allocation {
-    fn new(occupation_tracker: OccupationTracker, labels: HashMap<u32, usize>) -> Self {
-        let (call_frames, nodes_outputs) = occupation_tracker.into_allocations();
-        Self {
-            nodes_outputs,
-            labels,
-            call_frames,
-        }
-    }
-
     pub fn get_for_node(&self, node_index: usize) -> impl Iterator<Item = Range<u32>> {
         let start = ValueOrigin {
             node: node_index,
@@ -85,6 +78,11 @@ impl Allocation {
 
     pub fn iter(&self) -> impl Iterator<Item = (&ValueOrigin, &Range<u32>)> {
         self.nodes_outputs.iter()
+    }
+
+    pub fn occupation_for_node(&self, node_index: usize) -> impl Iterator<Item = Range<u32>> {
+        self.occupation
+            .consolidated_reg_occupation(node_index..node_index + 1)
     }
 }
 
@@ -434,7 +432,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                     .occupation_tracker
                     .project_from_sub_tracker(index, &occupation_tracker);
 
-                let allocation = Allocation::new(occupation_tracker, labels);
+                let allocation = occupation_tracker.into_allocations(labels);
 
                 // Collect the new nodes
                 let loop_dag = AllocatedDag {
@@ -581,7 +579,7 @@ pub fn optimistic_allocation<'a, S: Settings>(
     let dump_path = format!("dump/func_{}.txt", func_idx);
     occupation_tracker.dump(Path::new(&dump_path));
 
-    let allocation = Allocation::new(occupation_tracker, labels);
+    let allocation = occupation_tracker.into_allocations(labels);
 
     (
         AllocatedDag {

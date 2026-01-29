@@ -4,7 +4,7 @@
 //! in earlier passes (notably register allocation).
 
 use itertools::Itertools;
-use wasmparser::{Operator as Op, ValType};
+use wasmparser::{FuncType, Operator as Op, ValType};
 
 use crate::{
     loader::{
@@ -17,8 +17,10 @@ use crate::{
             register_allocation::{self, AllocatedDag, Allocation},
             settings::Settings,
         },
-        settings::{ComparisonFunction, JumpCondition, LabelType, format_label},
-        word_count_type, word_count_types,
+        settings::{
+            ComparisonFunction, JumpCondition, LabelType, TrapReason, WasmOpInput, format_label,
+        },
+        split_func_ref_regs, word_count_type, word_count_types,
     },
     utils::tree::Tree,
 };
@@ -61,7 +63,7 @@ fn process_dag<'a, 'b, S: Settings<'a>>(
     s: &S,
     ctx: &'b CommonContext<'a, 'b>,
     ctrl_stack: &mut VecDeque<StackEntry>,
-    nodes: Vec<register_allocation::Node>,
+    nodes: Vec<register_allocation::Node<'a>>,
     func_idx: u32,
 ) -> Tree<S::Directive> {
     nodes
@@ -74,13 +76,13 @@ fn process_dag<'a, 'b, S: Settings<'a>>(
 
 fn process_node<'a, 'b, S: Settings<'a>>(
     s: &S,
-    ctx: &'b CommonContext<'a, 'b>,
+    common_ctx: &'b CommonContext<'a, 'b>,
     ctrl_stack: &mut VecDeque<StackEntry>,
-    node: register_allocation::Node,
+    node: register_allocation::Node<'a>,
     node_idx: usize,
     func_idx: u32,
 ) -> Tree<S::Directive> {
-    let mut ctx = Context::new(ctx, node_idx);
+    let mut ctx = Context::new(common_ctx, &ctrl_stack[0].allocation, node_idx);
     match node.operation {
         Operation::Inputs => {
             // Inputs does not translate to any assembly directive.
@@ -109,17 +111,17 @@ fn process_node<'a, 'b, S: Settings<'a>>(
 
             // Generate loop label.
             let loop_label = ctx.new_label(LabelType::Loop);
+            loop_directives.push(s.emit_label(&mut ctx, loop_label.clone()).into());
 
             // Process the loop body.
             ctrl_stack.push_front(StackEntry {
                 loop_label: Some(loop_label),
                 allocation: loop_allocation,
             });
-            let loop_tree = process_dag(s, ctx.common, ctrl_stack, loop_nodes, func_idx);
-            let StackEntry { loop_label, .. } = ctrl_stack.pop_front().unwrap();
+            let loop_tree = process_dag(s, common_ctx, ctrl_stack, loop_nodes, func_idx);
+            ctrl_stack.pop_front().unwrap();
 
             // Push the loop directives.
-            loop_directives.push(s.emit_label(&mut ctx, loop_label.unwrap()).into());
             loop_directives.push(loop_tree);
             loop_directives.into()
         }
@@ -352,166 +354,129 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                 // Normal function calls requires inputs to be copied to where they are needed in the
                 // function frame, and also may require outputs to be copied to where the users expect
                 // the values.
-
-                let frame_start = curr_entry.allocation.call_frames[&node_idx];
                 let func_type = &ctx.common.prog.get_func_type(function_index).ty;
-
-                // Generate the copy of the inputs.
-                let mut inputs_offset = frame_start;
-                let mut directives = copy_inputs_if_needed(
+                let call = prepare_function_call(
                     s,
                     &mut ctx,
                     &curr_entry.allocation,
+                    node_idx,
                     &node.inputs,
-                    ranges_for_types::<S>(func_type.params(), &mut inputs_offset),
+                    func_type,
                 );
 
-                // Generate the copy of the outputs.
-                let mut outputs_offset = frame_start;
-                let mut output_copy_directives = Vec::new();
-                let src_output_ranges =
-                    ranges_for_types::<S>(func_type.results(), &mut outputs_offset);
-                for (output_idx, src_range) in src_output_ranges.enumerate() {
-                    let output_origin = ValueOrigin {
-                        node: node_idx,
-                        output_idx: output_idx as u32,
-                    };
-                    let dest_range = curr_entry.allocation.get(&output_origin).unwrap();
-                    assert_eq!(src_range.len(), dest_range.len());
-
-                    if dest_range != src_range {
-                        output_copy_directives.extend(
-                            dest_range
-                                .into_iter()
-                                .zip(src_range)
-                                .map(|(dest, src)| s.emit_copy(&mut ctx, src, dest).into()),
-                        );
-                    }
-                }
-
-                // Calculate where return address and caller frame pointer are stored.
-                // Also calculate the space needed by the function inputs, to calculate where
-                // the return address and caller frame pointer are stored.
-                let input_size = inputs_offset - frame_start;
-                let outputs_size = outputs_offset - frame_start;
-                let (ra, caller_fp) = calculate_ra_and_fp::<S>(input_size, outputs_size);
-
-                // Emit the function call.
-                let func_label = format_label(function_index, LabelType::Function);
-                directives.push(
-                    s.emit_function_call(&mut ctx, func_label, frame_start, ra, caller_fp)
-                        .into(),
-                );
-
-                // Append the output copy directives.
-                if !output_copy_directives.is_empty() {
-                    vec![Tree::Node(directives), output_copy_directives.into()].into()
-                } else {
-                    directives.into()
-                }
+                vec![
+                    call.prefix_directives.into(),
+                    s.emit_function_call(
+                        &mut ctx,
+                        format_label(function_index, LabelType::Function),
+                        call.frame_start,
+                        call.ret_pc,
+                        call.ret_fp,
+                    )
+                    .into(),
+                    call.suffix_directives.into(),
+                ]
+                .into()
             }
         }
-        /*Operation::WASMOp(Op::CallIndirect {
+        Operation::WASMOp(Op::CallIndirect {
             table_index,
             type_index,
         }) => {
             let curr_entry = ctrl_stack.front().unwrap();
 
-            // First, we need to load the function reference from the table, so we allocate
-            // the space for it and emit the table.get directive.
-
             // The last input of the CallIndirect operation is the table entry, the others are the function arguments.
-            let mut inputs = map_input_into_regs(node.inputs, curr_entry)?;
-            let entry_idx = inputs.pop().unwrap();
+            let (entry_idx, inputs) = node.inputs.split_last().unwrap();
+            let entry_idx = curr_entry.allocation.get_as_reg(entry_idx).unwrap();
 
-            let func_ref_reg = ctx.register_gen.allocate_type(ValType::FUNCREF);
+            // We need to load the function reference from the table, so we allocate
+            // the space for it and emit the table.get directive.
+            let func_ref_reg = ctx.allocate_tmp_type::<S>(ValType::FUNCREF);
 
             // Split the components of the function reference:
-            let func_ref_regs = split_func_ref_regs::<S>(func_ref_reg.clone());
+            let [func_type_index, func_addr, _] = split_func_ref_regs::<S>(func_ref_reg.clone());
 
+            // Indirect calls require checking the function type first.
+            // We need a label for the OK case.
             let ok_label = ctx.new_label(LabelType::Local);
-            let func_frame_ptr = ctx.register_gen.allocate_words(S::words_per_ptr());
 
-            // Perform the function call
+            let fn_type = ctx.common.prog.get_type(type_index);
             let call = prepare_function_call(
                 s,
-                ctx,
-                inputs,
+                &mut ctx,
+                &curr_entry.allocation,
                 node_idx,
-                node.output_types.len(),
-                curr_entry,
-                func_frame_ptr.clone(),
-            )?;
+                inputs,
+                &fn_type.ty,
+            );
 
+            // The sequence to load the function reference, check the type,
+            // and then perform the indirect call.
             vec![
                 s.emit_wasm_op(
-                    ctx,
+                    &mut ctx,
                     Op::TableGet { table: table_index },
                     vec![WasmOpInput::Register(entry_idx)],
                     Some(func_ref_reg),
                 )
                 .into(),
                 s.emit_conditional_jump_cmp_immediate(
-                    ctx,
+                    &mut ctx,
                     ComparisonFunction::Equal,
-                    func_ref_regs[FunctionRef::<S>::TYPE_ID].clone(),
-                    ctx.program.get_type(type_index).unique_id,
+                    func_type_index.clone(),
+                    fn_type.unique_id,
                     ok_label.clone(),
                 )
                 .into(),
-                s.emit_trap(ctx, TrapReason::WrongIndirectCallFunctionType)
+                s.emit_trap(&mut ctx, TrapReason::WrongIndirectCallFunctionType)
                     .into(),
-                s.emit_label(ctx, ok_label, None).into(),
-                s.emit_allocate_value_frame(
-                    ctx,
-                    func_ref_regs[FunctionRef::<S>::FUNC_FRAME_SIZE].clone(),
-                    func_frame_ptr.clone(),
-                )
-                .into(),
+                s.emit_label(&mut ctx, ok_label).into(),
                 call.prefix_directives.into(),
                 s.emit_indirect_call(
-                    ctx,
-                    func_ref_regs[FunctionRef::<S>::FUNC_ADDR].clone(),
-                    func_frame_ptr,
-                    call.ret_info.ret_pc,
-                    call.ret_info.ret_fp,
+                    &mut ctx,
+                    func_addr,
+                    call.frame_start,
+                    call.ret_pc,
+                    call.ret_fp,
                 )
                 .into(),
                 call.suffix_directives.into(),
             ]
             .into()
         }
-        Operation::WASMOp(Op::Unreachable) => {
-            s.emit_trap(ctx, TrapReason::UnreachableInstruction).into()
-        }
+        Operation::WASMOp(Op::Unreachable) => s
+            .emit_trap(&mut ctx, TrapReason::UnreachableInstruction)
+            .into(),
         Operation::WASMOp(op) => {
             // Normal WASM operations are handled by the ISA emmiter directly.
             let curr_entry = ctrl_stack.front().unwrap();
             let inputs = node
                 .inputs
                 .into_iter()
-                .map(|input| {
-                    Ok(match input {
-                        NodeInput::Constant(c) => WasmOpInput::Constant(c),
-                        NodeInput::Reference(origin) => {
-                            WasmOpInput::Register(curr_entry.allocation.get(&origin)?)
-                        }
-                    })
+                .map(|input| match input {
+                    NodeInput::Constant(c) => WasmOpInput::Constant(c),
+                    NodeInput::Reference(origin) => {
+                        WasmOpInput::Register(curr_entry.allocation.get(&origin).unwrap())
+                    }
                 })
-                .collect::<Result<Vec<_>, Error>>()?;
+                .collect_vec();
             let output = match node.output_types.len() {
                 0 => None,
-                1 => Some(curr_entry.allocation.get(&ValueOrigin {
-                    node: node_idx,
-                    output_idx: 0,
-                })?),
+                1 => Some(
+                    curr_entry
+                        .allocation
+                        .get(&ValueOrigin {
+                            node: node_idx,
+                            output_idx: 0,
+                        })
+                        .unwrap(),
+                ),
                 _ => {
                     panic!("WASM instructions with multiple outputs! This is a bug.");
                 }
             };
-            s.emit_wasm_op(ctx, op, inputs, output).into()
-        }*/
-        Operation::WASMOp(_) => todo!(),
+            s.emit_wasm_op(&mut ctx, op, inputs, output).into()
+        }
     }
 }
 
@@ -662,6 +627,7 @@ struct CommonContext<'a, 'b> {
 /// temporary registers needed when translating just that node.
 pub struct Context<'a, 'b> {
     common: &'b CommonContext<'a, 'b>,
+    allocation: &'b Allocation,
     node_index: usize,
     /// If no temporary registers were allocated yet, this is None.
     /// If some were allocated, this tracks all the holes in the
@@ -671,16 +637,68 @@ pub struct Context<'a, 'b> {
 }
 
 impl<'a, 'b> Context<'a, 'b> {
-    fn new(common: &'b CommonContext<'a, 'b>, node_index: usize) -> Self {
+    fn new(
+        common: &'b CommonContext<'a, 'b>,
+        allocation: &'b Allocation,
+        node_index: usize,
+    ) -> Self {
         Self {
             common,
+            allocation,
             node_index,
             tmp_tracker: None,
         }
     }
 
-    pub fn generate_tmp_var(&mut self, size: u32) -> Range<u32> {
-        todo!()
+    fn allocate_tmp_words(&mut self, size: u32) -> Range<u32> {
+        if self.tmp_tracker.is_none() {
+            // This is the first time a temporary is being allocated at this node.
+            // We need to figure out what slots are available for temporaries.
+            let mut holes = Vec::new();
+            let mut last_end = 0;
+            for occupied in self.allocation.occupation_for_node(self.node_index) {
+                if occupied.start > last_end {
+                    holes.push(last_end..occupied.start);
+                }
+                last_end = occupied.end;
+            }
+            if last_end < u32::MAX {
+                holes.push(last_end..u32::MAX);
+            }
+            holes.reverse(); // So we can allocate from the end.
+            self.tmp_tracker = Some(holes);
+        }
+
+        let tmp_tracker = self.tmp_tracker.as_mut().unwrap();
+
+        for idx in (0..tmp_tracker.len()).rev() {
+            let hole = &mut tmp_tracker[idx];
+            if hole.len() as u32 >= size {
+                let alloc_end = hole.start + size;
+                let allocated = hole.start..alloc_end;
+                if alloc_end == hole.end {
+                    // The hole is fully used up.
+                    //
+                    // I would like to use a LinkedList here, but Rust has no stable API
+                    // to remove an element from the middle of a LinkedList in O(1) time,
+                    // (cursor API is unstable) so even Vec's O(n) removal is better here.
+                    //
+                    // The search is done from the end in order to minimize the number of
+                    // of elements shifted when removing. If the first hole is used, no
+                    // element needs to be shifted.
+                    tmp_tracker.remove(idx);
+                } else {
+                    // Shrink the hole.
+                    hole.start = alloc_end;
+                }
+                return allocated;
+            }
+        }
+        panic!("Full register space exhausted when allocating temporary registers.");
+    }
+
+    pub fn allocate_tmp_type<S: Settings<'a>>(&mut self, ty: ValType) -> Range<u32> {
+        self.allocate_tmp_words(word_count_type::<S>(ty))
     }
 
     pub fn new_label(&self, label_type: LabelType) -> String {
@@ -688,12 +706,72 @@ impl<'a, 'b> Context<'a, 'b> {
     }
 }
 
-fn join_tree<T>(mut tree_vec: Vec<Tree<T>>, elem: Tree<T>) -> Tree<T> {
-    // Just avoid allocating the Vec's buffer if not allocated yet.
-    if tree_vec.is_empty() {
-        elem
-    } else {
-        tree_vec.push(elem);
-        tree_vec.into()
+struct FunctionCall<D> {
+    frame_start: u32,
+    prefix_directives: Vec<Tree<D>>,
+    suffix_directives: Vec<Tree<D>>,
+    ret_pc: Range<u32>,
+    ret_fp: Range<u32>,
+}
+
+fn prepare_function_call<'a, S: Settings<'a>>(
+    s: &S,
+    ctx: &mut Context,
+    allocation: &Allocation,
+    node_idx: usize,
+    inputs: &[NodeInput],
+    func_type: &FuncType,
+) -> FunctionCall<S::Directive> {
+    // Normal function calls requires inputs to be copied to where they are needed in the
+    // function frame, and also may require outputs to be copied to where the users expect
+    // the values.
+
+    let frame_start = allocation.call_frames[&node_idx];
+
+    // Generate the copy of the inputs.
+    let mut inputs_offset = frame_start;
+    let prefix_directives = copy_inputs_if_needed(
+        s,
+        ctx,
+        allocation,
+        inputs,
+        ranges_for_types::<S>(func_type.params(), &mut inputs_offset),
+    );
+
+    // Generate the copy of the outputs.
+    let mut outputs_offset = frame_start;
+    let mut suffix_directives = Vec::new();
+    let src_output_ranges = ranges_for_types::<S>(func_type.results(), &mut outputs_offset);
+    for (output_idx, src_range) in src_output_ranges.enumerate() {
+        let output_origin = ValueOrigin {
+            node: node_idx,
+            output_idx: output_idx as u32,
+        };
+        let dest_range = allocation.get(&output_origin).unwrap();
+        assert_eq!(src_range.len(), dest_range.len());
+
+        if dest_range != src_range {
+            suffix_directives.extend(
+                dest_range
+                    .into_iter()
+                    .zip(src_range)
+                    .map(|(dest, src)| s.emit_copy(ctx, src, dest).into()),
+            );
+        }
+    }
+
+    // Calculate where return address and caller frame pointer are stored.
+    // Also calculate the space needed by the function inputs, to calculate where
+    // the return address and caller frame pointer are stored.
+    let input_size = inputs_offset - frame_start;
+    let outputs_size = outputs_offset - frame_start;
+    let (ret_pc, ret_fp) = calculate_ra_and_fp::<S>(input_size, outputs_size);
+
+    FunctionCall {
+        frame_start,
+        prefix_directives,
+        suffix_directives,
+        ret_pc,
+        ret_fp,
     }
 }

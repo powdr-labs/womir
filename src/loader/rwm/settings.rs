@@ -5,7 +5,7 @@ use crate::{
     loader::{
         self,
         rwm::flattening::Context,
-        settings::{ComparisonFunction, JumpCondition, WasmOpInput},
+        settings::{ComparisonFunction, JumpCondition, TrapReason, WasmOpInput},
     },
     utils::tree::Tree,
 };
@@ -16,6 +16,9 @@ pub trait Settings<'a>: loader::Settings {
 
     /// Emits a directive to mark a code position.
     fn emit_label(&self, c: &mut Context, name: String) -> impl Into<Tree<Self::Directive>>;
+
+    /// Emits a trap instruction with the given reason.
+    fn emit_trap(&self, c: &mut Context, trap: TrapReason) -> impl Into<Tree<Self::Directive>>;
 
     /// Copies a single word between two registers.
     fn emit_copy(

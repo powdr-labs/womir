@@ -1636,6 +1636,18 @@ pub fn word_count_type<S: Settings + ?Sized>(ty: ValType) -> u32 {
     word_count::<S>(byte_size::<S>(ty))
 }
 
-pub fn assert_reg<'a, S: Settings + ?Sized>(reg: &Range<u32>, ty: ValType) {
+pub fn assert_reg<S: Settings + ?Sized>(reg: &Range<u32>, ty: ValType) {
     assert_eq!(reg.len(), word_count_type::<S>(ty) as usize);
+}
+
+fn split_func_ref_regs<S: Settings + ?Sized>(func_ref_reg: Range<u32>) -> [Range<u32>; 3] {
+    let i32_word_count = word_count_type::<S>(ValType::I32);
+
+    let type_index = func_ref_reg.start..func_ref_reg.start + i32_word_count;
+    let func_addr = type_index.end..type_index.end + i32_word_count;
+    let func_frame_size = func_addr.end..func_addr.end + i32_word_count;
+
+    assert_eq!(func_frame_size.end, func_ref_reg.end);
+
+    [type_index, func_addr, func_frame_size]
 }

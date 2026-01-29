@@ -1,3 +1,4 @@
+use crate::loader::rwm::register_allocation::Allocation;
 use crate::loader::{dag::ValueOrigin, rwm::liveness_dag::Liveness};
 use iset::IntervalMap;
 use itertools::Itertools;
@@ -11,6 +12,7 @@ use std::{
 #[derive(Debug)]
 enum AllocationType {
     FunctionFrame,
+    /// Registers blocked because they are used internally in a sub-block
     SubBlockInternal,
     BlockedRegistersAtParent,
     ExplicitlyBlocked,
@@ -28,14 +30,37 @@ struct AllocationEntry {
     reg_range: Range<u32>,
 }
 
-/// Tracks what registers are currently occupied by what values.
-pub struct OccupationTracker {
-    liveness: Liveness,
+/// Maps occupied registers over nodes.
+#[derive(Debug)]
+pub struct Occupation {
     /// Maps the range where the value is alive (in nodes)
     /// to an index in the allocations vector.
     alive_interval_map: IntervalMap<usize, usize>,
-    origin_map: BTreeMap<ValueOrigin, usize>,
     allocations: Vec<AllocationEntry>,
+}
+
+impl Occupation {
+    fn reg_occupation(&self, live_range: Range<usize>) -> Vec<Range<u32>> {
+        self.alive_interval_map
+            .values(live_range)
+            .map(move |entry_idx| self.allocations[*entry_idx].reg_range.clone())
+            .collect_vec()
+    }
+
+    pub fn consolidated_reg_occupation(
+        &self,
+        live_range: Range<usize>,
+    ) -> impl Iterator<Item = Range<u32>> {
+        let occupied_ranges = self.reg_occupation(live_range);
+        RangeConsolidationIterator::new(occupied_ranges)
+    }
+}
+
+/// Tracks what registers are currently occupied by what values.
+pub struct OccupationTracker {
+    liveness: Liveness,
+    occupation: Occupation,
+    origin_map: BTreeMap<ValueOrigin, usize>,
     call_frames: HashMap<usize, u32>,
 }
 
@@ -79,9 +104,11 @@ impl OccupationTracker {
     pub fn new(liveness: Liveness) -> Self {
         Self {
             liveness,
-            alive_interval_map: IntervalMap::new(),
+            occupation: Occupation {
+                alive_interval_map: IntervalMap::new(),
+                allocations: Vec::new(),
+            },
             origin_map: BTreeMap::new(),
-            allocations: Vec::new(),
             call_frames: HashMap::new(),
         }
     }
@@ -97,7 +124,7 @@ impl OccupationTracker {
         let live_range = self.natural_liveness(origin);
 
         if let Some(alloc_idx) = self.origin_map.get(&origin) {
-            let existing_alloc = &self.allocations[*alloc_idx];
+            let existing_alloc = &self.occupation.allocations[*alloc_idx];
             assert_eq!(existing_alloc.reg_range, reg_range);
         }
 
@@ -127,7 +154,7 @@ impl OccupationTracker {
         }
 
         let end_of_liveness = Some(live_range.end);
-        let existing_entries = self.reg_occupation_vec(&live_range);
+        let existing_entries = self.occupation.reg_occupation(live_range.clone());
         (
             if overlaps_any(existing_entries.iter(), &hint) {
                 // Cannot allocate at hint, allocate elsewhere
@@ -158,7 +185,7 @@ impl OccupationTracker {
             return None;
         }
 
-        let existing_entries = self.reg_occupation_vec(&live_range);
+        let existing_entries = self.occupation.reg_occupation(live_range.clone());
         self.allocate_where_possible(origin, size, live_range, existing_entries);
 
         Some(end_of_liveness)
@@ -168,7 +195,7 @@ impl OccupationTracker {
     pub fn get_allocation(&self, origin: ValueOrigin) -> Option<Range<u32>> {
         self.origin_map
             .get(&origin)
-            .map(|idx| self.allocations[*idx].reg_range.clone())
+            .map(|idx| self.occupation.allocations[*idx].reg_range.clone())
     }
 
     /// Reserve the space used by a function call and allocates all the outputs
@@ -184,10 +211,11 @@ impl OccupationTracker {
     ) -> u32 {
         // Find the highest allocated register at this point
         let frame_start = self
+            .occupation
             .alive_interval_map
             .values_overlap(call_index)
             .map(|entry_idx| {
-                let alloc = &self.allocations[*entry_idx];
+                let alloc = &self.occupation.allocations[*entry_idx];
                 alloc.reg_range.end
             })
             .max()
@@ -239,10 +267,10 @@ impl OccupationTracker {
         let mut sub_tracker = OccupationTracker::new(sub_liveness);
 
         let sub_range = sub_block_index..(sub_block_index + 1);
-        let sub_occupation = self.reg_occupation_vec(&sub_range);
+        let sub_occupation = self.occupation.consolidated_reg_occupation(sub_range);
 
         let whole_range = 0..usize::MAX;
-        for reg_range in RangeConsolidationIterator::new(sub_occupation) {
+        for reg_range in sub_occupation {
             sub_tracker.insert(
                 AllocationType::BlockedRegistersAtParent,
                 reg_range,
@@ -260,6 +288,7 @@ impl OccupationTracker {
         sub_tracker: &OccupationTracker,
     ) {
         let projection = sub_tracker
+            .occupation
             .allocations
             .iter()
             .filter_map(|alloc| match alloc.kind {
@@ -278,21 +307,26 @@ impl OccupationTracker {
     }
 
     /// Generates the final allocations map.
-    pub fn into_allocations(self) -> (HashMap<usize, u32>, BTreeMap<ValueOrigin, Range<u32>>) {
-        let mut result = BTreeMap::new();
-        for alloc in self.allocations {
+    pub fn into_allocations(self, labels: HashMap<u32, usize>) -> Allocation {
+        let mut nodes_outputs = BTreeMap::new();
+        for alloc in &self.occupation.allocations {
             if let AllocationType::Value(origin) = alloc.kind {
-                result.insert(origin, alloc.reg_range);
+                nodes_outputs.insert(origin, alloc.reg_range.clone());
             }
         }
-        (self.call_frames, result)
+        Allocation {
+            nodes_outputs,
+            occupation: self.occupation,
+            labels,
+            call_frames: self.call_frames,
+        }
     }
 
     pub fn dump(&self, path: &Path) {
         let mut file =
             BufWriter::new(File::create(path).expect("could not create allocation dump file"));
-        for (life_range, alloc) in self.alive_interval_map.unsorted_iter() {
-            let alloc = &self.allocations[*alloc];
+        for (life_range, alloc) in self.occupation.alive_interval_map.unsorted_iter() {
+            let alloc = &self.occupation.allocations[*alloc];
 
             let ty = match &alloc.kind {
                 AllocationType::FunctionFrame => 'U',
@@ -341,13 +375,17 @@ impl OccupationTracker {
     }
 
     fn insert(&mut self, kind: AllocationType, reg_range: Range<u32>, live_range: Range<usize>) {
-        let entry_idx = self.allocations.len();
+        let entry_idx = self.occupation.allocations.len();
         if let AllocationType::Value(origin) = kind {
             self.origin_map.insert(origin, entry_idx);
         }
-        self.allocations.push(AllocationEntry { kind, reg_range });
+        self.occupation
+            .allocations
+            .push(AllocationEntry { kind, reg_range });
         // Force insert because live ranges are not unique.
-        self.alive_interval_map.force_insert(live_range, entry_idx);
+        self.occupation
+            .alive_interval_map
+            .force_insert(live_range, entry_idx);
     }
 
     fn natural_liveness(&self, origin: ValueOrigin) -> Range<usize> {
@@ -364,16 +402,6 @@ impl OccupationTracker {
         } else {
             range
         }
-    }
-
-    fn reg_occupation(&self, live_range: &Range<usize>) -> impl Iterator<Item = &Range<u32>> {
-        self.alive_interval_map
-            .values(live_range.clone())
-            .map(move |entry_idx| &self.allocations[*entry_idx].reg_range)
-    }
-
-    fn reg_occupation_vec(&self, live_range: &Range<usize>) -> Vec<Range<u32>> {
-        self.reg_occupation(live_range).cloned().collect_vec()
     }
 }
 

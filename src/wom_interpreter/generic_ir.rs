@@ -1,8 +1,8 @@
 use crate::{
     loader::{
-        settings::{ComparisonFunction, JumpCondition, Settings, WasmOpInput},
+        settings::{ComparisonFunction, JumpCondition, Settings, TrapReason, WasmOpInput},
         wom::{
-            flattening::{Context, TrapReason},
+            flattening::Context,
             settings::{ReturnInfosToCopy, Settings as WomSettings},
         },
     },
