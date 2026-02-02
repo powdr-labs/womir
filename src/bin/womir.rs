@@ -5,14 +5,14 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use womir::{
+    interpreter::{
+        generic_ir::{Directive, GenericIrSetting},
+        wom::{ExternalFunctions, Interpreter, MemoryAccessor},
+    },
     loader::{
         Program,
         rwm::RWMStages,
         wom::{WomStages, flattening::WriteOnceAsm},
-    },
-    wom_interpreter::{
-        ExternalFunctions, Interpreter, MemoryAccessor,
-        generic_ir::{Directive, GenericIrSetting},
     },
 };
 
@@ -198,7 +198,7 @@ mod tests {
     use std::process::Command;
     use tempfile::NamedTempFile;
     use test_log::test;
-    use womir::wom_interpreter::NULL_REF;
+    use womir::interpreter::wom::NULL_REF;
 
     fn test_interpreter(
         path: &str,

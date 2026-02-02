@@ -1,12 +1,11 @@
-pub mod generic_ir;
-pub mod linker;
-
-use generic_ir::{Directive, GenericIrSetting as S};
-
-use crate::loader::settings::func_idx_to_label;
-use crate::loader::wom::flattening::WriteOnceAsm;
-use crate::loader::{FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE};
-use crate::loader::{word_count_type, word_count_types};
+use crate::interpreter::{
+    generic_ir::{Directive, GenericIrSetting as S},
+    linker,
+};
+use crate::loader::{
+    FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE,
+    settings::func_idx_to_label, wom::flattening::WriteOnceAsm, word_count_type, word_count_types,
+};
 use core::panic;
 use itertools::Itertools;
 use std::collections::HashMap;

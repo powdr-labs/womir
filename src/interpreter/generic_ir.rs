@@ -1,4 +1,5 @@
 use crate::{
+    interpreter::linker,
     loader::{
         settings::{ComparisonFunction, JumpCondition, Settings, TrapReason, WasmOpInput},
         wom::{
@@ -7,7 +8,6 @@ use crate::{
         },
     },
     utils::tree::Tree,
-    wom_interpreter::linker,
 };
 use std::{fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
