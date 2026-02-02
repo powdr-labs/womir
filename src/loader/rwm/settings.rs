@@ -33,7 +33,7 @@ pub trait Settings<'a>: loader::Settings {
     /// This must be exactly one instruction, as counted by the
     /// `emit_relative_jump()` method, otherwise jump tables will
     /// not work correctly.
-    fn emit_jump(&self, target: String) -> impl Into<Tree<Self::Directive>>;
+    fn emit_jump(&self, target: String) -> Self::Directive;
 
     /// Emits conditional jump to a label.
     ///

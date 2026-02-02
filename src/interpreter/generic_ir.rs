@@ -1,18 +1,16 @@
 use crate::{
     interpreter::linker,
     loader::{
+        rwm::{flattening::Context as RwmCtx, settings::Settings as RwmSettings},
         settings::{ComparisonFunction, JumpCondition, Settings, TrapReason, WasmOpInput},
-        wom::{
-            flattening::Context,
-            settings::{ReturnInfosToCopy, Settings as WomSettings},
-        },
+        wom::settings::{ReturnInfosToCopy, Settings as WomSettings},
     },
     utils::tree::Tree,
 };
 use std::{fmt::Display, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
-type Ctx<'a, 'b> = Context<'a, 'b, GenericIrSetting>;
+type WomCtx<'a, 'b> = crate::loader::wom::flattening::Context<'a, 'b, GenericIrSetting>;
 
 pub struct GenericIrSetting;
 
@@ -35,6 +33,168 @@ impl Settings for GenericIrSetting {
 }
 
 #[allow(refining_impl_trait)]
+impl<'a> RwmSettings<'a> for GenericIrSetting {
+    type Directive = Directive<'a>;
+
+    fn emit_label(&self, _c: &mut RwmCtx, name: String) -> Directive<'a> {
+        Directive::Label {
+            id: name,
+            frame_size: None,
+        }
+    }
+
+    fn emit_trap(&self, _c: &mut RwmCtx, trap: TrapReason) -> Directive<'a> {
+        Directive::Trap { reason: trap }
+    }
+
+    fn emit_copy(&self, _c: &mut RwmCtx, src_reg: u32, dest_reg: u32) -> Directive<'a> {
+        Directive::Copy {
+            src_word: src_reg,
+            dest_word: dest_reg,
+        }
+    }
+
+    fn emit_jump(&self, target: String) -> Directive<'a> {
+        Directive::Jump { target }
+    }
+
+    fn emit_conditional_jump(
+        &self,
+        _c: &mut RwmCtx,
+        condition_type: JumpCondition,
+        label: String,
+        condition_ptr: Range<u32>,
+    ) -> Directive<'a> {
+        match condition_type {
+            JumpCondition::IfZero => Directive::JumpIfZero {
+                target: label,
+                condition: condition_ptr.start,
+            },
+            JumpCondition::IfNotZero => Directive::JumpIf {
+                target: label,
+                condition: condition_ptr.start,
+            },
+        }
+    }
+
+    fn emit_conditional_jump_cmp_immediate(
+        &self,
+        c: &mut RwmCtx,
+        cmp: ComparisonFunction,
+        value_ptr: Range<u32>,
+        immediate: u32,
+        label: String,
+    ) -> Vec<Directive<'a>> {
+        let cmp_op = match cmp {
+            ComparisonFunction::Equal => Op::I32Eq,
+            ComparisonFunction::GreaterThanOrEqualUnsigned => Op::I32GeU,
+            ComparisonFunction::LessThanUnsigned => Op::I32LtU,
+        };
+
+        let const_value = c.allocate_tmp_type::<Self>(ValType::I32);
+        let comparison = c.allocate_tmp_type::<Self>(ValType::I32);
+        vec![
+            Directive::WASMOp {
+                op: Op::I32Const {
+                    value: immediate as i32,
+                },
+                inputs: Vec::new(),
+                output: Some(const_value.clone()),
+            },
+            Directive::WASMOp {
+                op: cmp_op,
+                inputs: vec![value_ptr.clone(), const_value],
+                output: Some(comparison.clone()),
+            },
+            Directive::JumpIf {
+                target: label,
+                condition: comparison.start,
+            },
+        ]
+    }
+
+    fn emit_relative_jump(&self, _c: &mut RwmCtx, offset_ptr: Range<u32>) -> Directive<'a> {
+        Directive::JumpOffset {
+            offset: offset_ptr.start,
+        }
+    }
+
+    fn emit_return(
+        &self,
+        _c: &mut RwmCtx,
+        ret_pc_ptr: Range<u32>,
+        caller_fp_ptr: Range<u32>,
+    ) -> Directive<'a> {
+        Directive::Return {
+            ret_pc: ret_pc_ptr.start,
+            ret_fp: caller_fp_ptr.start,
+        }
+    }
+
+    fn emit_imported_call(
+        &self,
+        _c: &mut RwmCtx,
+        module: &'a str,
+        function: &'a str,
+        inputs: Vec<Range<u32>>,
+        outputs: Vec<Range<u32>>,
+    ) -> Directive<'a> {
+        Directive::ImportedCall {
+            module,
+            function,
+            inputs,
+            outputs,
+        }
+    }
+
+    fn emit_function_call(
+        &self,
+        _c: &mut RwmCtx,
+        function_label: String,
+        function_frame_offset: u32,
+        saved_ret_pc_ptr: Range<u32>,
+        saved_caller_fp_ptr: Range<u32>,
+    ) -> Directive<'a> {
+        Directive::Call {
+            target: function_label,
+            new_frame_ptr: function_frame_offset,
+            saved_ret_pc: saved_ret_pc_ptr.start,
+            saved_caller_fp: saved_caller_fp_ptr.start,
+        }
+    }
+
+    fn emit_indirect_call(
+        &self,
+        _c: &mut RwmCtx,
+        target_pc_ptr: Range<u32>,
+        function_frame_offset: u32,
+        saved_ret_pc_ptr: Range<u32>,
+        saved_caller_fp_ptr: Range<u32>,
+    ) -> impl Into<Tree<Self::Directive>> {
+        Directive::CallIndirect {
+            target_pc: target_pc_ptr.start,
+            new_frame_ptr: function_frame_offset,
+            saved_ret_pc: saved_ret_pc_ptr.start,
+            saved_caller_fp: saved_caller_fp_ptr.start,
+        }
+    }
+
+    fn emit_wasm_op(
+        &self,
+        _c: &mut RwmCtx,
+        op: Op<'a>,
+        inputs: Vec<WasmOpInput>,
+        output: Option<Range<u32>>,
+    ) -> Directive<'a> {
+        Directive::WASMOp {
+            op,
+            inputs: inputs.into_iter().map(unwrap_register).collect(),
+            output,
+        }
+    }
+}
+
+#[allow(refining_impl_trait)]
 impl<'a> WomSettings<'a> for GenericIrSetting {
     type Directive = Directive<'a>;
 
@@ -42,20 +202,20 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
         true
     }
 
-    fn emit_label(&self, _c: &mut Ctx, name: String, frame_size: Option<u32>) -> Directive<'a> {
+    fn emit_label(&self, _c: &mut WomCtx, name: String, frame_size: Option<u32>) -> Directive<'a> {
         Directive::Label {
             id: name,
             frame_size,
         }
     }
 
-    fn emit_trap(&self, _c: &mut Ctx, trap: TrapReason) -> Directive<'a> {
+    fn emit_trap(&self, _c: &mut WomCtx, trap: TrapReason) -> Directive<'a> {
         Directive::Trap { reason: trap }
     }
 
     fn emit_allocate_label_frame(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         label: String,
         result_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -67,7 +227,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_allocate_value_frame(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         frame_size_ptr: Range<u32>,
         result_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -77,7 +237,12 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
         }
     }
 
-    fn emit_copy(&self, _c: &mut Ctx, src_ptr: Range<u32>, dest_ptr: Range<u32>) -> Directive<'a> {
+    fn emit_copy(
+        &self,
+        _c: &mut WomCtx,
+        src_ptr: Range<u32>,
+        dest_ptr: Range<u32>,
+    ) -> Directive<'a> {
         Directive::Copy {
             src_word: src_ptr.start,
             dest_word: dest_ptr.start,
@@ -86,7 +251,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_copy_into_frame(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         src_ptr: Range<u32>,
         dest_frame_ptr: Range<u32>,
         dest_offset: Range<u32>,
@@ -100,7 +265,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_copy_from_frame(
         &self,
-        _c: &mut Context<'a, '_, Self>,
+        _c: &mut WomCtx,
         _source_frame_ptr: Range<u32>,
         _source_offset: Range<u32>,
         _dest_ptr: Range<u32>,
@@ -111,7 +276,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_jump_into_loop(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         loop_label: String,
         loop_frame_ptr: Range<u32>,
         ret_info_to_copy: Option<ReturnInfosToCopy>,
@@ -166,7 +331,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_conditional_jump(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         condition_type: JumpCondition,
         label: String,
         condition_ptr: Range<u32>,
@@ -185,7 +350,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_conditional_jump_cmp_immediate(
         &self,
-        c: &mut Ctx,
+        c: &mut WomCtx,
         cmp: ComparisonFunction,
         value_ptr: Range<u32>,
         immediate: u32,
@@ -219,7 +384,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
         ]
     }
 
-    fn emit_relative_jump(&self, _c: &mut Ctx, offset_ptr: Range<u32>) -> Directive<'a> {
+    fn emit_relative_jump(&self, _c: &mut WomCtx, offset_ptr: Range<u32>) -> Directive<'a> {
         Directive::JumpOffset {
             offset: offset_ptr.start,
         }
@@ -227,7 +392,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_jump_out_of_loop(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         target_label: String,
         target_frame_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -241,7 +406,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_return(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         ret_pc_ptr: Range<u32>,
         caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -253,7 +418,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_imported_call(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         module: &'a str,
         function: &'a str,
         inputs: Vec<Range<u32>>,
@@ -269,7 +434,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_function_call(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         function_label: String,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -285,7 +450,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_indirect_call(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         target_pc_ptr: Range<u32>,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
@@ -301,7 +466,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_wasm_op(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         op: Op<'a>,
         inputs: Vec<WasmOpInput>,
         output: Option<Range<u32>>,
