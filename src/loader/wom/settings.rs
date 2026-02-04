@@ -35,8 +35,6 @@ pub struct ReturnInfosToCopy<'a> {
 /// TODO: find a way to make calling conventions and interface registers allocation
 /// part of this trait.
 pub trait Settings<'a>: loader::Settings {
-    type Directive;
-
     /// Tells wether outputs are bound to the function frame before the call,
     /// with copy_into_frame, or if they must be copied out after the call.
     ///
@@ -89,12 +87,6 @@ pub trait Settings<'a>: loader::Settings {
             },
         )
     }
-
-    /// Test if a directive is a plain jump to a local frame label.
-    fn to_plain_local_jump(directive: Self::Directive) -> Result<String, Self::Directive>;
-
-    /// Test if a directive is a label.
-    fn is_label(directive: &Self::Directive) -> Option<&str>;
 
     /// Emits a directive to mark a code position, and possibly a frame size.
     fn emit_label(
@@ -152,13 +144,6 @@ pub trait Settings<'a>: loader::Settings {
         source_offset: Range<u32>,
         dest_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
-
-    /// Emits a plain jump to a label in the same frame.
-    ///
-    /// This must be exactly one instruction, as counted by the
-    /// `emit_relative_jump()` method, otherwise jump tables will
-    /// not work correctly.
-    fn emit_jump(&self, label: String) -> Self::Directive;
 
     /// Emits the instructions to jump into a new loop iteration in a new frame,
     /// If needed, must save the current frame pointer into the new frame,

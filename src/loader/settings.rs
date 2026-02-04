@@ -66,6 +66,8 @@ pub enum MaybeConstant {
 
 /// Trait providing settings for WOMIR loader passes.
 pub trait Settings {
+    type Directive;
+
     fn bytes_per_word() -> u32;
 
     /// The size, in words, of a pointer to an executable ROM address,
@@ -89,6 +91,18 @@ pub trait Settings {
     fn get_const_collapse_processor() -> Option<impl Fn(&Op, &[MaybeConstant])> {
         None::<fn(&Op, &[MaybeConstant])>
     }
+
+    /// Test if a directive is a plain jump to a local frame label.
+    fn to_plain_local_jump(directive: Self::Directive) -> Result<String, Self::Directive>;
+
+    /// Test if a directive is a label.
+    fn is_label(directive: &Self::Directive) -> Option<&str>;
+
+    /// Emits an unconditional jump to a label.
+    ///
+    /// This must be exactly one instruction, otherwise jump tables will
+    /// not work correctly.
+    fn emit_jump(&self, target: String) -> Self::Directive;
 }
 
 pub enum LabelType {

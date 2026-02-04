@@ -7,14 +7,19 @@ use crate::{
     },
     utils::tree::Tree,
 };
-use std::{fmt::Display, ops::Range};
+use std::{fmt::Display, marker::PhantomData, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
-type WomCtx<'a, 'b> = crate::loader::wom::flattening::Context<'a, 'b, GenericIrSetting>;
+type WomCtx<'a, 'b> = crate::loader::wom::flattening::Context<'a, 'b, GenericIrSetting<'a>>;
 
-pub struct GenericIrSetting;
+#[derive(Default)]
+pub struct GenericIrSetting<'a> {
+    _phantom: PhantomData<&'a u32>,
+}
 
-impl Settings for GenericIrSetting {
+impl<'a> Settings for GenericIrSetting<'a> {
+    type Directive = Directive<'a>;
+
     fn bytes_per_word() -> u32 {
         4
     }
@@ -30,12 +35,30 @@ impl Settings for GenericIrSetting {
     fn is_relative_jump_available() -> bool {
         true
     }
+
+    fn is_label(directive: &Self::Directive) -> Option<&str> {
+        if let Directive::Label { id, .. } = directive {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    fn to_plain_local_jump(directive: Directive) -> Result<String, Directive> {
+        if let Directive::Jump { target } = directive {
+            Ok(target)
+        } else {
+            Err(directive)
+        }
+    }
+
+    fn emit_jump(&self, label: String) -> Directive<'a> {
+        Directive::Jump { target: label }
+    }
 }
 
 #[allow(refining_impl_trait)]
-impl<'a> RwmSettings<'a> for GenericIrSetting {
-    type Directive = Directive<'a>;
-
+impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
     fn emit_label(&self, _c: &mut RwmCtx, name: String) -> Directive<'a> {
         Directive::Label {
             id: name,
@@ -52,10 +75,6 @@ impl<'a> RwmSettings<'a> for GenericIrSetting {
             src_word: src_reg,
             dest_word: dest_reg,
         }
-    }
-
-    fn emit_jump(&self, target: String) -> Directive<'a> {
-        Directive::Jump { target }
     }
 
     fn emit_conditional_jump(
@@ -79,7 +98,7 @@ impl<'a> RwmSettings<'a> for GenericIrSetting {
 
     fn emit_conditional_jump_cmp_immediate(
         &self,
-        c: &mut RwmCtx,
+        c: &mut RwmCtx<'a, '_>,
         cmp: ComparisonFunction,
         value_ptr: Range<u32>,
         immediate: u32,
@@ -195,9 +214,7 @@ impl<'a> RwmSettings<'a> for GenericIrSetting {
 }
 
 #[allow(refining_impl_trait)]
-impl<'a> WomSettings<'a> for GenericIrSetting {
-    type Directive = Directive<'a>;
-
+impl<'a> WomSettings<'a> for GenericIrSetting<'a> {
     fn use_non_deterministic_function_outputs() -> bool {
         true
     }
@@ -307,26 +324,6 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
         });
 
         directives
-    }
-
-    fn is_label(directive: &Self::Directive) -> Option<&str> {
-        if let Directive::Label { id, .. } = directive {
-            Some(id)
-        } else {
-            None
-        }
-    }
-
-    fn to_plain_local_jump(directive: Directive) -> Result<String, Directive> {
-        if let Directive::Jump { target } = directive {
-            Ok(target)
-        } else {
-            Err(directive)
-        }
-    }
-
-    fn emit_jump(&self, label: String) -> Directive<'a> {
-        Directive::Jump { target: label }
     }
 
     fn emit_conditional_jump(

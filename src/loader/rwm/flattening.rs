@@ -8,7 +8,7 @@ use wasmparser::{FuncType, Operator as Op, ValType};
 
 use crate::{
     loader::{
-        LabelGenerator, Module, assert_reg,
+        FunctionAsm, LabelGenerator, Module, assert_reg,
         passes::{
             blockless_dag::{BreakTarget, Operation, TargetType},
             dag::{NodeInput, ValueOrigin},
@@ -26,18 +26,13 @@ use crate::{
 };
 use std::{collections::VecDeque, ops::Range, sync::atomic::AtomicU32};
 
-pub struct Asm<D> {
-    pub func_idx: u32,
-    pub directives: Vec<D>,
-}
-
 pub fn flatten_dag<'a, S: Settings<'a>>(
     s: &S,
     prog: &Module<'a>,
     label_gen: &AtomicU32,
     func_idx: u32,
     dag: AllocatedDag<'a>,
-) -> Asm<S::Directive> {
+) -> FunctionAsm<S::Directive> {
     let ctx = CommonContext { prog, label_gen };
 
     let mut ctrl_stack = VecDeque::new();
@@ -48,8 +43,9 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
 
     let tree = process_dag(s, &ctx, &mut ctrl_stack, dag.nodes, func_idx);
 
-    Asm {
+    FunctionAsm {
         func_idx,
+        frame_size: None,
         directives: tree.flatten(),
     }
 }
@@ -480,13 +476,16 @@ fn process_node<'a, 'b, S: Settings<'a>>(
     }
 }
 
-enum JumpResult<'a, S: Settings<'a>> {
-    Directives(Vec<Tree<S::Directive>>),
+enum JumpResult<D> {
+    Directives(Vec<Tree<D>>),
     PlainJump(String),
 }
 
-impl<'a, S: Settings<'a>> JumpResult<'a, S> {
-    fn into_tree(self, s: &S) -> Tree<S::Directive> {
+impl<D> JumpResult<D> {
+    fn into_tree<'a, S: Settings<'a>>(self, s: &S) -> Tree<D>
+    where
+        Tree<D>: From<S::Directive>,
+    {
         match self {
             JumpResult::Directives(directives) => directives.into(),
             JumpResult::PlainJump(target) => s.emit_jump(target).into(),
@@ -496,12 +495,12 @@ impl<'a, S: Settings<'a>> JumpResult<'a, S> {
 
 fn emit_jump<'a, S: Settings<'a>>(
     s: &S,
-    ctx: &mut Context,
+    ctx: &mut Context<'a, '_>,
     ctrl_stack: &VecDeque<StackEntry>,
     target: BreakTarget,
     node_inputs: &[NodeInput],
     func_idx: u32,
-) -> JumpResult<'a, S> {
+) -> JumpResult<S::Directive> {
     // There are 3 different kinds of jumps we have to deal with:
     //
     // 1. Jumps to a forward label in the current function.
@@ -567,7 +566,7 @@ fn emit_jump<'a, S: Settings<'a>>(
 /// already at the expected locations.
 fn copy_inputs_if_needed<'a, S: Settings<'a>>(
     s: &S,
-    ctx: &mut Context,
+    ctx: &mut Context<'a, '_>,
     allocation: &Allocation,
     node_inputs: &[NodeInput],
     expected_locations: impl Iterator<Item = Range<u32>>,
@@ -716,7 +715,7 @@ struct FunctionCall<D> {
 
 fn prepare_function_call<'a, S: Settings<'a>>(
     s: &S,
-    ctx: &mut Context,
+    ctx: &mut Context<'a, '_>,
     allocation: &Allocation,
     node_idx: usize,
     inputs: &[NodeInput],

@@ -7,13 +7,9 @@ use clap::{Parser, Subcommand};
 use womir::{
     interpreter::{
         generic_ir::{Directive, GenericIrSetting},
-        wom::{ExternalFunctions, Interpreter, MemoryAccessor},
+        wom::{ExecutionModel, ExternalFunctions, Interpreter, MemoryAccessor},
     },
-    loader::{
-        Program,
-        rwm::RWMStages,
-        wom::{WomStages, flattening::WriteOnceAsm},
-    },
+    loader::{FunctionAsm, PartiallyParsedProgram, Program, rwm::RWMStages, wom::WomStages},
 };
 
 struct DataInput {
@@ -86,6 +82,14 @@ impl ExternalFunctions for DataInput {
 fn main() -> wasmparser::Result<()> {
     env_logger::init();
 
+    fn parse_exec_model(s: &str) -> Result<ExecutionModel, String> {
+        match s {
+            "wom" | "write-once" => Ok(ExecutionModel::WriteOnceRegisters),
+            "rw" | "infinite" => Ok(ExecutionModel::InfiniteRegisters),
+            _ => Err(format!("Invalid execution model: {s}")),
+        }
+    }
+
     /// Simple CLI for the `womir` binary.
     ///
     /// Two subcommands are supported:
@@ -94,9 +98,9 @@ fn main() -> wasmparser::Result<()> {
     #[derive(Parser)]
     #[command(author, version, about = "womir tool: compile or run a Wasm file", long_about = None)]
     struct Cli {
-        /// Enable read-write pipeline
-        #[arg(short = 'w', long = "rw-pipeline", global = true)]
-        rw_pipeline: bool,
+        /// Execution model (wom = write-once registers, rw = infinite/read-write registers)
+        #[arg(short = 'e', long = "exec-model", default_value = "wom", global = true, value_parser = parse_exec_model)]
+        exec_model: ExecutionModel,
         #[command(subcommand)]
         command: Command,
     }
@@ -132,16 +136,12 @@ fn main() -> wasmparser::Result<()> {
     match cli.command {
         Command::Compile { wasm_file } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
-            let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?;
-            if cli.rw_pipeline {
-                program.default_par_process_all_functions::<RWMStages>()?;
-            } else {
-                let program =
-                    program.default_par_process_all_functions::<WomStages<GenericIrSetting>>()?;
-                if let Err(err) = dump_ir(&program) {
-                    log::error!("Failed to dump IR: {err}");
-                }
-            };
+            let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_bytes)?;
+            let program = process_functions(cli.exec_model, program)?;
+
+            if let Err(err) = dump_ir(&program) {
+                log::error!("Failed to dump IR: {err}");
+            }
 
             Ok(())
         }
@@ -152,31 +152,39 @@ fn main() -> wasmparser::Result<()> {
             data_inputs,
         } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
-            let program = womir::loader::load_wasm(GenericIrSetting, &wasm_bytes)?;
-            if cli.rw_pipeline {
-                let _program = program.default_par_process_all_functions::<RWMStages>()?;
-                // TODO: interpret the program in RWM mode
-                unimplemented!("RWM interpreter not implemented yet");
-            } else {
-                let program =
-                    program.default_par_process_all_functions::<WomStages<GenericIrSetting>>()?;
+            let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_bytes)?;
+            let program = process_functions(cli.exec_model, program)?;
 
-                if let Err(err) = dump_ir(&program) {
-                    log::error!("Failed to dump IR: {err}");
-                }
-
-                let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
-                log::info!("Executing function: {function}");
-                let outputs = interpreter.run(&function, &func_inputs);
-                log::info!("Outputs: {:?}", outputs);
+            if let Err(err) = dump_ir(&program) {
+                log::error!("Failed to dump IR: {err}");
             }
+
+            let mut interpreter =
+                Interpreter::new(program, cli.exec_model, DataInput::new(data_inputs));
+            log::info!("Executing function: {function}");
+            let outputs = interpreter.run(&function, &func_inputs);
+            log::info!("Outputs: {:?}", outputs);
 
             Ok(())
         }
     }
 }
 
-fn dump_ir(program: &Program<WriteOnceAsm<Directive>>) -> std::io::Result<()> {
+fn process_functions<'a>(
+    exec_model: ExecutionModel,
+    program: PartiallyParsedProgram<'a, GenericIrSetting<'a>>,
+) -> wasmparser::Result<Program<'a, FunctionAsm<Directive<'a>>>> {
+    match exec_model {
+        ExecutionModel::InfiniteRegisters => {
+            program.default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+        }
+        ExecutionModel::WriteOnceRegisters => {
+            program.default_par_process_all_functions::<WomStages<GenericIrSetting>>()
+        }
+    }
+}
+
+fn dump_ir(program: &Program<FunctionAsm<Directive>>) -> std::io::Result<()> {
     let mut file = BufWriter::new(File::create("ir_dump.txt")?);
     for (i, func) in program.functions.iter().enumerate() {
         writeln!(file, "Function {i}:")?;
@@ -211,11 +219,15 @@ mod tests {
             "Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}"
         );
         let wasm_file = std::fs::read(path).unwrap();
-        let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file)
             .unwrap()
             .default_process_all_functions::<WomStages<GenericIrSetting>>()
             .unwrap();
-        let mut interpreter = Interpreter::new(program, DataInput::new(data_inputs));
+        let mut interpreter = Interpreter::new(
+            program,
+            ExecutionModel::WriteOnceRegisters,
+            DataInput::new(data_inputs),
+        );
         let got_output = interpreter.run(main_function, func_inputs);
         assert_eq!(got_output, outputs);
     }
@@ -540,11 +552,15 @@ mod tests {
                 for (mod_name, line, asserts) in modules {
                     println!("Testing module: {} at line {line}", mod_name.display());
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = womir::loader::load_wasm(GenericIrSetting, &wasm_file)
+                    let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file)
                         .unwrap()
                         .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
                         .unwrap();
-                    let mut interpreter = Interpreter::new(program, SpectestExternalFunctions);
+                    let mut interpreter = Interpreter::new(
+                        program,
+                        ExecutionModel::WriteOnceRegisters,
+                        SpectestExternalFunctions,
+                    );
 
                     asserts
                         .iter()

@@ -3,8 +3,7 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::loader::{
-    CommonStages, FunctionProcessingStage, Module, Statistics,
-    wom::{flattening::WriteOnceAsm, settings::Settings},
+    CommonStages, FunctionAsm, FunctionProcessingStage, Module, Statistics, wom::settings::Settings,
 };
 
 pub mod dumb_jump_removal;
@@ -15,12 +14,12 @@ pub mod settings;
 #[derive(Debug)]
 pub enum WomStages<'a, S: Settings<'a>> {
     CommonStages(CommonStages<'a>),
-    PlainFlatAsm(WriteOnceAsm<S::Directive>),
-    DumbJumpOptFlatAsm(WriteOnceAsm<S::Directive>),
+    PlainFlatAsm(FunctionAsm<S::Directive>),
+    DumbJumpOptFlatAsm(FunctionAsm<S::Directive>),
 }
 
 impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> for WomStages<'a, S> {
-    type LastStage = WriteOnceAsm<S::Directive>;
+    type LastStage = FunctionAsm<S::Directive>;
 
     fn advance_stage(
         self,
@@ -66,7 +65,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> for WomStages<'a, S> {
         })
     }
 
-    fn consume_last_stage(self) -> Result<Self::LastStage, Self> {
+    fn consume_last_stage(self) -> Result<FunctionAsm<S::Directive>, Self> {
         if let Self::DumbJumpOptFlatAsm(flat_asm) = self {
             Ok(flat_asm)
         } else {

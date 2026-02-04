@@ -12,28 +12,24 @@ use crate::{
 
 /// Trait controlling the behavior of the flattening process.
 pub trait Settings<'a>: loader::Settings {
-    type Directive;
-
     /// Emits a directive to mark a code position.
-    fn emit_label(&self, c: &mut Context, name: String) -> impl Into<Tree<Self::Directive>>;
+    fn emit_label(&self, c: &mut Context<'a, '_>, name: String)
+    -> impl Into<Tree<Self::Directive>>;
 
     /// Emits a trap instruction with the given reason.
-    fn emit_trap(&self, c: &mut Context, trap: TrapReason) -> impl Into<Tree<Self::Directive>>;
+    fn emit_trap(
+        &self,
+        c: &mut Context<'a, '_>,
+        trap: TrapReason,
+    ) -> impl Into<Tree<Self::Directive>>;
 
     /// Copies a single word between two registers.
     fn emit_copy(
         &self,
-        g: &mut Context,
+        g: &mut Context<'a, '_>,
         src_reg: u32,
         dest_reg: u32,
     ) -> impl Into<Tree<Self::Directive>>;
-
-    /// Emits an unconditional jump to a label.
-    ///
-    /// This must be exactly one instruction, as counted by the
-    /// `emit_relative_jump()` method, otherwise jump tables will
-    /// not work correctly.
-    fn emit_jump(&self, target: String) -> Self::Directive;
 
     /// Emits conditional jump to a label.
     ///
@@ -41,7 +37,7 @@ pub trait Settings<'a>: loader::Settings {
     /// `is_branch_if_zero_available()` and `is_branch_if_not_zero_available()`.
     fn emit_conditional_jump(
         &self,
-        c: &mut Context,
+        c: &mut Context<'a, '_>,
         condition_type: JumpCondition,
         label: String,
         condition_ptr: Range<u32>,
@@ -50,7 +46,7 @@ pub trait Settings<'a>: loader::Settings {
     /// Emits a jump to a label conditioned on cmp(value, immediate).
     fn emit_conditional_jump_cmp_immediate(
         &self,
-        c: &mut Context,
+        c: &mut Context<'a, '_>,
         cmp: ComparisonFunction,
         value_ptr: Range<u32>,
         immediate: u32,
@@ -62,14 +58,14 @@ pub trait Settings<'a>: loader::Settings {
     /// If offset is 0, it is equivalent to a NOP. Otherwise, it skips as many instructions as the offset.
     fn emit_relative_jump(
         &self,
-        g: &mut Context,
+        g: &mut Context<'a, '_>,
         offset_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
 
     /// Emits a function return instruction.
     fn emit_return(
         &self,
-        c: &mut Context,
+        c: &mut Context<'a, '_>,
         ret_pc_ptr: Range<u32>,
         caller_fp_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -77,7 +73,7 @@ pub trait Settings<'a>: loader::Settings {
     /// Emits a call to an imported function.
     fn emit_imported_call(
         &self,
-        c: &mut Context,
+        c: &mut Context<'a, '_>,
         module: &'a str,
         function: &'a str,
         inputs: Vec<Range<u32>>,
@@ -89,7 +85,7 @@ pub trait Settings<'a>: loader::Settings {
     /// `saved_ret_pc_ptr` and `saved_caller_fp_ptr` are given in callee's frame space.
     fn emit_function_call(
         &self,
-        c: &mut Context,
+        c: &mut Context<'a, '_>,
         function_label: String,
         function_frame_offset: u32,
         saved_ret_pc_ptr: Range<u32>,
@@ -101,7 +97,7 @@ pub trait Settings<'a>: loader::Settings {
     /// `saved_ret_pc_ptr` and `saved_caller_fp_ptr` are given in callee's frame space.
     fn emit_indirect_call(
         &self,
-        c: &mut Context,
+        c: &mut Context<'a, '_>,
         target_pc_ptr: Range<u32>,
         function_frame_offset: u32,
         saved_ret_pc_ptr: Range<u32>,
@@ -111,7 +107,7 @@ pub trait Settings<'a>: loader::Settings {
     /// Emits the equivalent set of instructions to a WASM operation.
     fn emit_wasm_op(
         &self,
-        c: &mut Context,
+        c: &mut Context<'a, '_>,
         op: Operator<'a>,
         inputs: Vec<WasmOpInput>,
         output: Option<Range<u32>>,

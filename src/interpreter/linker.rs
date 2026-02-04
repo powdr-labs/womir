@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::loader::wom::flattening::WriteOnceAsm;
+use crate::loader::FunctionAsm;
 
 pub struct Label<'a> {
     pub id: &'a str,
@@ -20,34 +20,30 @@ pub struct LabelValue {
 }
 
 pub fn link<D: Directive>(
-    program: &[WriteOnceAsm<D>],
+    program: Vec<FunctionAsm<D>>,
     init_pc: u32,
 ) -> (Vec<D>, HashMap<String, LabelValue>) {
-    let mut pc: u32 = init_pc;
-
     let mut flat_program = vec![D::nop(); init_pc as usize];
-
     let mut labels = HashMap::new();
+
     for fun in program {
-        let func_pc = pc;
-        flat_program.extend(
-            fun.directives
-                .clone()
-                .into_iter()
-                .filter(|d| d.as_label().is_none()),
-        );
-        for instr in &fun.directives {
-            if let Some(Label { id, frame_size }) = instr.as_label() {
-                labels.insert(
-                    id.to_string(),
-                    LabelValue {
-                        pc,
-                        frame_size,
-                        func_idx: (pc == func_pc).then_some(fun.func_idx),
-                    },
-                );
-            } else {
-                pc += 1;
+        let func_pc = flat_program.len() as u32;
+        for d in fun.directives {
+            match d.as_label() {
+                Some(Label { id, frame_size }) => {
+                    let pc = flat_program.len() as u32;
+                    labels.insert(
+                        id.to_string(),
+                        LabelValue {
+                            pc,
+                            frame_size,
+                            func_idx: (pc == func_pc).then_some(fun.func_idx),
+                        },
+                    );
+                }
+                None => {
+                    flat_program.push(d);
+                }
             }
         }
     }

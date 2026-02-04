@@ -73,6 +73,13 @@ pub enum MemoryEntry {
     NullFuncAddr,
 }
 
+/// An assembly-like representation of a function.
+#[derive(Debug, Clone)]
+pub struct FunctionAsm<D> {
+    pub func_idx: u32,
+    pub frame_size: Option<u32>,
+    pub directives: Vec<D>,
+}
 /// Helper struct to track unallocated memory.
 /// This is used to allocate the memory for the tables and the globals.
 struct MemoryAllocator {
