@@ -28,21 +28,22 @@ pub const NULL_REF: [u32; 3] = [
 /// - Read-write registers
 trait RegisterBank {
     /// Allocate `size` registers and return the starting address.
+    /// Only valid for write-once execution model.
     fn allocate(&mut self, size: u32) -> u32;
 
     /// Get the value at the given absolute address, resolved to a concrete u32.
     /// Panics if the value cannot be resolved (e.g., unassigned or unresolved future).
-    fn get_absolute_u32(&mut self, addr: u32) -> u32;
+    fn get(&mut self, addr: u32) -> u32;
 
     /// Set a concrete u32 value at the given absolute address.
-    fn set_absolute_u32(&mut self, addr: u32, value: u32);
+    fn set(&mut self, addr: u32, value: u32);
 
-    /// Copy a raw value (potentially a future) from one register to another.
-    fn copy_raw(&mut self, src: u32, dest: u32);
+    /// Copy a u32 value (potentially a future) from one register to another.
+    fn copy(&mut self, src: u32, dest: u32);
 
     /// Set a future value at the given absolute address.
     /// Only valid for write-once execution model.
-    fn set_absolute_future(&mut self, addr: u32);
+    fn set_future(&mut self, addr: u32);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +108,7 @@ impl RegisterBank for WriteOnceRegisterBank {
         addr as u32
     }
 
-    fn get_absolute_u32(&mut self, addr: u32) -> u32 {
+    fn get(&mut self, addr: u32) -> u32 {
         let value = self.resolve_value(addr);
         log::trace!("Reading register address {addr}: {value:?}");
         match value {
@@ -123,7 +124,7 @@ impl RegisterBank for WriteOnceRegisterBank {
         }
     }
 
-    fn set_absolute_u32(&mut self, addr: u32, value: u32) {
+    fn set(&mut self, addr: u32, value: u32) {
         let slot = &mut self.regs[addr as usize];
         log::trace!("Setting register address {addr}: {value}");
         match *slot {
@@ -149,7 +150,7 @@ impl RegisterBank for WriteOnceRegisterBank {
         }
     }
 
-    fn copy_raw(&mut self, src: u32, dest: u32) {
+    fn copy(&mut self, src: u32, dest: u32) {
         let value = self.resolve_value(src);
         log::trace!("Copying register {src} -> {dest}: {value:?}");
         let dest_slot = &mut self.regs[dest as usize];
@@ -177,7 +178,7 @@ impl RegisterBank for WriteOnceRegisterBank {
         }
     }
 
-    fn set_absolute_future(&mut self, addr: u32) {
+    fn set_future(&mut self, addr: u32) {
         let future = self.new_future();
         let slot = &mut self.regs[addr as usize];
         log::trace!("Setting register address {addr} to future {future}");
@@ -192,12 +193,53 @@ impl RegisterBank for WriteOnceRegisterBank {
     }
 }
 
+struct ReadWriteRegisterBank {
+    regs: Vec<u32>,
+}
+
+impl ReadWriteRegisterBank {
+    fn new() -> Self {
+        Self { regs: Vec::new() }
+    }
+}
+
+impl RegisterBank for ReadWriteRegisterBank {
+    fn get(&mut self, addr: u32) -> u32 {
+        let value = self.regs.get(addr as usize).copied().unwrap_or(0);
+        log::trace!("Reading register address {addr}: {value}");
+        value
+    }
+
+    fn set(&mut self, addr: u32, value: u32) {
+        log::trace!("Setting register address {addr}: {value}");
+        let addr = addr as usize;
+        if addr >= self.regs.len() {
+            self.regs.resize(addr + 1, 0);
+        }
+        self.regs[addr] = value;
+    }
+
+    fn copy(&mut self, src: u32, dest: u32) {
+        let value = self.get(src);
+        self.set(dest, value);
+    }
+
+    fn allocate(&mut self, _size: u32) -> u32 {
+        unreachable!("Allocation is not supported in read-write execution model");
+    }
+
+    fn set_future(&mut self, _addr: u32) {
+        unreachable!("Futures are not supported in read-write execution model");
+    }
+}
+
 pub struct Interpreter<'a, E: ExternalFunctions> {
     // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
     regs: Box<dyn RegisterBank>,
     ram: Ram,
+    exec_model: ExecutionModel,
     func_stack_sizes: Vec<u32>,
     module: Module<'a>,
     external_functions: E,
@@ -246,9 +288,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         const START_ROM_ADDR: u32 = 0x1;
 
         let mut func_stack_sizes = Vec::new();
-        if exec_model == ExecutionModel::WriteOnceRegisters {
+        let regs = if exec_model == ExecutionModel::WriteOnceRegisters {
             func_stack_sizes.extend(program.functions.iter().map(|f| f.frame_size.unwrap()));
-        }
+            Box::new(WriteOnceRegisterBank::new()) as Box<dyn RegisterBank>
+        } else {
+            Box::new(ReadWriteRegisterBank::new()) as Box<dyn RegisterBank>
+        };
 
         let (flat_program, labels) = linker::link(program.functions, START_ROM_ADDR);
 
@@ -283,8 +328,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let mut interpreter = Self {
             pc: 0,
             fp: 0,
-            regs: Box::new(WriteOnceRegisterBank::new()),
+            regs,
             ram: Ram(ram),
+            exec_model,
             func_stack_sizes,
             module: program.m,
             external_functions,
@@ -312,22 +358,40 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         assert_eq!(inputs.len(), n_inputs as usize);
 
         let n_outputs: u32 = word_count_types::<S>(func_type.results());
-
         self.pc = func_label.pc;
-        self.fp = self.allocate(func_label.frame_size.unwrap());
+
+        let outputs_range = match self.exec_model {
+            ExecutionModel::WriteOnceRegisters => {
+                // Use WOM calling convention
+                self.fp = self.allocate(func_label.frame_size.unwrap());
+
+                self.set_reg_relative_u32(0..1, 0); // final return pc
+                self.set_reg_relative_u32(1..2, 0); // return fp success
+                self.set_reg_relative_range(2..2 + inputs.len() as u32, inputs);
+
+                let output_start = 2 + inputs.len() as u32;
+                self.set_reg_relative_range_future(output_start..output_start + n_outputs);
+
+                // We assume that all output futures will be resolved after run_loop()
+                output_start..output_start + n_outputs
+            }
+            ExecutionModel::InfiniteRegisters => {
+                // Use RW calling convention
+                self.fp = 1;
+
+                self.set_reg_relative_range(0..inputs.len() as u32, inputs);
+                let ret_pc_reg = n_inputs.max(n_outputs);
+                self.set_reg_relative_u32(ret_pc_reg..(ret_pc_reg + 1), 0); // final return pc
+                self.set_reg_relative_u32(ret_pc_reg + 1..ret_pc_reg + 2, 0); // return fp success
+
+                0..n_outputs
+            }
+        };
+
         let first_fp = self.fp;
-
-        self.set_reg_relative_u32(0..1, 0); // final return pc
-        self.set_reg_relative_u32(1..2, 0); // return fp success
-        self.set_reg_relative_range(2..2 + inputs.len() as u32, inputs);
-
-        let output_start = 2 + inputs.len() as u32;
-        self.set_reg_relative_range_future(output_start..output_start + n_outputs);
-
         self.run_loop();
 
-        // We assume that all output futures have been resolved.
-        (output_start..output_start + n_outputs)
+        outputs_range
             .map(|i| self.get_reg_absolute_u32(first_fp + i))
             .collect::<Vec<u32>>()
     }
@@ -1789,37 +1853,37 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     fn get_reg_absolute_u32(&mut self, addr: u32) -> u32 {
-        self.regs.get_absolute_u32(addr)
+        self.regs.get(addr)
     }
 
     fn get_reg_relative_u32(&mut self, addr: Range<u32>) -> u32 {
         assert_eq!(addr.len(), 1, "Expected a single address range");
-        self.regs.get_absolute_u32(self.fp + addr.start)
+        self.regs.get(self.fp + addr.start)
     }
 
     fn get_reg_relative_u64(&mut self, addr: Range<u32>) -> u64 {
         assert_eq!(addr.len(), 2, "Expected a single address range");
-        let low = self.regs.get_absolute_u32(self.fp + addr.start);
-        let high = self.regs.get_absolute_u32(self.fp + addr.start + 1);
+        let low = self.regs.get(self.fp + addr.start);
+        let high = self.regs.get(self.fp + addr.start + 1);
         (low as u64) | ((high as u64) << 32)
     }
 
     fn get_reg_relative_range(&mut self, addr: Range<u32>) -> impl Iterator<Item = u32> + '_ {
-        addr.map(|i| self.regs.get_absolute_u32(self.fp + i))
+        addr.map(|i| self.regs.get(self.fp + i))
     }
 
     fn copy_reg_relative(&mut self, src: u32, dest: u32) {
-        self.regs.copy_raw(self.fp + src, self.fp + dest);
+        self.regs.copy(self.fp + src, self.fp + dest);
     }
 
     fn copy_reg_into_frame(&mut self, src: u32, dest_frame: u32, dest: u32) {
-        let target_ptr = self.regs.get_absolute_u32(self.fp + dest_frame) + dest;
-        self.regs.copy_raw(self.fp + src, target_ptr);
+        let target_ptr = self.regs.get(self.fp + dest_frame) + dest;
+        self.regs.copy(self.fp + src, target_ptr);
     }
 
     fn set_reg_relative_u32(&mut self, addr: Range<u32>, value: u32) {
         assert_eq!(addr.len(), 1, "Expected a single address range");
-        self.regs.set_absolute_u32(self.fp + addr.start, value);
+        self.regs.set(self.fp + addr.start, value);
     }
 
     fn set_reg_relative_u64(&mut self, addr: Range<u32>, value: u64) {
@@ -1833,13 +1897,13 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             "Address range and values length mismatch"
         );
         for (addr, &value) in addr.zip(values.iter()) {
-            self.regs.set_absolute_u32(self.fp + addr, value);
+            self.regs.set(self.fp + addr, value);
         }
     }
 
     fn set_reg_relative_range_future(&mut self, addr: Range<u32>) {
         for i in addr {
-            self.regs.set_absolute_future(self.fp + i);
+            self.regs.set_future(self.fp + i);
         }
     }
 
