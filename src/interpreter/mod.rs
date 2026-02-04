@@ -16,19 +16,6 @@ use std::collections::HashMap;
 use std::ops::Range;
 use wasmparser::Operator as Op;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RegisterValue {
-    Unassigned,
-    Future(u32),
-    Concrete(u32),
-}
-
-impl From<u32> for RegisterValue {
-    fn from(value: u32) -> Self {
-        RegisterValue::Concrete(value)
-    }
-}
-
 // How a null reference is represented in the VROM
 pub const NULL_REF: [u32; 3] = [
     u32::MAX, // Function type: this is an invalid function type, so that calling a null reference will trap
@@ -36,13 +23,180 @@ pub const NULL_REF: [u32; 3] = [
     0,        // Address: 0 is an invalid function address because START_ROM_ADDR > 0
 ];
 
+/// We need 2 kinds of register banks, chosen by the execution model:
+/// - Write-once registers
+/// - Read-write registers
+trait RegisterBank {
+    /// Allocate `size` registers and return the starting address.
+    fn allocate(&mut self, size: u32) -> u32;
+
+    /// Get the value at the given absolute address, resolved to a concrete u32.
+    /// Panics if the value cannot be resolved (e.g., unassigned or unresolved future).
+    fn get_absolute_u32(&mut self, addr: u32) -> u32;
+
+    /// Set a concrete u32 value at the given absolute address.
+    fn set_absolute_u32(&mut self, addr: u32, value: u32);
+
+    /// Copy a raw value (potentially a future) from one register to another.
+    fn copy_raw(&mut self, src: u32, dest: u32);
+
+    /// Set a future value at the given absolute address.
+    /// Only valid for write-once execution model.
+    fn set_absolute_future(&mut self, addr: u32);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisterValue {
+    Unassigned,
+    Future(u32),
+    Concrete(u32),
+}
+
+struct WriteOnceRegisterBank {
+    regs: Vec<RegisterValue>,
+    future_counter: u32,
+    future_assignments: HashMap<u32, u32>,
+}
+
+impl WriteOnceRegisterBank {
+    fn new() -> Self {
+        Self {
+            // We leave 0 unused for convention = successful termination.
+            regs: vec![RegisterValue::Unassigned],
+            future_counter: 0,
+            future_assignments: HashMap::new(),
+        }
+    }
+
+    fn new_future(&mut self) -> u32 {
+        let future = self.future_counter;
+        self.future_counter += 1;
+        future
+    }
+
+    fn resolve_value(&mut self, addr: u32) -> RegisterValue {
+        let value = self.regs[addr as usize];
+        match value {
+            RegisterValue::Concrete(_) => value,
+            RegisterValue::Future(future) => {
+                // Resolve the future if it has been assigned.
+                if let Some(resolved_value) = self.future_assignments.get(&future) {
+                    let value = RegisterValue::Concrete(*resolved_value);
+                    self.regs[addr as usize] = value;
+                    value
+                } else {
+                    value
+                }
+            }
+            RegisterValue::Unassigned => {
+                // The only reason to read an unassigned value is to assign it later,
+                // so it must become a Future.
+                let value = RegisterValue::Future(self.new_future());
+                self.regs[addr as usize] = value;
+                value
+            }
+        }
+    }
+}
+
+impl RegisterBank for WriteOnceRegisterBank {
+    fn allocate(&mut self, size: u32) -> u32 {
+        let addr = self.regs.len();
+        self.regs
+            .resize_with(addr + size as usize, || RegisterValue::Unassigned);
+        addr as u32
+    }
+
+    fn get_absolute_u32(&mut self, addr: u32) -> u32 {
+        let value = self.resolve_value(addr);
+        log::trace!("Reading register address {addr}: {value:?}");
+        match value {
+            RegisterValue::Concrete(v) => v,
+            RegisterValue::Future(future) => {
+                panic!(
+                    "Can not convert future {future} to u32. It has not been assigned a value yet."
+                );
+            }
+            RegisterValue::Unassigned => {
+                panic!("Can not convert unassigned to u32");
+            }
+        }
+    }
+
+    fn set_absolute_u32(&mut self, addr: u32, value: u32) {
+        let slot = &mut self.regs[addr as usize];
+        log::trace!("Setting register address {addr}: {value}");
+        match *slot {
+            RegisterValue::Unassigned => {
+                *slot = RegisterValue::Concrete(value);
+            }
+            RegisterValue::Future(future) => {
+                // Assigning Concrete values to Futures materializes it.
+                if let Some(old_value) = self.future_assignments.insert(future, value) {
+                    assert_eq!(
+                        old_value, value,
+                        "Attempted to overwrite a value in register"
+                    );
+                }
+                log::debug!("Future {future} materialized to value {value}");
+            }
+            RegisterValue::Concrete(existing) => {
+                assert_eq!(
+                    existing, value,
+                    "Attempted to overwrite a value in register"
+                );
+            }
+        }
+    }
+
+    fn copy_raw(&mut self, src: u32, dest: u32) {
+        let value = self.resolve_value(src);
+        log::trace!("Copying register {src} -> {dest}: {value:?}");
+        let dest_slot = &mut self.regs[dest as usize];
+        match (*dest_slot, value) {
+            (RegisterValue::Unassigned, RegisterValue::Unassigned) => {
+                // This is important to catch to prevent bugs.
+                panic!("Attempted to assign an unassigned value to register");
+            }
+            (RegisterValue::Unassigned, _) => {
+                *dest_slot = value;
+            }
+            (RegisterValue::Future(future), RegisterValue::Concrete(v)) => {
+                // Assigning Concrete values to Futures materializes it.
+                if let Some(old_value) = self.future_assignments.insert(future, v) {
+                    assert_eq!(old_value, v, "Attempted to overwrite a value in register");
+                }
+                log::debug!("Future {future} materialized to value {v}");
+            }
+            (_, _) => {
+                assert_eq!(
+                    *dest_slot, value,
+                    "Attempted to overwrite a value in register"
+                );
+            }
+        }
+    }
+
+    fn set_absolute_future(&mut self, addr: u32) {
+        let future = self.new_future();
+        let slot = &mut self.regs[addr as usize];
+        log::trace!("Setting register address {addr} to future {future}");
+        match *slot {
+            RegisterValue::Unassigned => {
+                *slot = RegisterValue::Future(future);
+            }
+            _ => {
+                panic!("Attempted to set future on non-unassigned register");
+            }
+        }
+    }
+}
+
 pub struct Interpreter<'a, E: ExternalFunctions> {
     // TODO: maybe these 4 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
-    future_counter: u32,
-    future_assignments: HashMap<u32, u32>,
-    regs: Vec<RegisterValue>,
+    regs: Box<dyn RegisterBank>,
     ram: Ram,
     func_stack_sizes: Vec<u32>,
     module: Module<'a>,
@@ -129,10 +283,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let mut interpreter = Self {
             pc: 0,
             fp: 0,
-            future_counter: 0,
-            future_assignments: HashMap::new(),
-            // We leave 0 unused for convention = successful termination.
-            regs: vec![RegisterValue::Unassigned],
+            regs: Box::new(WriteOnceRegisterBank::new()),
             ram: Ram(ram),
             func_stack_sizes,
             module: program.m,
@@ -1059,11 +1210,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let condition = self.get_reg_relative_u32(inputs[2].clone());
 
                         let selected = inputs[if condition != 0 { 0 } else { 1 }].clone();
-                        let value = selected.map(|r| self.get_reg_relative(r)).collect_vec();
-
                         let output = output.unwrap();
-                        for (output_reg, value) in output.zip_eq(value) {
-                            self.set_reg_relative(output_reg, value);
+                        for (src_reg, dest_reg) in selected.zip_eq(output) {
+                            self.copy_reg_relative(src_reg, dest_reg);
                         }
                     }
                     Op::GlobalGet { global_index } => {
@@ -1515,18 +1664,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     src_word,
                     dest_word,
                 } => {
-                    let value = self.get_reg_relative(src_word);
-                    self.set_reg_relative(dest_word, value);
+                    self.copy_reg_relative(src_word, dest_word);
                 }
                 Directive::CopyIntoFrame {
                     src_word,
                     dest_frame,
                     dest_word,
                 } => {
-                    let value = self.get_reg_relative(src_word);
-                    let target_ptr =
-                        self.get_reg_relative_u32(dest_frame..dest_frame + 1) + dest_word;
-                    self.set_reg_absolute(target_ptr, value);
+                    self.copy_reg_into_frame(src_word, dest_frame, dest_word);
                 }
                 Directive::Call {
                     target,
@@ -1644,107 +1789,37 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
     }
 
     fn get_reg_absolute_u32(&mut self, addr: u32) -> u32 {
-        let value = &mut self.get_reg_absolute(addr);
-        match *value {
-            RegisterValue::Concrete(v) => v,
-            RegisterValue::Future(future) => {
-                // Resolve the future if it has been assigned.
-                if let Some(resolved_value) = self.future_assignments.get(&future) {
-                    *value = RegisterValue::Concrete(*resolved_value);
-                    *resolved_value
-                } else {
-                    panic!(
-                        "Can not convert future {future} to u32. It has not been assigned a value yet."
-                    );
-                }
-            }
-            RegisterValue::Unassigned => {
-                panic!("Can not convert unassigned to u32");
-            }
-        }
+        self.regs.get_absolute_u32(addr)
     }
 
     fn get_reg_relative_u32(&mut self, addr: Range<u32>) -> u32 {
         assert_eq!(addr.len(), 1, "Expected a single address range");
-        self.get_reg_absolute_u32(self.fp + addr.start)
+        self.regs.get_absolute_u32(self.fp + addr.start)
     }
 
     fn get_reg_relative_u64(&mut self, addr: Range<u32>) -> u64 {
         assert_eq!(addr.len(), 2, "Expected a single address range");
-        let low = self.get_reg_absolute_u32(self.fp + addr.start);
-        let high = self.get_reg_absolute_u32(self.fp + addr.start + 1);
+        let low = self.regs.get_absolute_u32(self.fp + addr.start);
+        let high = self.regs.get_absolute_u32(self.fp + addr.start + 1);
         (low as u64) | ((high as u64) << 32)
     }
 
-    fn get_reg_relative_range(&mut self, addr: Range<u32>) -> impl Iterator<Item = u32> {
-        addr.map(|i| self.get_reg_absolute_u32(self.fp + i))
+    fn get_reg_relative_range(&mut self, addr: Range<u32>) -> impl Iterator<Item = u32> + '_ {
+        addr.map(|i| self.regs.get_absolute_u32(self.fp + i))
     }
 
-    fn get_reg_relative(&mut self, addr: u32) -> RegisterValue {
-        self.get_reg_absolute(self.fp + addr)
+    fn copy_reg_relative(&mut self, src: u32, dest: u32) {
+        self.regs.copy_raw(self.fp + src, self.fp + dest);
     }
 
-    fn get_reg_absolute(&mut self, addr: u32) -> RegisterValue {
-        let value = self.regs[addr as usize];
-        let value = match value {
-            RegisterValue::Concrete(_) => value,
-            RegisterValue::Future(future) => {
-                // Resolve the future if it has been assigned.
-                if let Some(resolved_value) = self.future_assignments.get(&future) {
-                    let value = RegisterValue::Concrete(*resolved_value);
-                    self.regs[addr as usize] = value;
-                    value
-                } else {
-                    value
-                }
-            }
-            RegisterValue::Unassigned => {
-                // The only reason to read an unassigned value is to assign it later,
-                // so it must become a Future.
-                let value = RegisterValue::Future(self.new_future());
-                self.regs[addr as usize] = value;
-                value
-            }
-        };
-
-        log::trace!("Reading register address {addr}: {value:?}");
-        value
-    }
-
-    fn set_reg_relative(&mut self, addr: u32, value: RegisterValue) {
-        self.set_reg_absolute(self.fp + addr, value);
-    }
-
-    fn set_reg_absolute(&mut self, addr: u32, value: RegisterValue) {
-        let slot = &mut self.regs[addr as usize];
-        log::trace!("Setting register address {addr}: {value:?}");
-        match (*slot, value) {
-            (RegisterValue::Unassigned, RegisterValue::Unassigned) => {
-                // This is important to catch to prevent bugs.
-                panic!("Attempted to assign an unassigned value to register");
-            }
-            (RegisterValue::Unassigned, _) => {
-                *slot = value;
-            }
-            (RegisterValue::Future(future), RegisterValue::Concrete(value)) => {
-                // Assigning Concrete values to Futures materializes it.
-                if let Some(old_value) = self.future_assignments.insert(future, value) {
-                    assert_eq!(
-                        old_value, value,
-                        "Attempted to overwrite a value in register"
-                    )
-                }
-                log::debug!("Future {future} materialized to value {value}");
-            }
-            (_, _) => {
-                assert_eq!(*slot, value, "Attempted to overwrite a value in register");
-            }
-        }
+    fn copy_reg_into_frame(&mut self, src: u32, dest_frame: u32, dest: u32) {
+        let target_ptr = self.regs.get_absolute_u32(self.fp + dest_frame) + dest;
+        self.regs.copy_raw(self.fp + src, target_ptr);
     }
 
     fn set_reg_relative_u32(&mut self, addr: Range<u32>, value: u32) {
         assert_eq!(addr.len(), 1, "Expected a single address range");
-        self.set_reg_relative(addr.start, value.into());
+        self.regs.set_absolute_u32(self.fp + addr.start, value);
     }
 
     fn set_reg_relative_u64(&mut self, addr: Range<u32>, value: u64) {
@@ -1758,28 +1833,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             "Address range and values length mismatch"
         );
         for (addr, &value) in addr.zip(values.iter()) {
-            self.set_reg_relative(addr, value.into());
+            self.regs.set_absolute_u32(self.fp + addr, value);
         }
     }
 
     fn set_reg_relative_range_future(&mut self, addr: Range<u32>) {
         for i in addr {
-            let future = self.new_future();
-            self.set_reg_relative(i, RegisterValue::Future(future));
+            self.regs.set_absolute_future(self.fp + i);
         }
     }
 
     fn allocate(&mut self, size: u32) -> u32 {
-        let addr = self.regs.len();
-        self.regs
-            .resize_with(addr + size as usize, || RegisterValue::Unassigned);
-        addr as u32
-    }
-
-    fn new_future(&mut self) -> u32 {
-        let future = self.future_counter;
-        self.future_counter += 1;
-        future
+        self.regs.allocate(size)
     }
 }
 
