@@ -1,11 +1,44 @@
 use crate::loader::passes::dag::WasmValue;
-use std::cell::Cell;
+use std::{cell::Cell, ops::Range};
 use wasmparser::Operator as Op;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpCondition {
     IfZero,
     IfNotZero,
+}
+
+#[derive(Debug, Clone)]
+pub enum WasmOpInput {
+    Register(Range<u32>),
+    Constant(WasmValue),
+}
+
+impl WasmOpInput {
+    pub fn as_register(&self) -> Option<&Range<u32>> {
+        match self {
+            WasmOpInput::Register(r) => Some(r),
+            WasmOpInput::Constant(_) => None,
+        }
+    }
+
+    pub fn as_constant(&self) -> Option<&WasmValue> {
+        match self {
+            WasmOpInput::Register(_) => None,
+            WasmOpInput::Constant(c) => Some(c),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+#[repr(u32)]
+pub enum TrapReason {
+    UnreachableInstruction,
+    /// This trap happens if an instruction that was deemed unreachable
+    /// by the register allocator is actually executed. In this case,
+    /// there is necessarily a bug in the register allocator.
+    RegisterAllocatorBug,
+    WrongIndirectCallFunctionType,
 }
 
 /// Indicates whether the input for a Wasm node is a constant, and if so, its value.
@@ -56,4 +89,28 @@ pub trait Settings {
     fn get_const_collapse_processor() -> Option<impl Fn(&Op, &[MaybeConstant])> {
         None::<fn(&Op, &[MaybeConstant])>
     }
+}
+
+pub enum LabelType {
+    Function,
+    Local,
+    Loop,
+}
+
+pub fn format_label(label_id: u32, label_type: LabelType) -> String {
+    match label_type {
+        LabelType::Function => format!("__func_{label_id}"),
+        LabelType::Local => format!("__local_{label_id}"),
+        LabelType::Loop => format!("__loop_{label_id}"),
+    }
+}
+
+pub fn func_idx_to_label(func_idx: u32) -> String {
+    format_label(func_idx, LabelType::Function)
+}
+
+pub enum ComparisonFunction {
+    Equal,
+    GreaterThanOrEqualUnsigned,
+    LessThanUnsigned,
 }

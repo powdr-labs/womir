@@ -1,13 +1,12 @@
 use crate::{
     loader::{
-        settings::{JumpCondition, Settings},
+        settings::{ComparisonFunction, JumpCondition, Settings, TrapReason, WasmOpInput},
         wom::{
-            flattening::{Context, TrapReason, Tree},
-            settings::{
-                ComparisonFunction, ReturnInfosToCopy, Settings as WomSettings, WasmOpInput,
-            },
+            flattening::Context,
+            settings::{ReturnInfosToCopy, Settings as WomSettings},
         },
     },
+    utils::tree::Tree,
     wom_interpreter::linker,
 };
 use std::{fmt::Display, ops::Range};

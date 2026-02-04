@@ -12,20 +12,22 @@ use wasmparser::{Operator as Op, ValType};
 
 use crate::{
     loader::{
+        Module,
         blockless_dag::{
             BreakTarget, GenericBlocklessDag, GenericNode, NodeInput, Operation, TargetType,
         },
         dag::ValueOrigin,
         rwm::{
             liveness_dag::{self, LivenessDag},
-            register_allocation::occupation_tracker::OccupationTracker,
+            register_allocation::occupation_tracker::{Occupation, OccupationTracker},
         },
         settings::Settings,
-        word_count_type,
+        word_count_type, word_count_types,
     },
     utils::rev_vec_filler::RevVecFiller,
 };
 
+#[derive(Debug)]
 pub enum Error {
     NotAllocated,
     NotARegister,
@@ -36,11 +38,27 @@ pub enum Error {
 pub struct Allocation {
     /// The registers assigned to the nodes outputs.
     nodes_outputs: BTreeMap<ValueOrigin, Range<u32>>,
+    /// The full register occupation map.
+    occupation: Occupation,
     /// The map of label id to its node index, for quick lookup on a break.
     pub labels: HashMap<u32, usize>,
+    /// The call frame start register for each call node index.
+    pub call_frames: HashMap<usize, u32>,
 }
 
 impl Allocation {
+    pub fn get_for_node(&self, node_index: usize) -> impl Iterator<Item = Range<u32>> {
+        let start = ValueOrigin {
+            node: node_index,
+            output_idx: 0,
+        };
+        let end = ValueOrigin {
+            node: node_index + 1,
+            output_idx: 0,
+        };
+        self.nodes_outputs.range(start..end).map(|(_, r)| r.clone())
+    }
+
     pub fn get(&self, origin: &ValueOrigin) -> Result<Range<u32>, Error> {
         self.nodes_outputs
             .get(origin)
@@ -60,6 +78,11 @@ impl Allocation {
 
     pub fn iter(&self) -> impl Iterator<Item = (&ValueOrigin, &Range<u32>)> {
         self.nodes_outputs.iter()
+    }
+
+    pub fn occupation_for_node(&self, node_index: usize) -> impl Iterator<Item = Range<u32>> {
+        self.occupation
+            .consolidated_reg_occupation(node_index..node_index + 1)
     }
 }
 
@@ -229,6 +252,7 @@ fn handle_break<'a, S: Settings>(
 }
 
 fn recursive_block_allocation<'a, S: Settings>(
+    prog: &Module<'a>,
     func_idx: u32,
     mut nodes: Vec<liveness_dag::Node<'a>>,
     oa: &mut VecDeque<OptimisticAllocator>,
@@ -248,7 +272,24 @@ fn recursive_block_allocation<'a, S: Settings>(
             }
             Operation::WASMOp(operator) => {
                 match &operator {
-                    Op::Call { .. } | Op::CallIndirect { .. } => {
+                    Op::Call { .. } | Op::CallIndirect { .. } => 'call_match: {
+                        let inputs = if let Op::Call { function_index } = &operator {
+                            // If this is an imported function, treat it as a generic operation.
+                            // We assume imported functions are kinda like system calls, and can
+                            // read and write to any register we choose here.
+                            if prog.get_imported_func(*function_index).is_some() {
+                                oa[0].allocate_inputs::<S>(index, &node.inputs, &nodes);
+                                oa[0].allocate_outputs::<S>(index, &node.output_types, false);
+                                break 'call_match;
+                            }
+                            &node.inputs
+                        } else {
+                            // This is an indirect call, we need allocate the last input separately.
+                            let (fn_inputs, fn_index) = node.inputs.split_at(node.inputs.len() - 1);
+                            oa[0].allocate_inputs::<S>(index, fn_index, &nodes);
+                            fn_inputs
+                        };
+
                         // TODO: implement a simple heuristic to try to avoid having to
                         // copy the function outputs to the slots allocated for them by
                         // the nodes who uses them as inputs. The details are in
@@ -265,7 +306,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                             .allocate_fn_call(index, output_sizes);
 
                         // Try to place the function inputs at the expected argument slots.
-                        for input in &node.inputs {
+                        for input in inputs {
                             let origin =
                                 unwrap_ref(input, "function call inputs must be references");
                             let num_words = word_count::<S>(&nodes, *origin);
@@ -317,7 +358,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                     .occupation_tracker
                     .make_sub_tracker(index, loop_liveness);
 
-                // There is an heuristic we can do here to minimize copies: for each loop input, if this
+                // There is an heuristic we do here to minimize copies: for each loop input, if this
                 // is the last usage of the value, or if the loop body does not change the input and just
                 // forwards it unchanged to the next iteration, we can fix the allocation of the input to
                 // the current one, saving a copy.
@@ -367,7 +408,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                 oa.push_front(loop_oa);
 
                 let (loop_nodes, loop_saved_copies) =
-                    recursive_block_allocation::<S>(func_idx, loop_nodes, oa);
+                    recursive_block_allocation::<S>(prog, func_idx, loop_nodes, oa);
 
                 let dump_path = format!(
                     "dump/func_{}_loop_{}.txt",
@@ -391,10 +432,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                     .occupation_tracker
                     .project_from_sub_tracker(index, &occupation_tracker);
 
-                let allocation = Allocation {
-                    nodes_outputs: occupation_tracker.into_allocations(),
-                    labels,
-                };
+                let allocation = occupation_tracker.into_allocations(labels);
 
                 // Collect the new nodes
                 let loop_dag = AllocatedDag {
@@ -484,6 +522,7 @@ fn try_allocate_with_hint(
 /// proposing register assignment for future nodes (so to avoid copies), but
 /// leaving a final assignment for the traversed nodes.
 pub fn optimistic_allocation<'a, S: Settings>(
+    prog: &Module<'a>,
     func_idx: u32,
     dag: LivenessDag<'a>,
 ) -> (AllocatedDag<'a>, usize) {
@@ -503,7 +542,7 @@ pub fn optimistic_allocation<'a, S: Settings>(
     let Operation::Inputs = &inputs.operation else {
         panic!("First node must be Inputs");
     };
-    let mut next_reg = 0u32;
+    let mut next_in_reg = 0u32;
     for (output_idx, input) in inputs.output_types.iter().enumerate() {
         let origin = ValueOrigin {
             node: 0,
@@ -511,17 +550,24 @@ pub fn optimistic_allocation<'a, S: Settings>(
         };
         let num_words = word_count_type::<S>(*input);
         oa.occupation_tracker
-            .set_allocation(origin, next_reg..next_reg + num_words);
-        next_reg += num_words;
+            .set_allocation(origin, next_in_reg..next_in_reg + num_words);
+        next_in_reg += num_words;
     }
 
-    // Reserve the space for the return address and frame pointer.
-    oa.occupation_tracker.reserve_range(next_reg..next_reg + 2);
+    // Calculate the space needed for the return values.
+    let outputs = prog.get_func_type(func_idx).ty.results();
+    let out_words = word_count_types::<S>(outputs);
+
+    // Reserve the space for the return address and frame pointer after the maximum
+    // between the inputs and outputs.
+    let ra_fp_regs = next_in_reg.max(out_words);
+    oa.occupation_tracker
+        .reserve_range(ra_fp_regs..ra_fp_regs + 2 * S::words_per_ptr());
 
     // Do the allocation for the rest of the nodes, bottom up.
     let mut oa_stack = VecDeque::from([oa]);
     let (nodes, number_of_saved_copies) =
-        recursive_block_allocation::<S>(func_idx, nodes, &mut oa_stack);
+        recursive_block_allocation::<S>(prog, func_idx, nodes, &mut oa_stack);
 
     // Generate the final allocation for this block
     let OptimisticAllocator {
@@ -533,10 +579,7 @@ pub fn optimistic_allocation<'a, S: Settings>(
     let dump_path = format!("dump/func_{}.txt", func_idx);
     occupation_tracker.dump(Path::new(&dump_path));
 
-    let allocation = Allocation {
-        nodes_outputs: occupation_tracker.into_allocations(),
-        labels,
-    };
+    let allocation = occupation_tracker.into_allocations(labels);
 
     (
         AllocatedDag {
