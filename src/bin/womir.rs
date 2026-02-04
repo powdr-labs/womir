@@ -6,8 +6,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use womir::{
     interpreter::{
+        ExecutionModel, ExternalFunctions, Interpreter, MemoryAccessor,
         generic_ir::{Directive, GenericIrSetting},
-        wom::{ExecutionModel, ExternalFunctions, Interpreter, MemoryAccessor},
     },
     loader::{FunctionAsm, PartiallyParsedProgram, Program, rwm::RWMStages, wom::WomStages},
 };
@@ -206,7 +206,7 @@ mod tests {
     use std::process::Command;
     use tempfile::NamedTempFile;
     use test_log::test;
-    use womir::interpreter::wom::NULL_REF;
+    use womir::interpreter::NULL_REF;
 
     fn test_interpreter(
         path: &str,
