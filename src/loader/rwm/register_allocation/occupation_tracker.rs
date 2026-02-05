@@ -57,6 +57,7 @@ impl Occupation {
 }
 
 /// Tracks what registers are currently occupied by what values.
+#[derive(Debug)]
 pub struct OccupationTracker {
     liveness: Liveness,
     occupation: Occupation,

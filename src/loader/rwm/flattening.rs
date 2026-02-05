@@ -521,10 +521,10 @@ fn emit_jump<'a, S: Settings<'a>>(
     // 2. Jump backwards to a loop iteration.
     // 3. Returns from the function.
 
-    let entry = &ctrl_stack[target.depth as usize];
+    let target_entry = &ctrl_stack[target.depth as usize];
     let (output_node_idx, target) = match target.kind {
         TargetType::FunctionOrLoop => {
-            match &entry.loop_label {
+            match &target_entry.loop_label {
                 Some(loop_label) => {
                     // This is a jump to a new loop iteration.
                     // The node whose outputs we want are the Inputs node of the loop (index 0).
@@ -538,8 +538,11 @@ fn emit_jump<'a, S: Settings<'a>>(
                     // They are tightly packed at the top of the stack frame.
                     let mut fn_output_size = 0;
                     let input_ranges = ranges_for_types::<S>(ret_types, &mut fn_output_size);
+
+                    // Use the current block's allocation to source the copied inputs:
+                    let curr_alloc = &ctrl_stack[0].allocation;
                     let mut directives =
-                        copy_inputs_if_needed(s, ctx, &entry.allocation, node_inputs, input_ranges);
+                        copy_inputs_if_needed(s, ctx, curr_alloc, node_inputs, input_ranges);
 
                     // Also calculate the space needed by the function inputs, to calculate where
                     // the return address and caller frame pointer are stored.
@@ -556,15 +559,15 @@ fn emit_jump<'a, S: Settings<'a>>(
             // This is a jump to a label in the current function.
             // The node we want is the target label's node.
             (
-                entry.allocation.labels[&id],
+                target_entry.allocation.labels[&id],
                 format_label(id, LabelType::Local),
             )
         }
     };
 
-    let input_ranges = entry.allocation.get_for_node(output_node_idx);
+    let input_ranges = target_entry.allocation.get_for_node(output_node_idx);
     let mut directives =
-        copy_inputs_if_needed(s, ctx, &entry.allocation, node_inputs, input_ranges);
+        copy_inputs_if_needed(s, ctx, &target_entry.allocation, node_inputs, input_ranges);
     if directives.is_empty() {
         JumpResult::PlainJump(target)
     } else {

@@ -371,19 +371,39 @@ fn recursive_block_allocation<'a, S: Settings>(
                         origin.node,
                         origin.output_idx,
                     );
-                    if (last_usage <= index && {
+                    if last_usage <= index && {
                         assert_eq!(
                             last_usage, index,
                             "liveness bug: last usage is before a node that uses the value"
                         );
                         true
-                    }) || occupation_tracker
+                    } {
+                        // This is the last usage of the value before the loop,
+                        // so we should try to reuse the same allocation for the loop input.
+                        // Doesn't always work, because the same input value could be used
+                        // by multiple loop inputs. Only one will be able to reuse the allocation.
+                        let allocation = oa[0].occupation_tracker.get_allocation(*origin).unwrap();
+                        let alloc_len = allocation.len();
+                        let hint_used = occupation_tracker
+                            .try_allocate_with_hint(
+                                ValueOrigin {
+                                    node: 0,
+                                    output_idx: input_idx as u32,
+                                },
+                                allocation,
+                            )
+                            .0;
+
+                        if hint_used {
+                            number_of_saved_copies += alloc_len;
+                        }
+                    } else if occupation_tracker
                         .liveness()
                         .query_if_input_is_redirected(input_idx as u32)
                     {
-                        // We can fix the allocation of this input to the current one,
-                        // because either we don't care if it is rewritten by the loop,
-                        // or we have the guarantee that it won't be changed.
+                        // This input outlives the loop body, but inside the loop
+                        // it is just forwarded unchanged to the next iteration.
+                        // We can always reuse the allocation from the outer level.
                         let allocation = oa[0].occupation_tracker.get_allocation(*origin).unwrap();
                         number_of_saved_copies += allocation.len();
 
