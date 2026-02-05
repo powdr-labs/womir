@@ -33,7 +33,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     func_idx: u32,
     dag: AllocatedDag<'a>,
 ) -> FunctionAsm<S::Directive> {
-    let ctx = CommonContext { prog, label_gen };
+    let common_ctx = CommonContext { prog, label_gen };
 
     let mut ctrl_stack = VecDeque::new();
     ctrl_stack.push_front(StackEntry {
@@ -41,12 +41,26 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
         allocation: dag.block_data,
     });
 
-    let tree = process_dag(s, &ctx, &mut ctrl_stack, dag.nodes, func_idx);
+    let mut ctx = Context::new(&common_ctx, &ctrl_stack[0].allocation, 0);
+
+    // Add the function label with the frame size.
+    let mut directives = vec![
+        s.emit_label(&mut ctx, format_label(func_idx, LabelType::Function))
+            .into(),
+    ];
+
+    if let Some(name) = prog.get_exported_func(func_idx) {
+        // Add an alternative label, using the exported function name.
+        directives.push(s.emit_label(&mut ctx, name.to_string()).into());
+    }
+
+    let tree = process_dag(s, &common_ctx, &mut ctrl_stack, dag.nodes, func_idx);
+    directives.push(tree);
 
     FunctionAsm {
         func_idx,
         frame_size: None,
-        directives: tree.flatten(),
+        directives: Tree::Node(directives).flatten(),
     }
 }
 
