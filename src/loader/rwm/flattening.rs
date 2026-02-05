@@ -522,6 +522,7 @@ fn emit_jump<'a, S: Settings<'a>>(
     // 3. Returns from the function.
 
     let target_entry = &ctrl_stack[target.depth as usize];
+    let curr_alloc = &ctrl_stack[0].allocation;
     let (output_node_idx, target) = match target.kind {
         TargetType::FunctionOrLoop => {
             match &target_entry.loop_label {
@@ -535,12 +536,11 @@ fn emit_jump<'a, S: Settings<'a>>(
                     // Calculate the outputs registers from the function type.
                     let func_type = &ctx.common.prog.get_func_type(func_idx).ty;
                     let ret_types = func_type.results();
-                    // They are tightly packed at the top of the stack frame.
+                    // They are tightly packed at the top of the frame.
                     let mut fn_output_size = 0;
                     let input_ranges = ranges_for_types::<S>(ret_types, &mut fn_output_size);
 
                     // Use the current block's allocation to source the copied inputs:
-                    let curr_alloc = &ctrl_stack[0].allocation;
                     let mut directives =
                         copy_inputs_if_needed(s, ctx, curr_alloc, node_inputs, input_ranges);
 
@@ -566,8 +566,7 @@ fn emit_jump<'a, S: Settings<'a>>(
     };
 
     let input_ranges = target_entry.allocation.get_for_node(output_node_idx);
-    let mut directives =
-        copy_inputs_if_needed(s, ctx, &target_entry.allocation, node_inputs, input_ranges);
+    let mut directives = copy_inputs_if_needed(s, ctx, curr_alloc, node_inputs, input_ranges);
     if directives.is_empty() {
         JumpResult::PlainJump(target)
     } else {
