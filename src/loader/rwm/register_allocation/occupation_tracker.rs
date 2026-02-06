@@ -66,6 +66,8 @@ pub struct OccupationTracker {
 }
 
 /// Iterates over the consolidated ranges of a given set of overlapping ranges.
+///
+/// The ranges are returned in sorted order.
 struct RangeConsolidationIterator<T> {
     reverse_sorted_ranges: Vec<Range<T>>,
 }

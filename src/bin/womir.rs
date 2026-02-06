@@ -176,7 +176,7 @@ fn process_functions<'a>(
 ) -> wasmparser::Result<Program<'a, FunctionAsm<Directive<'a>>>> {
     match exec_model {
         ExecutionModel::InfiniteRegisters => {
-            program.default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+            program.default_process_all_functions::<RWMStages<GenericIrSetting>>()
         }
         ExecutionModel::WriteOnceRegisters => {
             program.default_par_process_all_functions::<WomStages<GenericIrSetting>>()

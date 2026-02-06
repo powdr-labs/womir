@@ -402,6 +402,16 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             let (entry_idx, inputs) = node.inputs.split_last().unwrap();
             let entry_idx = curr_entry.allocation.get_as_reg(entry_idx).unwrap();
 
+            let fn_type = ctx.common.prog.get_type(type_index);
+            let call = prepare_function_call(
+                s,
+                &mut ctx,
+                &curr_entry.allocation,
+                node_idx,
+                inputs,
+                &fn_type.ty,
+            );
+
             // We need to load the function reference from the table, so we allocate
             // the space for it and emit the table.get directive.
             let func_ref_reg = ctx.allocate_tmp_type::<S>(ValType::FUNCREF);
@@ -412,16 +422,6 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             // Indirect calls require checking the function type first.
             // We need a label for the OK case.
             let ok_label = ctx.new_label(LabelType::Local);
-
-            let fn_type = ctx.common.prog.get_type(type_index);
-            let call = prepare_function_call(
-                s,
-                &mut ctx,
-                &curr_entry.allocation,
-                node_idx,
-                inputs,
-                &fn_type.ty,
-            );
 
             // The sequence to load the function reference, check the type,
             // and then perform the indirect call.
@@ -588,7 +588,7 @@ fn copy_inputs_if_needed<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_>,
     allocation: &Allocation,
     node_inputs: &[NodeInput],
-    expected_locations: impl Iterator<Item = Range<u32>>,
+    expected_locations: impl IntoIterator<Item = Range<u32>>,
 ) -> Vec<Tree<S::Directive>> {
     let copy_set = node_inputs
         .iter()
@@ -685,6 +685,13 @@ pub struct Context<'a, 'b> {
     common: &'b CommonContext<'a, 'b>,
     allocation: &'b Allocation,
     node_index: usize,
+    /// This is needed for the tmp_tracker to work when a tmp is
+    /// requested during the translation of a function call.
+    /// In that case, most of the register space will be occupied by
+    /// the function call frame, but it is fine to allocate tmps in that space,
+    /// after the space reserved for the calling convention (inputs,
+    /// outputs, return address and caller frame pointer).
+    function_call_prelude_size: Option<u32>,
     /// If no temporary registers were allocated yet, this is None.
     /// If some were allocated, this tracks all the holes in the
     /// frame that can be used for further temporary allocations,
@@ -702,6 +709,7 @@ impl<'a, 'b> Context<'a, 'b> {
             common,
             allocation,
             node_index,
+            function_call_prelude_size: None,
             tmp_tracker: None,
         }
     }
@@ -711,15 +719,27 @@ impl<'a, 'b> Context<'a, 'b> {
             // This is the first time a temporary is being allocated at this node.
             // We need to figure out what slots are available for temporaries.
             let mut holes = Vec::new();
-            let mut last_end = 0;
+            let mut last_occupied = 0..0;
             for occupied in self.allocation.occupation_for_node(self.node_index) {
-                if occupied.start > last_end {
-                    holes.push(last_end..occupied.start);
+                if occupied.start > last_occupied.end {
+                    holes.push(last_occupied.end..occupied.start);
                 }
-                last_end = occupied.end;
+                last_occupied = occupied;
             }
-            if last_end < u32::MAX {
-                holes.push(last_end..u32::MAX);
+
+            if let Some(prelude_size) = self.function_call_prelude_size {
+                let frame_start = self.allocation.call_frames[&self.node_index];
+                // The last occupation must contain the function frame
+                assert!(last_occupied.start <= frame_start);
+                assert_eq!(last_occupied.end, u32::MAX);
+
+                // We can use the part of the function frame that
+                // is not reserved for the calling convention.
+                last_occupied.end = frame_start + prelude_size;
+            }
+
+            if last_occupied.end < u32::MAX {
+                holes.push(last_occupied.end..u32::MAX);
             }
             holes.reverse(); // So we can allocate from the end.
             self.tmp_tracker = Some(holes);
@@ -753,6 +773,8 @@ impl<'a, 'b> Context<'a, 'b> {
         panic!("Full register space exhausted when allocating temporary registers.");
     }
 
+    /// Allocates a temporary register that is only valid for the sequence of instructions
+    /// you are emitting.
     pub fn allocate_tmp_type<S: Settings<'a>>(&mut self, ty: ValType) -> Range<u32> {
         self.allocate_tmp_words(word_count_type::<S>(ty))
     }
@@ -784,19 +806,13 @@ fn prepare_function_call<'a, S: Settings<'a>>(
 
     let frame_start = allocation.call_frames[&node_idx];
 
-    // Generate the copy of the inputs.
+    // Get where the inputs should be copied to.
     let mut inputs_offset = frame_start;
-    let prefix_directives = copy_inputs_if_needed(
-        s,
-        ctx,
-        allocation,
-        inputs,
-        ranges_for_types::<S>(func_type.params(), &mut inputs_offset),
-    );
+    let input_ranges = ranges_for_types::<S>(func_type.params(), &mut inputs_offset).collect_vec();
 
-    // Generate the copy of the outputs.
+    // Get where the outputs should be copied from.
     let mut outputs_offset = frame_start;
-    let copy_set = ranges_for_types::<S>(func_type.results(), &mut outputs_offset)
+    let output_copy_set = ranges_for_types::<S>(func_type.results(), &mut outputs_offset)
         .enumerate()
         .filter_map(|(output_idx, src_range)| {
             let output_origin = ValueOrigin {
@@ -810,14 +826,19 @@ fn prepare_function_call<'a, S: Settings<'a>>(
         })
         .collect_vec();
 
-    let suffix_directives = parallel_copy(s, ctx, copy_set);
-
     // Calculate where return address and caller frame pointer are stored.
     // Also calculate the space needed by the function inputs, to calculate where
     // the return address and caller frame pointer are stored.
     let input_size = inputs_offset - frame_start;
     let outputs_size = outputs_offset - frame_start;
     let (ret_pc, ret_fp) = calculate_ra_and_fp::<S>(input_size, outputs_size);
+
+    // Set the end of the function call prelude, so tmps can be allocated in the function frame if needed.
+    ctx.function_call_prelude_size = Some(ret_fp.end);
+
+    // Generate the actual directives for input and output copy.
+    let prefix_directives = copy_inputs_if_needed(s, ctx, allocation, inputs, input_ranges);
+    let suffix_directives = parallel_copy(s, ctx, output_copy_set);
 
     FunctionCall {
         frame_start,
