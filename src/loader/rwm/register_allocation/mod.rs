@@ -1,4 +1,5 @@
 mod occupation_tracker;
+mod sequence_parallel_copies;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
