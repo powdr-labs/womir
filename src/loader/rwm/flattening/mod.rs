@@ -16,6 +16,7 @@ use crate::{
             dag::{NodeInput, ValueOrigin},
         },
         rwm::{
+            flattening::sequence_parallel_copies::Register,
             register_allocation::{self, AllocatedDag, Allocation},
             settings::Settings,
         },
@@ -589,17 +590,55 @@ fn copy_inputs_if_needed<'a, S: Settings<'a>>(
     node_inputs: &[NodeInput],
     expected_locations: impl Iterator<Item = Range<u32>>,
 ) -> Vec<Tree<S::Directive>> {
-    let mut copy_instructions = Vec::new();
-    for (input, destiny) in node_inputs.iter().zip(expected_locations) {
-        let source = allocation.get_as_reg(input).unwrap();
-        if source == destiny {
-            continue;
+    let copy_set = node_inputs
+        .iter()
+        .zip_eq(expected_locations)
+        .filter_map(|(input, destiny)| {
+            let source = allocation.get_as_reg(input).unwrap();
+            (source != destiny).then_some((source, destiny))
+        })
+        .collect_vec();
+    parallel_copy(s, ctx, copy_set)
+}
+
+/// Given a set of source-destination register ranges, emits the sequence of copy instructions
+/// such that all copies are performed correctly, even in presence of overlapping ranges.
+fn parallel_copy<'a, S: Settings<'a>>(
+    s: &S,
+    ctx: &mut Context<'a, '_>,
+    copy_set: Vec<(Range<u32>, Range<u32>)>,
+) -> Vec<Tree<S::Directive>> {
+    // Turn a set of range copies into a set of single register copies.
+    let copy_set = copy_set
+        .into_iter()
+        .flat_map(|(source_range, dest_range)| source_range.into_iter().zip(dest_range));
+    let copy_sequence = sequence_parallel_copies::sequence_parallel_copies(copy_set);
+
+    // Just allocate a temporary register if needed.
+    let mut tmp_register = None;
+    let mut materialize = |ctx: &mut Context<'a, '_>, reg| -> u32 {
+        match reg {
+            Register::Temp => match tmp_register {
+                Some(tmp_reg) => tmp_reg,
+                None => {
+                    let new_tmp = ctx.allocate_tmp_type::<S>(ValType::I32);
+                    assert_eq!(new_tmp.len(), 1);
+                    let new_tmp = new_tmp.start;
+                    tmp_register = Some(new_tmp);
+                    new_tmp
+                }
+            },
+            Register::Given(reg) => reg,
         }
-        for (src, dest) in source.into_iter().zip(destiny) {
-            copy_instructions.push(s.emit_copy(ctx, src, dest).into());
-        }
-    }
-    copy_instructions
+    };
+
+    copy_sequence
+        .map(|(src, dest)| {
+            let src = materialize(ctx, src);
+            let dest = materialize(ctx, dest);
+            s.emit_copy(ctx, src, dest).into()
+        })
+        .collect_vec()
 }
 
 fn map_input_into_regs(node_inputs: Vec<NodeInput>, allocation: &Allocation) -> Vec<Range<u32>> {
@@ -757,25 +796,21 @@ fn prepare_function_call<'a, S: Settings<'a>>(
 
     // Generate the copy of the outputs.
     let mut outputs_offset = frame_start;
-    let mut suffix_directives = Vec::new();
-    let src_output_ranges = ranges_for_types::<S>(func_type.results(), &mut outputs_offset);
-    for (output_idx, src_range) in src_output_ranges.enumerate() {
-        let output_origin = ValueOrigin {
-            node: node_idx,
-            output_idx: output_idx as u32,
-        };
-        let dest_range = allocation.get(&output_origin).unwrap();
-        assert_eq!(src_range.len(), dest_range.len());
+    let copy_set = ranges_for_types::<S>(func_type.results(), &mut outputs_offset)
+        .enumerate()
+        .filter_map(|(output_idx, src_range)| {
+            let output_origin = ValueOrigin {
+                node: node_idx,
+                output_idx: output_idx as u32,
+            };
+            let dest_range = allocation.get(&output_origin).unwrap();
+            assert_eq!(src_range.len(), dest_range.len());
 
-        if dest_range != src_range {
-            suffix_directives.extend(
-                dest_range
-                    .into_iter()
-                    .zip(src_range)
-                    .map(|(dest, src)| s.emit_copy(ctx, src, dest).into()),
-            );
-        }
-    }
+            (dest_range != src_range).then_some((src_range, dest_range))
+        })
+        .collect_vec();
+
+    let suffix_directives = parallel_copy(s, ctx, copy_set);
 
     // Calculate where return address and caller frame pointer are stored.
     // Also calculate the space needed by the function inputs, to calculate where

@@ -36,14 +36,8 @@ use std::collections::{BTreeMap, btree_map::Entry};
 /// Pre-conditions:
 ///  * every destination register must be only written to once.
 pub fn sequence_parallel_copies(
-    parallel_copies: Vec<(u32, u32)>,
+    parallel_copies: impl IntoIterator<Item = (u32, u32)>,
 ) -> impl Iterator<Item = (Register, Register)> {
-    #[derive(Default)]
-    struct RegConnections {
-        src: Option<u32>,
-        dest: Vec<u32>,
-    }
-
     // This could be a HashMap if we didn't care about the determinism of the output...
     let mut graph: BTreeMap<u32, RegConnections> = BTreeMap::new();
 
@@ -71,6 +65,18 @@ pub fn sequence_parallel_copies(
         graph.entry(src).or_default().dest.push(dst);
     }
 
+    sequence_parallel_copies_impl(graph)
+}
+
+#[derive(Default)]
+struct RegConnections {
+    src: Option<u32>,
+    dest: Vec<u32>,
+}
+
+fn sequence_parallel_copies_impl(
+    mut graph: BTreeMap<u32, RegConnections>,
+) -> impl Iterator<Item = (Register, Register)> {
     // Find the set of destinations that are not sources to any other copy.
     let mut tree_ends: Vec<u32> = graph
         .iter()

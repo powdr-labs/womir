@@ -26,7 +26,7 @@ pub trait Settings<'a>: loader::Settings {
     /// Copies a single word between two registers.
     fn emit_copy(
         &self,
-        g: &mut Context<'a, '_>,
+        c: &mut Context<'a, '_>,
         src_reg: u32,
         dest_reg: u32,
     ) -> impl Into<Tree<Self::Directive>>;
@@ -58,7 +58,7 @@ pub trait Settings<'a>: loader::Settings {
     /// If offset is 0, it is equivalent to a NOP. Otherwise, it skips as many instructions as the offset.
     fn emit_relative_jump(
         &self,
-        g: &mut Context<'a, '_>,
+        c: &mut Context<'a, '_>,
         offset_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>>;
 
