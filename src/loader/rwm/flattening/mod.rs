@@ -3,6 +3,8 @@
 //! The algorithm is straightforward and linear, as most of the complexity was handled
 //! in earlier passes (notably register allocation).
 
+mod sequence_parallel_copies;
+
 use itertools::Itertools;
 use wasmparser::{FuncType, Operator as Op, ValType};
 
