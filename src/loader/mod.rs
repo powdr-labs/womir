@@ -1651,7 +1651,7 @@ fn split_func_ref_regs<S: Settings + ?Sized>(func_ref_reg: Range<u32>) -> [Range
     let i32_word_count = word_count_type::<S>(ValType::I32);
 
     let type_index = func_ref_reg.start..func_ref_reg.start + i32_word_count;
-    let func_addr = type_index.end..type_index.end + i32_word_count;
+    let func_addr = type_index.end..type_index.end + S::words_per_ptr();
     let func_frame_size = func_addr.end..func_addr.end + i32_word_count;
 
     assert_eq!(func_frame_size.end, func_ref_reg.end);

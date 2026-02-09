@@ -10,7 +10,7 @@ use wasmparser::{FuncType, Operator as Op, ValType};
 
 use crate::{
     loader::{
-        FunctionAsm, LabelGenerator, Module, assert_reg,
+        FunctionAsm, FunctionRef, LabelGenerator, Module, assert_reg,
         passes::{
             blockless_dag::{BreakTarget, Operation, TargetType},
             dag::{NodeInput, ValueOrigin},
@@ -418,7 +418,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             let func_ref_reg = ctx.allocate_tmp_type::<S>(ValType::FUNCREF);
 
             // Split the components of the function reference:
-            let [func_type_index, func_addr, _] = split_func_ref_regs::<S>(func_ref_reg.clone());
+            let split_ref = split_func_ref_regs::<S>(func_ref_reg.clone());
 
             // Indirect calls require checking the function type first.
             // We need a label for the OK case.
@@ -437,7 +437,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                 s.emit_conditional_jump_cmp_immediate(
                     &mut ctx,
                     ComparisonFunction::Equal,
-                    func_type_index.clone(),
+                    split_ref[FunctionRef::<S>::TYPE_ID].clone(),
                     fn_type.unique_id,
                     ok_label.clone(),
                 )
@@ -448,7 +448,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                 call.prefix_directives.into(),
                 s.emit_indirect_call(
                     &mut ctx,
-                    func_addr,
+                    split_ref[FunctionRef::<S>::FUNC_ADDR].clone(),
                     call.frame_start,
                     call.ret_pc,
                     call.ret_fp,
