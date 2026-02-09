@@ -309,8 +309,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         labels[&label].pc
                     }
                     MemoryEntry::FuncFrameSize(func_idx) => {
-                        let label = func_idx_to_label(*func_idx);
-                        labels[&label].frame_size.unwrap()
+                        if exec_model == ExecutionModel::WriteOnceRegisters {
+                            let label = func_idx_to_label(*func_idx);
+                            labels[&label].frame_size.unwrap()
+                        } else {
+                            0
+                        }
                     }
                     MemoryEntry::NullFuncType => NULL_REF[FunctionRef::<S>::TYPE_ID],
                     MemoryEntry::NullFuncFrameSize => NULL_REF[FunctionRef::<S>::FUNC_FRAME_SIZE],
@@ -1737,7 +1741,39 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                 } => {
                     self.copy_reg_into_frame(src_word, dest_frame, dest_word);
                 }
-                Directive::Call {
+                Directive::RwCall {
+                    target,
+                    new_frame_offset,
+                    saved_ret_pc,
+                    saved_caller_fp,
+                } => {
+                    let prev_pc = self.pc;
+                    self.pc = self.labels[&target].pc;
+                    should_inc_pc = false;
+
+                    let prev_fp = self.fp;
+                    self.fp += new_frame_offset;
+
+                    self.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                }
+                Directive::RwCallIndirect {
+                    target_pc,
+                    new_frame_offset,
+                    saved_ret_pc,
+                    saved_caller_fp,
+                } => {
+                    let prev_pc = self.pc;
+                    self.pc = self.get_reg_relative_u32(target_pc..target_pc + 1);
+                    should_inc_pc = false;
+
+                    let prev_fp = self.fp;
+                    self.fp += new_frame_offset;
+
+                    self.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                }
+                Directive::WomCall {
                     target,
                     new_frame_ptr,
                     saved_ret_pc,
@@ -1753,7 +1789,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     self.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
                     self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                 }
-                Directive::CallIndirect {
+                Directive::WomCallIndirect {
                     target_pc,
                     new_frame_ptr,
                     saved_ret_pc,

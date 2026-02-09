@@ -176,7 +176,7 @@ fn process_functions<'a>(
 ) -> wasmparser::Result<Program<'a, FunctionAsm<Directive<'a>>>> {
     match exec_model {
         ExecutionModel::InfiniteRegisters => {
-            program.default_process_all_functions::<RWMStages<GenericIrSetting>>()
+            program.default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
         }
         ExecutionModel::WriteOnceRegisters => {
             program.default_par_process_all_functions::<WomStages<GenericIrSetting>>()
@@ -554,11 +554,11 @@ mod tests {
                     let wasm_file = std::fs::read(mod_name).unwrap();
                     let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file)
                         .unwrap()
-                        .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
+                        .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
                         .unwrap();
                     let mut interpreter = Interpreter::new(
                         program,
-                        ExecutionModel::WriteOnceRegisters,
+                        ExecutionModel::InfiniteRegisters,
                         SpectestExternalFunctions,
                     );
 

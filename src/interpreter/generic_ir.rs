@@ -174,9 +174,9 @@ impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
         saved_ret_pc_ptr: Range<u32>,
         saved_caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
-        Directive::Call {
+        Directive::RwCall {
             target: function_label,
-            new_frame_ptr: function_frame_offset,
+            new_frame_offset: function_frame_offset,
             saved_ret_pc: saved_ret_pc_ptr.start,
             saved_caller_fp: saved_caller_fp_ptr.start,
         }
@@ -190,9 +190,9 @@ impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
         saved_ret_pc_ptr: Range<u32>,
         saved_caller_fp_ptr: Range<u32>,
     ) -> impl Into<Tree<Self::Directive>> {
-        Directive::CallIndirect {
+        Directive::RwCallIndirect {
             target_pc: target_pc_ptr.start,
-            new_frame_ptr: function_frame_offset,
+            new_frame_offset: function_frame_offset,
             saved_ret_pc: saved_ret_pc_ptr.start,
             saved_caller_fp: saved_caller_fp_ptr.start,
         }
@@ -437,7 +437,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting<'a> {
         saved_ret_pc_ptr: Range<u32>,
         saved_caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
-        Directive::Call {
+        Directive::WomCall {
             target: function_label,
             new_frame_ptr: function_frame_ptr.start,
             saved_ret_pc: saved_ret_pc_ptr.start,
@@ -453,7 +453,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting<'a> {
         saved_ret_pc_ptr: Range<u32>,
         saved_caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
-        Directive::CallIndirect {
+        Directive::WomCallIndirect {
             target_pc: target_pc_ptr.start,
             new_frame_ptr: function_frame_ptr.start,
             saved_ret_pc: saved_ret_pc_ptr.start,
@@ -559,9 +559,24 @@ pub enum Directive<'a> {
         ret_pc: Register, // size: PTR
         ret_fp: Register, // size: PTR
     },
-    /// Calls a normal function.
+    /// Calls a normal function with RW calling convention.
+    RwCall {
+        target: String,
+        new_frame_offset: u32,
+        saved_ret_pc: Register,    // size: PTR
+        saved_caller_fp: Register, // size: PTR
+    },
+    /// Calls a normal function indirectly with RW calling convention,
+    /// using a function reference as target.
+    RwCallIndirect {
+        target_pc: Register, // size: i32
+        new_frame_offset: u32,
+        saved_ret_pc: Register,    // size: PTR
+        saved_caller_fp: Register, // size: PTR
+    },
+    /// Calls a normal function with WOM calling convention.
     /// Use `JumpAndActivateFrame` for a tail call.
-    Call {
+    WomCall {
         target: String,
         new_frame_ptr: Register, // size: PTR
         /// Where, in the new frame, to save the return PC at the call site.
@@ -569,8 +584,9 @@ pub enum Directive<'a> {
         /// Where, in the new frame, to save the frame pointer of the frame we just left.
         saved_caller_fp: Register, // size: PTR
     },
-    /// Calls a normal function indirectly, using a function reference.
-    CallIndirect {
+    /// Calls a normal function indirectly with WOM calling convention,
+    /// using a function reference as target.
+    WomCallIndirect {
         // Notice the target_pc is an i32, not a PTR. This is because
         // the value is taken from the memory, and for now, code pointers are fixed to
         // 32 bits there.
@@ -680,7 +696,29 @@ impl Display for Directive<'_> {
             Directive::Return { ret_pc, ret_fp } => {
                 write!(f, "    Return ${ret_pc} ${ret_fp}")?;
             }
-            Directive::Call {
+            Directive::RwCall {
+                target,
+                new_frame_offset,
+                saved_ret_pc,
+                saved_caller_fp,
+            } => {
+                write!(
+                    f,
+                    "    RwCall {target} {new_frame_offset} -> $(FP+{new_frame_offset})[{saved_ret_pc}] $(FP+{new_frame_offset})[{saved_caller_fp}]"
+                )?;
+            }
+            Directive::RwCallIndirect {
+                target_pc,
+                new_frame_offset,
+                saved_ret_pc,
+                saved_caller_fp,
+            } => {
+                write!(
+                    f,
+                    "    RwCallIndirect ${target_pc} {new_frame_offset} -> $(FP+{new_frame_offset})[{saved_ret_pc}] $(FP+{new_frame_offset})[{saved_caller_fp}]"
+                )?;
+            }
+            Directive::WomCall {
                 target,
                 new_frame_ptr,
                 saved_ret_pc,
@@ -688,10 +726,10 @@ impl Display for Directive<'_> {
             } => {
                 write!(
                     f,
-                    "    Call {target} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
+                    "    WomCall {target} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
                 )?;
             }
-            Directive::CallIndirect {
+            Directive::WomCallIndirect {
                 target_pc,
                 new_frame_ptr,
                 saved_ret_pc,
@@ -699,7 +737,7 @@ impl Display for Directive<'_> {
             } => {
                 write!(
                     f,
-                    "    CallIndirect ${target_pc} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
+                    "    WomCallIndirect ${target_pc} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
                 )?;
             }
             Directive::ImportedCall {
