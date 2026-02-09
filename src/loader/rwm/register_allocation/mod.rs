@@ -80,9 +80,8 @@ impl Allocation {
         self.nodes_outputs.iter()
     }
 
-    pub fn occupation_for_node(&self, node_index: usize) -> impl Iterator<Item = Range<u32>> {
-        self.occupation
-            .consolidated_reg_occupation(node_index..node_index + 1)
+    pub fn occupation_for_node(&self, node_index: usize) -> Vec<Range<u32>> {
+        self.occupation.reg_occupation(node_index..node_index + 1)
     }
 }
 

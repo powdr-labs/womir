@@ -1,12 +1,12 @@
 use crate::loader::rwm::register_allocation::Allocation;
 use crate::loader::{dag::ValueOrigin, rwm::liveness_dag::Liveness};
+use crate::utils::range_consolidation::RangeConsolidationIterator;
 use iset::IntervalMap;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::io::Write;
 use std::{
-    collections::BTreeMap, fs::File, io::BufWriter, iter::FusedIterator, num::NonZeroU32,
-    ops::Range, path::Path,
+    collections::BTreeMap, fs::File, io::BufWriter, num::NonZeroU32, ops::Range, path::Path,
 };
 
 #[derive(Debug)]
@@ -40,14 +40,14 @@ pub struct Occupation {
 }
 
 impl Occupation {
-    fn reg_occupation(&self, live_range: Range<usize>) -> Vec<Range<u32>> {
+    pub fn reg_occupation(&self, live_range: Range<usize>) -> Vec<Range<u32>> {
         self.alive_interval_map
             .values(live_range)
             .map(move |entry_idx| self.allocations[*entry_idx].reg_range.clone())
             .collect_vec()
     }
 
-    pub fn consolidated_reg_occupation(
+    fn consolidated_reg_occupation(
         &self,
         live_range: Range<usize>,
     ) -> impl Iterator<Item = Range<u32>> {
@@ -64,44 +64,6 @@ pub struct OccupationTracker {
     origin_map: BTreeMap<ValueOrigin, usize>,
     call_frames: HashMap<usize, u32>,
 }
-
-/// Iterates over the consolidated ranges of a given set of overlapping ranges.
-///
-/// The ranges are returned in sorted order.
-struct RangeConsolidationIterator<T> {
-    reverse_sorted_ranges: Vec<Range<T>>,
-}
-
-impl<T: Ord> RangeConsolidationIterator<T> {
-    fn new(occupied_ranges: Vec<Range<T>>) -> Self {
-        let mut reverse_sorted_ranges = occupied_ranges;
-        reverse_sorted_ranges.sort_unstable_by(|a, b| b.start.cmp(&a.start));
-        Self {
-            reverse_sorted_ranges,
-        }
-    }
-}
-
-impl<T: Ord> Iterator for RangeConsolidationIterator<T> {
-    type Item = Range<T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut curr = self.reverse_sorted_ranges.pop()?;
-
-        while let Some(next) = self.reverse_sorted_ranges.last() {
-            if next.start <= curr.end {
-                // Overlaps/adjacent: extend current range
-                let next = self.reverse_sorted_ranges.pop().unwrap();
-                curr.end = curr.end.max(next.end);
-            } else {
-                break;
-            }
-        }
-        Some(curr)
-    }
-}
-
-impl<T: Ord> FusedIterator for RangeConsolidationIterator<T> {}
 
 impl OccupationTracker {
     pub fn new(liveness: Liveness) -> Self {

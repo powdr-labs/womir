@@ -155,13 +155,13 @@ impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
         _c: &mut RwmCtx,
         module: &'a str,
         function: &'a str,
-        inputs: Vec<Range<u32>>,
+        inputs: &[WasmOpInput],
         outputs: Vec<Range<u32>>,
     ) -> Directive<'a> {
         Directive::ImportedCall {
             module,
             function,
-            inputs,
+            inputs: inputs.iter().cloned().map(unwrap_register).collect(),
             outputs,
         }
     }
@@ -202,12 +202,12 @@ impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
         &self,
         _c: &mut RwmCtx,
         op: Op<'a>,
-        inputs: Vec<WasmOpInput>,
+        inputs: &[WasmOpInput],
         output: Option<Range<u32>>,
     ) -> Directive<'a> {
         Directive::WASMOp {
             op,
-            inputs: inputs.into_iter().map(unwrap_register).collect(),
+            inputs: inputs.iter().cloned().map(unwrap_register).collect(),
             output,
         }
     }

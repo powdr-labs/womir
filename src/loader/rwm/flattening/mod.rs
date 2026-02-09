@@ -25,7 +25,7 @@ use crate::{
         },
         split_func_ref_regs, word_count_type, word_count_types,
     },
-    utils::tree::Tree,
+    utils::{range_consolidation::RangeConsolidationIterator, tree::Tree},
 };
 use std::{collections::VecDeque, ops::Range, sync::atomic::AtomicU32};
 
@@ -44,26 +44,12 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
         allocation: dag.block_data,
     });
 
-    let mut ctx = Context::new(&common_ctx, &ctrl_stack[0].allocation, 0);
-
-    // Add the function label with the frame size.
-    let mut directives = vec![
-        s.emit_label(&mut ctx, format_label(func_idx, LabelType::Function))
-            .into(),
-    ];
-
-    if let Some(name) = prog.get_exported_func(func_idx) {
-        // Add an alternative label, using the exported function name.
-        directives.push(s.emit_label(&mut ctx, name.to_string()).into());
-    }
-
-    let tree = process_dag(s, &common_ctx, &mut ctrl_stack, dag.nodes, func_idx);
-    directives.push(tree);
+    let directives = process_dag(s, &common_ctx, &mut ctrl_stack, dag.nodes, func_idx);
 
     FunctionAsm {
         func_idx,
         frame_size: None,
-        directives: Tree::Node(directives).flatten(),
+        directives: directives.flatten(),
     }
 }
 
@@ -95,11 +81,38 @@ fn process_node<'a, 'b, S: Settings<'a>>(
     node_idx: usize,
     func_idx: u32,
 ) -> Tree<S::Directive> {
-    let mut ctx = Context::new(common_ctx, &ctrl_stack[0].allocation, node_idx);
+    let allocation = &ctrl_stack[0].allocation;
+
+    // Resolve all the inputs to register ranges.
+    let inputs = node
+        .inputs
+        .into_iter()
+        .map(|input| match input {
+            NodeInput::Constant(c) => WasmOpInput::Constant(c),
+            NodeInput::Reference(origin) => WasmOpInput::Register(allocation.get(&origin).unwrap()),
+        })
+        .collect_vec();
+
+    let mut ctx = Context::new(common_ctx, allocation, node_idx, &inputs);
     match node.operation {
         Operation::Inputs => {
-            // Inputs does not translate to any assembly directive.
-            Tree::Empty
+            // Inputs node marks the start of the block. If this the toplevel function, we must issue the function label here.
+            // Add the function label with the frame size.
+            if ctrl_stack.len() == 1 {
+                let mut directives = Vec::with_capacity(2);
+                directives.push(
+                    s.emit_label(&mut ctx, format_label(func_idx, LabelType::Function))
+                        .into(),
+                );
+
+                if let Some(name) = ctx.common.prog.get_exported_func(func_idx) {
+                    // Add an alternative label, using the exported function name.
+                    directives.push(s.emit_label(&mut ctx, name.to_string()).into());
+                }
+                directives.into()
+            } else {
+                Tree::Empty
+            }
         }
         Operation::Label { id } => s
             .emit_label(&mut ctx, format_label(id, LabelType::Local))
@@ -114,13 +127,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             let input_ranges = loop_allocation.get_for_node(0);
 
             // Copy the loop inputs if needed.
-            let mut loop_directives = copy_inputs_if_needed(
-                s,
-                &mut ctx,
-                &ctrl_stack[0].allocation,
-                &node.inputs,
-                input_ranges,
-            );
+            let mut loop_directives = copy_inputs_if_needed(s, &mut ctx, &inputs, input_ranges);
 
             // Generate loop label.
             let loop_label = ctx.new_label(LabelType::Loop);
@@ -138,15 +145,9 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             loop_directives.push(loop_tree);
             loop_directives.into()
         }
-        Operation::Br(break_target) => emit_jump(
-            s,
-            &mut ctx,
-            ctrl_stack,
-            break_target,
-            &node.inputs,
-            func_idx,
-        )
-        .into_tree(s),
+        Operation::Br(break_target) => {
+            emit_jump(s, &mut ctx, ctrl_stack, break_target, &inputs, func_idx).into_tree(s)
+        }
         Operation::BrIf(target) | Operation::BrIfZero(target) => {
             let (cond, inverse_cond) = match node.operation {
                 Operation::BrIf(..) => (JumpCondition::IfNotZero, JumpCondition::IfZero),
@@ -155,12 +156,11 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             };
 
             // Get the conditional variable from the inputs.
-            let mut inputs = node.inputs;
-            let cond_origin = inputs.pop().unwrap();
-            let cond_reg = ctrl_stack[0].allocation.get_as_reg(&cond_origin).unwrap();
+            let (cond_reg, inputs) = ctx.node_inputs.split_last().unwrap();
+            let cond_reg = cond_reg.as_register().unwrap().clone();
             assert_reg::<S>(&cond_reg, ValType::I32);
 
-            let jump_directives = emit_jump(s, &mut ctx, ctrl_stack, target, &inputs, func_idx);
+            let jump_directives = emit_jump(s, &mut ctx, ctrl_stack, target, inputs, func_idx);
             if S::is_jump_condition_available(cond)
                 && let JumpResult::PlainJump(target) = jump_directives
             {
@@ -214,27 +214,29 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             }
         }
         Operation::BrTable { targets } => {
-            let curr_entry = &ctrl_stack[0];
+            let (selector, table_inputs) = inputs.split_last().unwrap();
+            let selector = selector.as_register().unwrap().clone();
 
-            let mut node_inputs = node.inputs;
-            let selector = curr_entry
-                .allocation
-                .get_as_reg(&node_inputs.pop().unwrap())
-                .unwrap();
-
+            let mut choice_inputs = Vec::with_capacity(table_inputs.len());
             let mut jump_instructions = targets
                 .into_iter()
                 .map(|target| {
                     // The inputs for one particular target are a permutation of the inputs
                     // of the BrTable operation.
-                    let inputs = target
-                        .input_permutation
-                        .iter()
-                        .map(|&idx| node_inputs[idx as usize].clone())
-                        .collect_vec();
+                    choice_inputs.clear();
+                    for &idx in &target.input_permutation {
+                        choice_inputs.push(table_inputs[idx as usize].clone());
+                    }
 
                     // Emit the jump to the target label.
-                    emit_jump(s, &mut ctx, ctrl_stack, target.target, &inputs, func_idx)
+                    emit_jump(
+                        s,
+                        &mut ctx,
+                        ctrl_stack,
+                        target.target,
+                        &choice_inputs,
+                        func_idx,
+                    )
                 })
                 .collect_vec();
 
@@ -348,7 +350,6 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                 // Imported functions are kinda like system calls, and we assume
                 // the implementation can access the input and output registers directly,
                 // so we just have to emit the call directive.
-                let inputs = map_input_into_regs(node.inputs, &curr_entry.allocation);
                 let outputs = (0..node.output_types.len())
                     .map(|output_idx| {
                         curr_entry
@@ -361,7 +362,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                     })
                     .collect_vec();
 
-                s.emit_imported_call(&mut ctx, module, function, inputs, outputs)
+                s.emit_imported_call(&mut ctx, module, function, &inputs, outputs)
                     .into()
             } else {
                 // Normal function calls requires inputs to be copied to where they are needed in the
@@ -373,7 +374,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                     &mut ctx,
                     &curr_entry.allocation,
                     node_idx,
-                    &node.inputs,
+                    &inputs,
                     func_type,
                 );
 
@@ -399,8 +400,8 @@ fn process_node<'a, 'b, S: Settings<'a>>(
             let curr_entry = ctrl_stack.front().unwrap();
 
             // The last input of the CallIndirect operation is the table entry, the others are the function arguments.
-            let (entry_idx, inputs) = node.inputs.split_last().unwrap();
-            let entry_idx = curr_entry.allocation.get_as_reg(entry_idx).unwrap();
+            let (entry_idx, inputs) = inputs.split_last().unwrap();
+            let entry_idx = entry_idx.as_register().unwrap().clone();
 
             let fn_type = ctx.common.prog.get_type(type_index);
             let call = prepare_function_call(
@@ -429,7 +430,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                 s.emit_wasm_op(
                     &mut ctx,
                     Op::TableGet { table: table_index },
-                    vec![WasmOpInput::Register(entry_idx)],
+                    &[WasmOpInput::Register(entry_idx)],
                     Some(func_ref_reg),
                 )
                 .into(),
@@ -463,16 +464,6 @@ fn process_node<'a, 'b, S: Settings<'a>>(
         Operation::WASMOp(op) => {
             // Normal WASM operations are handled by the ISA emmiter directly.
             let curr_entry = ctrl_stack.front().unwrap();
-            let inputs = node
-                .inputs
-                .into_iter()
-                .map(|input| match input {
-                    NodeInput::Constant(c) => WasmOpInput::Constant(c),
-                    NodeInput::Reference(origin) => {
-                        WasmOpInput::Register(curr_entry.allocation.get(&origin).unwrap())
-                    }
-                })
-                .collect_vec();
             let output = match node.output_types.len() {
                 0 => None,
                 1 => Some(
@@ -488,7 +479,7 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                     panic!("WASM instructions with multiple outputs! This is a bug.");
                 }
             };
-            s.emit_wasm_op(&mut ctx, op, inputs, output).into()
+            s.emit_wasm_op(&mut ctx, op, &inputs, output).into()
         }
     }
 }
@@ -515,7 +506,7 @@ fn emit_jump<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_>,
     ctrl_stack: &VecDeque<StackEntry>,
     target: BreakTarget,
-    node_inputs: &[NodeInput],
+    inputs: &[WasmOpInput],
     func_idx: u32,
 ) -> JumpResult<S::Directive> {
     // There are 3 different kinds of jumps we have to deal with:
@@ -525,7 +516,6 @@ fn emit_jump<'a, S: Settings<'a>>(
     // 3. Returns from the function.
 
     let target_entry = &ctrl_stack[target.depth as usize];
-    let curr_alloc = &ctrl_stack[0].allocation;
     let (output_node_idx, target) = match target.kind {
         TargetType::FunctionOrLoop => {
             match &target_entry.loop_label {
@@ -544,8 +534,7 @@ fn emit_jump<'a, S: Settings<'a>>(
                     let input_ranges = ranges_for_types::<S>(ret_types, &mut fn_output_size);
 
                     // Use the current block's allocation to source the copied inputs:
-                    let mut directives =
-                        copy_inputs_if_needed(s, ctx, curr_alloc, node_inputs, input_ranges);
+                    let mut directives = copy_inputs_if_needed(s, ctx, inputs, input_ranges);
 
                     // Also calculate the space needed by the function inputs, to calculate where
                     // the return address and caller frame pointer are stored.
@@ -569,7 +558,7 @@ fn emit_jump<'a, S: Settings<'a>>(
     };
 
     let input_ranges = target_entry.allocation.get_for_node(output_node_idx);
-    let mut directives = copy_inputs_if_needed(s, ctx, curr_alloc, node_inputs, input_ranges);
+    let mut directives = copy_inputs_if_needed(s, ctx, inputs, input_ranges);
     if directives.is_empty() {
         JumpResult::PlainJump(target)
     } else {
@@ -586,15 +575,14 @@ fn emit_jump<'a, S: Settings<'a>>(
 fn copy_inputs_if_needed<'a, S: Settings<'a>>(
     s: &S,
     ctx: &mut Context<'a, '_>,
-    allocation: &Allocation,
-    node_inputs: &[NodeInput],
+    node_inputs: &[WasmOpInput],
     expected_locations: impl IntoIterator<Item = Range<u32>>,
 ) -> Vec<Tree<S::Directive>> {
     let copy_set = node_inputs
         .iter()
         .zip_eq(expected_locations)
         .filter_map(|(input, destiny)| {
-            let source = allocation.get_as_reg(input).unwrap();
+            let source = input.as_register().unwrap().clone();
             (source != destiny).then_some((source, destiny))
         })
         .collect_vec();
@@ -641,13 +629,6 @@ fn parallel_copy<'a, S: Settings<'a>>(
         .collect_vec()
 }
 
-fn map_input_into_regs(node_inputs: Vec<NodeInput>, allocation: &Allocation) -> Vec<Range<u32>> {
-    node_inputs
-        .into_iter()
-        .map(|input| allocation.get_as_reg(&input).unwrap())
-        .collect()
-}
-
 /// Calculates the register address for a tightly packed list types.
 fn ranges_for_types<'a, S: Settings<'a>>(
     types: &[ValType],
@@ -685,6 +666,7 @@ pub struct Context<'a, 'b> {
     common: &'b CommonContext<'a, 'b>,
     allocation: &'b Allocation,
     node_index: usize,
+    node_inputs: &'b [WasmOpInput],
     /// This is needed for the tmp_tracker to work when a tmp is
     /// requested during the translation of a function call.
     /// In that case, most of the register space will be occupied by
@@ -704,11 +686,13 @@ impl<'a, 'b> Context<'a, 'b> {
         common: &'b CommonContext<'a, 'b>,
         allocation: &'b Allocation,
         node_index: usize,
+        node_inputs: &'b [WasmOpInput],
     ) -> Self {
         Self {
             common,
             allocation,
             node_index,
+            node_inputs,
             function_call_prelude_size: None,
             tmp_tracker: None,
         }
@@ -718,9 +702,21 @@ impl<'a, 'b> Context<'a, 'b> {
         if self.tmp_tracker.is_none() {
             // This is the first time a temporary is being allocated at this node.
             // We need to figure out what slots are available for temporaries.
+
+            // Get all the occupied ranges for this node.
+            let mut occupied_ranges = self.allocation.occupation_for_node(self.node_index);
+
+            // We also need to include the inputs for this node, because in our occupation convention,
+            // if this is the last usage of an input, it is already considered free in this node.
+            occupied_ranges.extend(
+                self.node_inputs
+                    .iter()
+                    .filter_map(|input| input.as_register().cloned()),
+            );
+
             let mut holes = Vec::new();
             let mut last_occupied = 0..0;
-            for occupied in self.allocation.occupation_for_node(self.node_index) {
+            for occupied in RangeConsolidationIterator::new(occupied_ranges) {
                 if occupied.start > last_occupied.end {
                     holes.push(last_occupied.end..occupied.start);
                 }
@@ -797,7 +793,7 @@ fn prepare_function_call<'a, S: Settings<'a>>(
     ctx: &mut Context<'a, '_>,
     allocation: &Allocation,
     node_idx: usize,
-    inputs: &[NodeInput],
+    inputs: &[WasmOpInput],
     func_type: &FuncType,
 ) -> FunctionCall<S::Directive> {
     // Normal function calls requires inputs to be copied to where they are needed in the
@@ -837,7 +833,7 @@ fn prepare_function_call<'a, S: Settings<'a>>(
     ctx.function_call_prelude_size = Some(ret_fp.end);
 
     // Generate the actual directives for input and output copy.
-    let prefix_directives = copy_inputs_if_needed(s, ctx, allocation, inputs, input_ranges);
+    let prefix_directives = copy_inputs_if_needed(s, ctx, inputs, input_ranges);
     let suffix_directives = parallel_copy(s, ctx, output_copy_set);
 
     FunctionCall {

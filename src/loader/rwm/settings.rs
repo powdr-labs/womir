@@ -76,7 +76,7 @@ pub trait Settings<'a>: loader::Settings {
         c: &mut Context<'a, '_>,
         module: &'a str,
         function: &'a str,
-        inputs: Vec<Range<u32>>,
+        inputs: &[WasmOpInput],
         outputs: Vec<Range<u32>>,
     ) -> impl Into<Tree<Self::Directive>>;
 
@@ -109,7 +109,7 @@ pub trait Settings<'a>: loader::Settings {
         &self,
         c: &mut Context<'a, '_>,
         op: Operator<'a>,
-        inputs: Vec<WasmOpInput>,
+        inputs: &[WasmOpInput],
         output: Option<Range<u32>>,
     ) -> impl Into<Tree<Self::Directive>>;
 }
