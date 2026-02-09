@@ -15,7 +15,7 @@ use crate::loader::{
     locals_data_flow::LiftedBlockTree,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Operation<'a> {
     Inputs,
     WASMOp(Op<'a>),
@@ -24,7 +24,7 @@ pub enum Operation<'a> {
     Block { kind: BlockKind, sub_dag: Dag<'a> },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BrTableTarget {
     pub relative_depth: u32,
     /// For each of the nodes inputs, this is the permutation of the inputs that
@@ -97,14 +97,14 @@ impl From<ValueOrigin> for NodeInput {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Node<'a> {
     pub operation: Operation<'a>,
     pub inputs: Vec<NodeInput>,
     pub output_types: Vec<ValType>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Dag<'a> {
     pub nodes: Vec<Node<'a>>,
 }

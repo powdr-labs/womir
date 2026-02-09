@@ -45,7 +45,7 @@ use crate::loader::{Block, BlockKind, Element, FuncType, Global, Instruction, Mo
 ///  - dead code is removed after non-fallthrough loops and `br`, `br_table` and `unreachable` instructions;
 ///  - `global.get` that refers to constants are turned into the appropriate constant instruction (it is important this
 ///    is done early on, before the const optimizations).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockTree<'a> {
     pub elements: Vec<Element<'a>>,
 }

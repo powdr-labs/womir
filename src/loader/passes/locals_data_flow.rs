@@ -14,7 +14,7 @@ use wasmparser::Operator;
 
 use crate::loader::{Block, BlockKind, Element, Instruction as Ins, passes::block_tree::BlockTree};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LiftedBlockTree<'a> {
     pub elements: Vec<Element<'a>>,
 }

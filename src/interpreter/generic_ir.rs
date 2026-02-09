@@ -12,7 +12,7 @@ use wasmparser::{Operator as Op, ValType};
 
 type WomCtx<'a, 'b> = crate::loader::wom::flattening::Context<'a, 'b, GenericIrSetting<'a>>;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GenericIrSetting<'a> {
     _phantom: PhantomData<&'a u32>,
 }

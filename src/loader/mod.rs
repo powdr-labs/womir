@@ -448,7 +448,7 @@ pub trait FunctionProcessingStage<'a, S: Settings>: Sized {
 /// Different stages of processing a function.
 ///
 /// The common passes betwen Wom and RWM.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CommonStages<'a> {
     // Common stages
     Unparsed(FunctionBody<'a>),
@@ -562,6 +562,7 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
 /// A partially loaded WASM program, with all the functions in some processing stage.
 ///
 /// To fully process the functions, call `process_all_functions()`.
+#[derive(Debug, Clone)]
 pub struct PartiallyParsedProgram<'a, S: Settings> {
     /// The settings used for the program.
     pub s: S,
@@ -1562,7 +1563,7 @@ fn read_locals<'a>(
     Ok(local_types)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Instruction<'a> {
     WASMOp(Operator<'a>),
     /// BrTable needs to be transformed, so we can't use the original
@@ -1578,13 +1579,13 @@ pub enum Instruction<'a> {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BlockKind {
     Block,
     Loop,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block<'a> {
     block_kind: BlockKind,
     interface_type: Arc<FuncType>,
@@ -1599,7 +1600,7 @@ pub struct Block<'a> {
     carried_locals: BTreeSet<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Element<'a> {
     Ins(Instruction<'a>),
     Block(Block<'a>),

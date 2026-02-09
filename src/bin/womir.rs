@@ -219,17 +219,31 @@ mod tests {
             "Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}"
         );
         let wasm_file = std::fs::read(path).unwrap();
-        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file)
-            .unwrap()
-            .default_process_all_functions::<WomStages<GenericIrSetting>>()
-            .unwrap();
-        let mut interpreter = Interpreter::new(
-            program,
-            ExecutionModel::WriteOnceRegisters,
-            DataInput::new(data_inputs),
-        );
-        let got_output = interpreter.run(main_function, func_inputs);
-        assert_eq!(got_output, outputs);
+        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+
+        let pipelines = [
+            (
+                ExecutionModel::WriteOnceRegisters,
+                program
+                    .clone()
+                    .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
+                    .unwrap(),
+            ),
+            (
+                ExecutionModel::InfiniteRegisters,
+                program
+                    .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+                    .unwrap(),
+            ),
+        ];
+
+        for (exec_model, program) in pipelines {
+            println!("Testing execution model: {exec_model:?}");
+            let mut interpreter =
+                Interpreter::new(program, exec_model, DataInput::new(data_inputs.clone()));
+            let got_output = interpreter.run(main_function, func_inputs);
+            assert_eq!(got_output, outputs);
+        }
     }
 
     fn test_interpreter_from_sample_programs(
@@ -552,31 +566,48 @@ mod tests {
                 for (mod_name, line, asserts) in modules {
                     println!("Testing module: {} at line {line}", mod_name.display());
                     let wasm_file = std::fs::read(mod_name).unwrap();
-                    let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file)
-                        .unwrap()
-                        .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
-                        .unwrap();
-                    let mut interpreter = Interpreter::new(
-                        program,
-                        ExecutionModel::InfiniteRegisters,
-                        SpectestExternalFunctions,
-                    );
+                    let program =
+                        womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
 
-                    asserts
-                        .iter()
-                        .filter(|assert_case| {
-                            if let Some(functions) = functions {
-                                functions.contains(&assert_case.function_name.as_str())
-                            } else {
-                                true
-                            }
-                        })
-                        .for_each(|assert_case| {
-                            println!("Assert test case: {assert_case:#?}");
-                            let got_output =
-                                interpreter.run(&assert_case.function_name, &assert_case.args);
-                            assert_eq!(got_output, assert_case.expected);
-                        });
+                    // TODO: change the processing stages interface so we can process tha common
+                    // stages just once, and resume for each independent pipeline (WOM and RWM).
+                    let pipelines = [
+                        (
+                            program
+                                .clone()
+                                .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+                                .unwrap(),
+                            ExecutionModel::InfiniteRegisters,
+                        ),
+                        (
+                            program
+                                .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
+                                .unwrap(),
+                            ExecutionModel::WriteOnceRegisters,
+                        ),
+                    ];
+
+                    for (program, exec_model) in pipelines {
+                        println!("  Execution model: {:?}", exec_model);
+                        let mut interpreter =
+                            Interpreter::new(program, exec_model, SpectestExternalFunctions);
+
+                        asserts
+                            .iter()
+                            .filter(|assert_case| {
+                                if let Some(functions) = functions {
+                                    functions.contains(&assert_case.function_name.as_str())
+                                } else {
+                                    true
+                                }
+                            })
+                            .for_each(|assert_case| {
+                                println!("Assert test case: {assert_case:#?}");
+                                let got_output =
+                                    interpreter.run(&assert_case.function_name, &assert_case.args);
+                                assert_eq!(got_output, assert_case.expected);
+                            });
+                    }
                 }
             }
             Err(e) => panic!("Error extracting wast test info: {e}"),

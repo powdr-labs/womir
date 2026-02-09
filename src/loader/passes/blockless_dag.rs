@@ -30,7 +30,7 @@ pub enum TargetType {
     Label(u32),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Operation<'a, T> {
     Inputs,
     WASMOp(Op<'a>),
@@ -60,7 +60,7 @@ pub enum Operation<'a, T> {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BrTableTarget {
     pub target: BreakTarget,
     /// For each of the nodes inputs, this is the permutation of the inputs that
@@ -68,7 +68,7 @@ pub struct BrTableTarget {
     pub input_permutation: Vec<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenericNode<'a, T> {
     pub operation: Operation<'a, T>,
     pub inputs: Vec<NodeInput>,
@@ -77,7 +77,7 @@ pub struct GenericNode<'a, T> {
 
 pub type Node<'a> = GenericNode<'a, ()>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenericBlocklessDag<'a, T> {
     pub nodes: Vec<GenericNode<'a, T>>,
     pub block_data: T,
