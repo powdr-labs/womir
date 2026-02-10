@@ -174,14 +174,24 @@ impl OccupationTracker {
         call_index: usize,
         output_sizes: impl Iterator<Item = u32>,
     ) -> u32 {
-        // Find the highest allocated register at this point
+        // For the frame start, find the highest allocated register at this point,
+        // excluding the outputs of this call itself, that may already be allocated
+        // and can overlap with the call frame, since they are only produced at the
+        // end of the call.
         let frame_start = self
             .occupation
             .alive_interval_map
             .values_overlap(call_index)
-            .map(|entry_idx| {
+            .filter_map(|entry_idx| {
                 let alloc = &self.occupation.allocations[*entry_idx];
-                alloc.reg_range.end
+                if let AllocationType::Value(origin) = alloc.kind
+                    && origin.node == call_index
+                {
+                    // This is an output of the call itself, ignore it.
+                    None
+                } else {
+                    Some(alloc.reg_range.end)
+                }
             })
             .max()
             .unwrap_or(0);
