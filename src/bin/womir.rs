@@ -569,7 +569,7 @@ mod tests {
                     let program =
                         womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
 
-                    // TODO: change the processing stages interface so we can process tha common
+                    // TODO: change the processing stages interface so we can process the common
                     // stages just once, and resume for each independent pipeline (WOM and RWM).
                     let pipelines = [
                         (
