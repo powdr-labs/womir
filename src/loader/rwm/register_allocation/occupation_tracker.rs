@@ -297,7 +297,7 @@ impl OccupationTracker {
         }
     }
 
-    pub fn dump(&self, path: &Path) {
+    pub fn _dump(&self, path: &Path) {
         let mut file =
             BufWriter::new(File::create(path).expect("could not create allocation dump file"));
         for (life_range, alloc) in self.occupation.alive_interval_map.unsorted_iter() {

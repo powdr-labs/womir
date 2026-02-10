@@ -4,10 +4,8 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     num::NonZeroU32,
     ops::Range,
-    path::Path,
 };
 
-use itertools::Itertools;
 use wasmparser::{Operator as Op, ValType};
 
 use crate::{
@@ -92,7 +90,6 @@ pub type Node<'a> = GenericNode<'a, Allocation>;
 struct OptimisticAllocator {
     occupation_tracker: OccupationTracker,
     labels: HashMap<u32, usize>,
-    index_in_parent: Option<usize>,
 }
 
 impl OptimisticAllocator {
@@ -252,7 +249,6 @@ fn handle_break<'a, S: Settings>(
 
 fn recursive_block_allocation<'a, S: Settings>(
     prog: &Module<'a>,
-    func_idx: u32,
     mut nodes: Vec<liveness_dag::Node<'a>>,
     oa: &mut VecDeque<OptimisticAllocator>,
 ) -> (Vec<Node<'a>>, usize) {
@@ -419,7 +415,6 @@ fn recursive_block_allocation<'a, S: Settings>(
                 let mut loop_oa = OptimisticAllocator {
                     occupation_tracker,
                     labels: HashMap::new(),
-                    index_in_parent: Some(index),
                 };
 
                 // Allocate the rest of the input node values (inside the loop body).
@@ -427,17 +422,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                 oa.push_front(loop_oa);
 
                 let (loop_nodes, loop_saved_copies) =
-                    recursive_block_allocation::<S>(prog, func_idx, loop_nodes, oa);
-
-                // Uncomment to dump the loop allocation for debugging.
-                /*
-                let dump_path = format!(
-                    "dump/func_{}_loop_{}.txt",
-                    func_idx,
-                    oa.iter().filter_map(|oa| oa.index_in_parent).format("_")
-                );
-                oa[0].occupation_tracker.dump(Path::new(&dump_path));
-                */
+                    recursive_block_allocation::<S>(prog, loop_nodes, oa);
 
                 // Pop the loop allocation tracker.
                 let OptimisticAllocator {
@@ -555,7 +540,6 @@ pub fn optimistic_allocation<'a, S: Settings>(
     let mut oa = OptimisticAllocator {
         occupation_tracker: OccupationTracker::new(liveness),
         labels: HashMap::new(),
-        index_in_parent: None,
     };
 
     // Fix the allocation of the function inputs first
@@ -588,7 +572,7 @@ pub fn optimistic_allocation<'a, S: Settings>(
     // Do the allocation for the rest of the nodes, bottom up.
     let mut oa_stack = VecDeque::from([oa]);
     let (nodes, number_of_saved_copies) =
-        recursive_block_allocation::<S>(prog, func_idx, nodes, &mut oa_stack);
+        recursive_block_allocation::<S>(prog, nodes, &mut oa_stack);
 
     // Generate the final allocation for this block
     let OptimisticAllocator {
@@ -596,12 +580,6 @@ pub fn optimistic_allocation<'a, S: Settings>(
         labels,
         ..
     } = oa_stack.pop_front().unwrap();
-
-    // Uncomment to dump the toplevel function allocation for debugging.
-    /*
-    let dump_path = format!("dump/func_{}.txt", func_idx);
-    occupation_tracker.dump(Path::new(&dump_path));
-    */
 
     let allocation = occupation_tracker.into_allocations(labels);
 
