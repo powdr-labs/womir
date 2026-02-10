@@ -429,11 +429,15 @@ fn recursive_block_allocation<'a, S: Settings>(
                 let (loop_nodes, loop_saved_copies) =
                     recursive_block_allocation::<S>(prog, func_idx, loop_nodes, oa);
 
+                // Uncomment to dump the loop allocation for debugging.
+                /*
                 let dump_path = format!(
                     "dump/func_{}_loop_{}.txt",
                     func_idx,
-                    oa.iter().filter_map(|oa| oa.index_in_parent).format(",")
+                    oa.iter().filter_map(|oa| oa.index_in_parent).format("_")
                 );
+                oa[0].occupation_tracker.dump(Path::new(&dump_path));
+                */
 
                 // Pop the loop allocation tracker.
                 let OptimisticAllocator {
@@ -441,8 +445,6 @@ fn recursive_block_allocation<'a, S: Settings>(
                     labels,
                     ..
                 } = oa.pop_front().unwrap();
-
-                occupation_tracker.dump(Path::new(&dump_path));
 
                 // Project the allocations back to the outer level. This will prevent
                 // the outer level from placing allocations that should survive across
@@ -595,8 +597,11 @@ pub fn optimistic_allocation<'a, S: Settings>(
         ..
     } = oa_stack.pop_front().unwrap();
 
+    // Uncomment to dump the toplevel function allocation for debugging.
+    /*
     let dump_path = format!("dump/func_{}.txt", func_idx);
     occupation_tracker.dump(Path::new(&dump_path));
+    */
 
     let allocation = occupation_tracker.into_allocations(labels);
 
