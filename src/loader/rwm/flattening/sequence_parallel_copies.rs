@@ -1,4 +1,4 @@
-//! Implements what the literatura call "parallel moves".
+//! Implements what the literature calls "parallel moves".
 //!
 //! Considering the precondition that every destination register has a single source register,
 //! the resulting directed graph consists of these three kinds of connected components:
