@@ -16,10 +16,15 @@ pub mod settings;
 /// The RWM-specific stages of function processing.
 #[derive(Debug)]
 pub enum RWMStages<'a, S: Settings<'a>> {
+    /// The common stages shared with other execution models, up to the blockless DAG stage.
     CommonStages(CommonStages<'a>),
+    /// The same DAG representation as the blockless DAG, but with liveness information attached to each function and loop.
     LivenessDag(LivenessDag<'a>),
+    /// The DAG with registers allocated based on liveness information.
     RegisterAllocatedDag(AllocatedDag<'a>),
+    /// The flattened assembly-like representation of the function.
     PlainFlatAsm(FunctionAsm<S::Directive>),
+    /// The flattened assembly-like representation with useless jumps removed.
     DumbJumpOptFlatAsm(FunctionAsm<S::Directive>),
 }
 

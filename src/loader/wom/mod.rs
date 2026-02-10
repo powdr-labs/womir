@@ -13,8 +13,11 @@ pub mod settings;
 /// The Wom-specific stages of function processing.
 #[derive(Debug)]
 pub enum WomStages<'a, S: Settings<'a>> {
+    /// The common stages shared with other execution models, up to the blockless DAG stage.
     CommonStages(CommonStages<'a>),
+    /// The flattened assembly-like representation of the function.
     PlainFlatAsm(FunctionAsm<S::Directive>),
+    /// The flattened assembly-like representation with useless jumps removed.
     DumbJumpOptFlatAsm(FunctionAsm<S::Directive>),
 }
 
