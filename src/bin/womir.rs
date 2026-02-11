@@ -121,13 +121,17 @@ fn main() -> wasmparser::Result<()> {
             /// Function name to execute
             function: String,
 
-            /// Comma separated function inputs (u32)
-            #[arg(long = "func-inputs", value_delimiter = ',', value_parser = clap::value_parser!(u32))]
-            func_inputs: Vec<u32>,
+            /// Should print the execution trace
+            #[arg(long)]
+            trace: bool,
+
+            /// Comma separated arguments for the function (u32)
+            #[arg(short,long, value_delimiter = ',', value_parser = clap::value_parser!(u32), default_value = "")]
+            args: Vec<u32>,
 
             /// Comma separated data inputs (u32)
-            #[arg(long = "data-inputs", value_delimiter = ',', value_parser = clap::value_parser!(u32))]
-            data_inputs: Vec<u32>,
+            #[arg(short, long, value_delimiter = ',', value_parser = clap::value_parser!(u32), default_value = "")]
+            inputs: Vec<u32>,
         },
     }
 
@@ -148,8 +152,9 @@ fn main() -> wasmparser::Result<()> {
         Command::Run {
             wasm_file,
             function,
-            func_inputs,
-            data_inputs,
+            args,
+            inputs,
+            trace,
         } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
             let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_bytes)?;
@@ -160,9 +165,9 @@ fn main() -> wasmparser::Result<()> {
             }
 
             let mut interpreter =
-                Interpreter::new(program, cli.exec_model, DataInput::new(data_inputs));
+                Interpreter::new(program, cli.exec_model, DataInput::new(inputs), trace);
             log::info!("Executing function: {function}");
-            let outputs = interpreter.run(&function, &func_inputs);
+            let outputs = interpreter.run(&function, &args);
             log::info!("Outputs: {:?}", outputs);
 
             Ok(())
