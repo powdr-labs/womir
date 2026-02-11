@@ -425,9 +425,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
     fn run_loop(&mut self) {
         let mut cycles = 0usize;
+
+        let mut t = Tracer::new(self);
         let final_fp = loop {
-            let instr = self.flat_program[self.pc as usize].clone();
-            let mut t = Tracer::new(self);
+            t.reset();
+
+            let instr = t.i.flat_program[t.i.pc as usize].clone();
 
             let mut should_inc_pc = true;
 
@@ -2029,6 +2032,13 @@ mod trace {
             }
 
             println!();
+        }
+
+        pub fn reset(&mut self) {
+            self.original_pc = self.i.pc;
+            self.original_fp = self.i.fp;
+            self.reads.clear();
+            self.writes.clear();
         }
 
         fn get_reg(&mut self, offset: u32) -> u32 {
