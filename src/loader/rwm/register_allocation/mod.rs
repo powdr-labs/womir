@@ -4,10 +4,8 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     num::NonZeroU32,
     ops::Range,
-    path::Path,
 };
 
-use itertools::Itertools;
 use wasmparser::{Operator as Op, ValType};
 
 use crate::{
@@ -80,9 +78,8 @@ impl Allocation {
         self.nodes_outputs.iter()
     }
 
-    pub fn occupation_for_node(&self, node_index: usize) -> impl Iterator<Item = Range<u32>> {
-        self.occupation
-            .consolidated_reg_occupation(node_index..node_index + 1)
+    pub fn occupation_for_node(&self, node_index: usize) -> Vec<Range<u32>> {
+        self.occupation.reg_occupation(node_index..node_index + 1)
     }
 }
 
@@ -93,7 +90,6 @@ pub type Node<'a> = GenericNode<'a, Allocation>;
 struct OptimisticAllocator {
     occupation_tracker: OccupationTracker,
     labels: HashMap<u32, usize>,
-    index_in_parent: Option<usize>,
 }
 
 impl OptimisticAllocator {
@@ -253,7 +249,6 @@ fn handle_break<'a, S: Settings>(
 
 fn recursive_block_allocation<'a, S: Settings>(
     prog: &Module<'a>,
-    func_idx: u32,
     mut nodes: Vec<liveness_dag::Node<'a>>,
     oa: &mut VecDeque<OptimisticAllocator>,
 ) -> (Vec<Node<'a>>, usize) {
@@ -371,19 +366,39 @@ fn recursive_block_allocation<'a, S: Settings>(
                         origin.node,
                         origin.output_idx,
                     );
-                    if (last_usage <= index && {
+                    if last_usage <= index && {
                         assert_eq!(
                             last_usage, index,
                             "liveness bug: last usage is before a node that uses the value"
                         );
                         true
-                    }) || occupation_tracker
+                    } {
+                        // This is the last usage of the value before the loop,
+                        // so we should try to reuse the same allocation for the loop input.
+                        // Doesn't always work, because the same input value could be used
+                        // by multiple loop inputs. Only one will be able to reuse the allocation.
+                        let allocation = oa[0].occupation_tracker.get_allocation(*origin).unwrap();
+                        let alloc_len = allocation.len();
+                        let hint_used = occupation_tracker
+                            .try_allocate_with_hint(
+                                ValueOrigin {
+                                    node: 0,
+                                    output_idx: input_idx as u32,
+                                },
+                                allocation,
+                            )
+                            .0;
+
+                        if hint_used {
+                            number_of_saved_copies += alloc_len;
+                        }
+                    } else if occupation_tracker
                         .liveness()
                         .query_if_input_is_redirected(input_idx as u32)
                     {
-                        // We can fix the allocation of this input to the current one,
-                        // because either we don't care if it is rewritten by the loop,
-                        // or we have the guarantee that it won't be changed.
+                        // This input outlives the loop body, but inside the loop
+                        // it is just forwarded unchanged to the next iteration.
+                        // We can always reuse the allocation from the outer level.
                         let allocation = oa[0].occupation_tracker.get_allocation(*origin).unwrap();
                         number_of_saved_copies += allocation.len();
 
@@ -400,7 +415,6 @@ fn recursive_block_allocation<'a, S: Settings>(
                 let mut loop_oa = OptimisticAllocator {
                     occupation_tracker,
                     labels: HashMap::new(),
-                    index_in_parent: Some(index),
                 };
 
                 // Allocate the rest of the input node values (inside the loop body).
@@ -408,13 +422,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                 oa.push_front(loop_oa);
 
                 let (loop_nodes, loop_saved_copies) =
-                    recursive_block_allocation::<S>(prog, func_idx, loop_nodes, oa);
-
-                let dump_path = format!(
-                    "dump/func_{}_loop_{}.txt",
-                    func_idx,
-                    oa.iter().filter_map(|oa| oa.index_in_parent).format(",")
-                );
+                    recursive_block_allocation::<S>(prog, loop_nodes, oa);
 
                 // Pop the loop allocation tracker.
                 let OptimisticAllocator {
@@ -422,8 +430,6 @@ fn recursive_block_allocation<'a, S: Settings>(
                     labels,
                     ..
                 } = oa.pop_front().unwrap();
-
-                occupation_tracker.dump(Path::new(&dump_path));
 
                 // Project the allocations back to the outer level. This will prevent
                 // the outer level from placing allocations that should survive across
@@ -534,7 +540,6 @@ pub fn optimistic_allocation<'a, S: Settings>(
     let mut oa = OptimisticAllocator {
         occupation_tracker: OccupationTracker::new(liveness),
         labels: HashMap::new(),
-        index_in_parent: None,
     };
 
     // Fix the allocation of the function inputs first
@@ -567,7 +572,7 @@ pub fn optimistic_allocation<'a, S: Settings>(
     // Do the allocation for the rest of the nodes, bottom up.
     let mut oa_stack = VecDeque::from([oa]);
     let (nodes, number_of_saved_copies) =
-        recursive_block_allocation::<S>(prog, func_idx, nodes, &mut oa_stack);
+        recursive_block_allocation::<S>(prog, nodes, &mut oa_stack);
 
     // Generate the final allocation for this block
     let OptimisticAllocator {
@@ -575,9 +580,6 @@ pub fn optimistic_allocation<'a, S: Settings>(
         labels,
         ..
     } = oa_stack.pop_front().unwrap();
-
-    let dump_path = format!("dump/func_{}.txt", func_idx);
-    occupation_tracker.dump(Path::new(&dump_path));
 
     let allocation = occupation_tracker.into_allocations(labels);
 

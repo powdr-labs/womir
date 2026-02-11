@@ -1,22 +1,25 @@
 use crate::{
+    interpreter::linker,
     loader::{
+        rwm::{flattening::Context as RwmCtx, settings::Settings as RwmSettings},
         settings::{ComparisonFunction, JumpCondition, Settings, TrapReason, WasmOpInput},
-        wom::{
-            flattening::Context,
-            settings::{ReturnInfosToCopy, Settings as WomSettings},
-        },
+        wom::settings::{ReturnInfosToCopy, Settings as WomSettings},
     },
     utils::tree::Tree,
-    wom_interpreter::linker,
 };
-use std::{fmt::Display, ops::Range};
+use std::{fmt::Display, marker::PhantomData, ops::Range};
 use wasmparser::{Operator as Op, ValType};
 
-type Ctx<'a, 'b> = Context<'a, 'b, GenericIrSetting>;
+type WomCtx<'a, 'b> = crate::loader::wom::flattening::Context<'a, 'b, GenericIrSetting<'a>>;
 
-pub struct GenericIrSetting;
+#[derive(Default, Clone)]
+pub struct GenericIrSetting<'a> {
+    _phantom: PhantomData<&'a u32>,
+}
 
-impl Settings for GenericIrSetting {
+impl<'a> Settings for GenericIrSetting<'a> {
+    type Directive = Directive<'a>;
+
     fn bytes_per_word() -> u32 {
         4
     }
@@ -32,30 +35,204 @@ impl Settings for GenericIrSetting {
     fn is_relative_jump_available() -> bool {
         true
     }
+
+    fn is_label(directive: &Self::Directive) -> Option<&str> {
+        if let Directive::Label { id, .. } = directive {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    fn to_plain_local_jump(directive: Directive) -> Result<String, Directive> {
+        if let Directive::Jump { target } = directive {
+            Ok(target)
+        } else {
+            Err(directive)
+        }
+    }
+
+    fn emit_jump(&self, label: String) -> Directive<'a> {
+        Directive::Jump { target: label }
+    }
 }
 
 #[allow(refining_impl_trait)]
-impl<'a> WomSettings<'a> for GenericIrSetting {
-    type Directive = Directive<'a>;
+impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
+    fn emit_label(&self, _c: &mut RwmCtx, name: String) -> Directive<'a> {
+        Directive::Label {
+            id: name,
+            frame_size: None,
+        }
+    }
 
+    fn emit_trap(&self, _c: &mut RwmCtx, trap: TrapReason) -> Directive<'a> {
+        Directive::Trap { reason: trap }
+    }
+
+    fn emit_copy(&self, _c: &mut RwmCtx, src_reg: u32, dest_reg: u32) -> Directive<'a> {
+        Directive::Copy {
+            src_word: src_reg,
+            dest_word: dest_reg,
+        }
+    }
+
+    fn emit_conditional_jump(
+        &self,
+        _c: &mut RwmCtx,
+        condition_type: JumpCondition,
+        label: String,
+        condition_ptr: Range<u32>,
+    ) -> Directive<'a> {
+        match condition_type {
+            JumpCondition::IfZero => Directive::JumpIfZero {
+                target: label,
+                condition: condition_ptr.start,
+            },
+            JumpCondition::IfNotZero => Directive::JumpIf {
+                target: label,
+                condition: condition_ptr.start,
+            },
+        }
+    }
+
+    fn emit_conditional_jump_cmp_immediate(
+        &self,
+        c: &mut RwmCtx<'a, '_>,
+        cmp: ComparisonFunction,
+        value_ptr: Range<u32>,
+        immediate: u32,
+        label: String,
+    ) -> Vec<Directive<'a>> {
+        let cmp_op = match cmp {
+            ComparisonFunction::Equal => Op::I32Eq,
+            ComparisonFunction::GreaterThanOrEqualUnsigned => Op::I32GeU,
+            ComparisonFunction::LessThanUnsigned => Op::I32LtU,
+        };
+
+        let const_value = c.allocate_tmp_type::<Self>(ValType::I32);
+        let comparison = c.allocate_tmp_type::<Self>(ValType::I32);
+        vec![
+            Directive::WASMOp {
+                op: Op::I32Const {
+                    value: immediate as i32,
+                },
+                inputs: Vec::new(),
+                output: Some(const_value.clone()),
+            },
+            Directive::WASMOp {
+                op: cmp_op,
+                inputs: vec![value_ptr.clone(), const_value],
+                output: Some(comparison.clone()),
+            },
+            Directive::JumpIf {
+                target: label,
+                condition: comparison.start,
+            },
+        ]
+    }
+
+    fn emit_relative_jump(&self, _c: &mut RwmCtx, offset_ptr: Range<u32>) -> Directive<'a> {
+        Directive::JumpOffset {
+            offset: offset_ptr.start,
+        }
+    }
+
+    fn emit_return(
+        &self,
+        _c: &mut RwmCtx,
+        ret_pc_ptr: Range<u32>,
+        caller_fp_ptr: Range<u32>,
+    ) -> Directive<'a> {
+        Directive::Return {
+            ret_pc: ret_pc_ptr.start,
+            ret_fp: caller_fp_ptr.start,
+        }
+    }
+
+    fn emit_imported_call(
+        &self,
+        _c: &mut RwmCtx,
+        module: &'a str,
+        function: &'a str,
+        inputs: &[WasmOpInput],
+        outputs: Vec<Range<u32>>,
+    ) -> Directive<'a> {
+        Directive::ImportedCall {
+            module,
+            function,
+            inputs: inputs.iter().cloned().map(unwrap_register).collect(),
+            outputs,
+        }
+    }
+
+    fn emit_function_call(
+        &self,
+        _c: &mut RwmCtx,
+        function_label: String,
+        function_frame_offset: u32,
+        saved_ret_pc_ptr: Range<u32>,
+        saved_caller_fp_ptr: Range<u32>,
+    ) -> Directive<'a> {
+        Directive::RwCall {
+            target: function_label,
+            new_frame_offset: function_frame_offset,
+            saved_ret_pc: saved_ret_pc_ptr.start,
+            saved_caller_fp: saved_caller_fp_ptr.start,
+        }
+    }
+
+    fn emit_indirect_call(
+        &self,
+        _c: &mut RwmCtx,
+        target_pc_ptr: Range<u32>,
+        function_frame_offset: u32,
+        saved_ret_pc_ptr: Range<u32>,
+        saved_caller_fp_ptr: Range<u32>,
+    ) -> impl Into<Tree<Self::Directive>> {
+        Directive::RwCallIndirect {
+            target_pc: target_pc_ptr.start,
+            new_frame_offset: function_frame_offset,
+            saved_ret_pc: saved_ret_pc_ptr.start,
+            saved_caller_fp: saved_caller_fp_ptr.start,
+        }
+    }
+
+    fn emit_wasm_op(
+        &self,
+        _c: &mut RwmCtx,
+        op: Op<'a>,
+        inputs: &[WasmOpInput],
+        output: Option<Range<u32>>,
+    ) -> Directive<'a> {
+        Directive::WASMOp {
+            op,
+            inputs: inputs.iter().cloned().map(unwrap_register).collect(),
+            output,
+        }
+    }
+}
+
+#[allow(refining_impl_trait)]
+impl<'a> WomSettings<'a> for GenericIrSetting<'a> {
     fn use_non_deterministic_function_outputs() -> bool {
         true
     }
 
-    fn emit_label(&self, _c: &mut Ctx, name: String, frame_size: Option<u32>) -> Directive<'a> {
+    fn emit_label(&self, _c: &mut WomCtx, name: String, frame_size: Option<u32>) -> Directive<'a> {
         Directive::Label {
             id: name,
             frame_size,
         }
     }
 
-    fn emit_trap(&self, _c: &mut Ctx, trap: TrapReason) -> Directive<'a> {
+    fn emit_trap(&self, _c: &mut WomCtx, trap: TrapReason) -> Directive<'a> {
         Directive::Trap { reason: trap }
     }
 
     fn emit_allocate_label_frame(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         label: String,
         result_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -67,7 +244,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_allocate_value_frame(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         frame_size_ptr: Range<u32>,
         result_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -77,7 +254,12 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
         }
     }
 
-    fn emit_copy(&self, _c: &mut Ctx, src_ptr: Range<u32>, dest_ptr: Range<u32>) -> Directive<'a> {
+    fn emit_copy(
+        &self,
+        _c: &mut WomCtx,
+        src_ptr: Range<u32>,
+        dest_ptr: Range<u32>,
+    ) -> Directive<'a> {
         Directive::Copy {
             src_word: src_ptr.start,
             dest_word: dest_ptr.start,
@@ -86,7 +268,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_copy_into_frame(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         src_ptr: Range<u32>,
         dest_frame_ptr: Range<u32>,
         dest_offset: Range<u32>,
@@ -100,7 +282,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_copy_from_frame(
         &self,
-        _c: &mut Context<'a, '_, Self>,
+        _c: &mut WomCtx,
         _source_frame_ptr: Range<u32>,
         _source_offset: Range<u32>,
         _dest_ptr: Range<u32>,
@@ -111,7 +293,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_jump_into_loop(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         loop_label: String,
         loop_frame_ptr: Range<u32>,
         ret_info_to_copy: Option<ReturnInfosToCopy>,
@@ -144,29 +326,9 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
         directives
     }
 
-    fn is_label(directive: &Self::Directive) -> Option<&str> {
-        if let Directive::Label { id, .. } = directive {
-            Some(id)
-        } else {
-            None
-        }
-    }
-
-    fn to_plain_local_jump(directive: Directive) -> Result<String, Directive> {
-        if let Directive::Jump { target } = directive {
-            Ok(target)
-        } else {
-            Err(directive)
-        }
-    }
-
-    fn emit_jump(&self, label: String) -> Directive<'a> {
-        Directive::Jump { target: label }
-    }
-
     fn emit_conditional_jump(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         condition_type: JumpCondition,
         label: String,
         condition_ptr: Range<u32>,
@@ -185,7 +347,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_conditional_jump_cmp_immediate(
         &self,
-        c: &mut Ctx,
+        c: &mut WomCtx,
         cmp: ComparisonFunction,
         value_ptr: Range<u32>,
         immediate: u32,
@@ -219,7 +381,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
         ]
     }
 
-    fn emit_relative_jump(&self, _c: &mut Ctx, offset_ptr: Range<u32>) -> Directive<'a> {
+    fn emit_relative_jump(&self, _c: &mut WomCtx, offset_ptr: Range<u32>) -> Directive<'a> {
         Directive::JumpOffset {
             offset: offset_ptr.start,
         }
@@ -227,7 +389,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_jump_out_of_loop(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         target_label: String,
         target_frame_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -241,7 +403,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_return(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         ret_pc_ptr: Range<u32>,
         caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
@@ -253,7 +415,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_imported_call(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         module: &'a str,
         function: &'a str,
         inputs: Vec<Range<u32>>,
@@ -269,13 +431,13 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_function_call(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         function_label: String,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
         saved_caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
-        Directive::Call {
+        Directive::WomCall {
             target: function_label,
             new_frame_ptr: function_frame_ptr.start,
             saved_ret_pc: saved_ret_pc_ptr.start,
@@ -285,13 +447,13 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_indirect_call(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         target_pc_ptr: Range<u32>,
         function_frame_ptr: Range<u32>,
         saved_ret_pc_ptr: Range<u32>,
         saved_caller_fp_ptr: Range<u32>,
     ) -> Directive<'a> {
-        Directive::CallIndirect {
+        Directive::WomCallIndirect {
             target_pc: target_pc_ptr.start,
             new_frame_ptr: function_frame_ptr.start,
             saved_ret_pc: saved_ret_pc_ptr.start,
@@ -301,7 +463,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting {
 
     fn emit_wasm_op(
         &self,
-        _c: &mut Ctx,
+        _c: &mut WomCtx,
         op: Op<'a>,
         inputs: Vec<WasmOpInput>,
         output: Option<Range<u32>>,
@@ -397,9 +559,24 @@ pub enum Directive<'a> {
         ret_pc: Register, // size: PTR
         ret_fp: Register, // size: PTR
     },
-    /// Calls a normal function.
+    /// Calls a normal function with RW calling convention.
+    RwCall {
+        target: String,
+        new_frame_offset: u32,
+        saved_ret_pc: Register,    // size: PTR
+        saved_caller_fp: Register, // size: PTR
+    },
+    /// Calls a normal function indirectly with RW calling convention,
+    /// using a function reference as target.
+    RwCallIndirect {
+        target_pc: Register, // size: i32
+        new_frame_offset: u32,
+        saved_ret_pc: Register,    // size: PTR
+        saved_caller_fp: Register, // size: PTR
+    },
+    /// Calls a normal function with WOM calling convention.
     /// Use `JumpAndActivateFrame` for a tail call.
-    Call {
+    WomCall {
         target: String,
         new_frame_ptr: Register, // size: PTR
         /// Where, in the new frame, to save the return PC at the call site.
@@ -407,8 +584,9 @@ pub enum Directive<'a> {
         /// Where, in the new frame, to save the frame pointer of the frame we just left.
         saved_caller_fp: Register, // size: PTR
     },
-    /// Calls a normal function indirectly, using a function reference.
-    CallIndirect {
+    /// Calls a normal function indirectly with WOM calling convention,
+    /// using a function reference as target.
+    WomCallIndirect {
         // Notice the target_pc is an i32, not a PTR. This is because
         // the value is taken from the memory, and for now, code pointers are fixed to
         // 32 bits there.
@@ -518,7 +696,29 @@ impl Display for Directive<'_> {
             Directive::Return { ret_pc, ret_fp } => {
                 write!(f, "    Return ${ret_pc} ${ret_fp}")?;
             }
-            Directive::Call {
+            Directive::RwCall {
+                target,
+                new_frame_offset,
+                saved_ret_pc,
+                saved_caller_fp,
+            } => {
+                write!(
+                    f,
+                    "    RwCall {target} {new_frame_offset} -> $(FP+{new_frame_offset})[{saved_ret_pc}] $(FP+{new_frame_offset})[{saved_caller_fp}]"
+                )?;
+            }
+            Directive::RwCallIndirect {
+                target_pc,
+                new_frame_offset,
+                saved_ret_pc,
+                saved_caller_fp,
+            } => {
+                write!(
+                    f,
+                    "    RwCallIndirect ${target_pc} {new_frame_offset} -> $(FP+{new_frame_offset})[{saved_ret_pc}] $(FP+{new_frame_offset})[{saved_caller_fp}]"
+                )?;
+            }
+            Directive::WomCall {
                 target,
                 new_frame_ptr,
                 saved_ret_pc,
@@ -526,10 +726,10 @@ impl Display for Directive<'_> {
             } => {
                 write!(
                     f,
-                    "    Call {target} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
+                    "    WomCall {target} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
                 )?;
             }
-            Directive::CallIndirect {
+            Directive::WomCallIndirect {
                 target_pc,
                 new_frame_ptr,
                 saved_ret_pc,
@@ -537,7 +737,7 @@ impl Display for Directive<'_> {
             } => {
                 write!(
                     f,
-                    "    CallIndirect ${target_pc} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
+                    "    WomCallIndirect ${target_pc} ${new_frame_ptr} -> ${new_frame_ptr}[{saved_ret_pc}] ${new_frame_ptr}[{saved_caller_fp}]"
                 )?;
             }
             Directive::ImportedCall {

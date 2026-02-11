@@ -33,7 +33,7 @@ use wasmparser::{Operator as Op, ValType};
 
 use crate::{
     loader::{
-        FunctionRef, LabelGenerator, Module, assert_ptr_size, assert_reg,
+        FunctionAsm, FunctionRef, LabelGenerator, Module, assert_ptr_size, assert_reg,
         blockless_dag::{BlocklessDag, BreakTarget, Node, Operation, TargetType},
         dag::{NodeInput, ValueOrigin},
         settings::{
@@ -48,14 +48,6 @@ use crate::{
     },
     utils::tree::Tree,
 };
-
-/// An assembly-like representation for a write-once memory machine.
-#[derive(Debug, Clone)]
-pub struct WriteOnceAsm<D> {
-    pub func_idx: u32,
-    pub frame_size: u32,
-    pub directives: Vec<D>,
-}
 
 pub struct Context<'a, 'b, S: Settings<'a> + ?Sized> {
     pub program: &'b Module<'a>,
@@ -130,7 +122,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     label_gen: &AtomicU32,
     dag: BlocklessDag<'a>,
     func_idx: u32,
-) -> (WriteOnceAsm<S::Directive>, usize) {
+) -> (FunctionAsm<S::Directive>, usize) {
     // Assuming pointer size is 4 bytes, we reserve the space for return PC and return FP.
     let mut header_reg_gen = RegisterGenerator::<S>::new();
 
@@ -218,9 +210,9 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let directives = Tree::Node(directives_with_labels).flatten();
 
     (
-        WriteOnceAsm {
+        FunctionAsm {
             func_idx,
-            frame_size,
+            frame_size: Some(frame_size),
             directives,
         },
         number_of_saved_copies,

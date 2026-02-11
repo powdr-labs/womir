@@ -73,6 +73,13 @@ pub enum MemoryEntry {
     NullFuncAddr,
 }
 
+/// An assembly-like representation of a function.
+#[derive(Debug, Clone)]
+pub struct FunctionAsm<D> {
+    pub func_idx: u32,
+    pub frame_size: Option<u32>,
+    pub directives: Vec<D>,
+}
 /// Helper struct to track unallocated memory.
 /// This is used to allocate the memory for the tables and the globals.
 struct MemoryAllocator {
@@ -441,22 +448,33 @@ pub trait FunctionProcessingStage<'a, S: Settings>: Sized {
 /// Different stages of processing a function.
 ///
 /// The common passes betwen Wom and RWM.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CommonStages<'a> {
-    // Common stages
+    /// The function body as parsed by wasmparser, without any processing.
     Unparsed(FunctionBody<'a>),
+    /// The function represented as a tree of blocks and loops, with if blocks
+    /// converted to equivalent blocks with br_if and br instructions.
     BlockTree {
         locals_types: Vec<ValType>,
         tree: BlockTree<'a>,
     },
+    /// The block tree with the data flow of reads and writes to locals lifted
+    /// to explicit inputs and outputs of the blocks.
     LiftedBlockTree {
         local_types: Vec<ValType>,
         tree: LiftedBlockTree<'a>,
     },
+    /// The DAG representation of the function. Nodes reference the nodes that
+    /// produce their inputs. Blocks and loops are nodes in the parent block.
     PlainDag(Dag<'a>),
+    /// The DAG after collapsing constants into instructions that use them, if possible.
     ConstCollapsedDag(Dag<'a>),
+    /// The DAG after deduplicating constant definitions.
     ConstDedupDag(Dag<'a>),
+    /// The DAG after removing dangling nodes that do not contribute to the output.
     DanglingOptDag(Dag<'a>),
+    /// The blockless DAG representation of the function, where block nodes are expanded
+    /// into the parent block and labels are introduced. Loops are still kept as blocks.
     BlocklessDag(BlocklessDag<'a>),
 }
 
@@ -555,6 +573,7 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
 /// A partially loaded WASM program, with all the functions in some processing stage.
 ///
 /// To fully process the functions, call `process_all_functions()`.
+#[derive(Debug, Clone)]
 pub struct PartiallyParsedProgram<'a, S: Settings> {
     /// The settings used for the program.
     pub s: S,
@@ -1555,7 +1574,7 @@ fn read_locals<'a>(
     Ok(local_types)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Instruction<'a> {
     WASMOp(Operator<'a>),
     /// BrTable needs to be transformed, so we can't use the original
@@ -1571,13 +1590,13 @@ pub enum Instruction<'a> {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BlockKind {
     Block,
     Loop,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block<'a> {
     block_kind: BlockKind,
     interface_type: Arc<FuncType>,
@@ -1592,7 +1611,7 @@ pub struct Block<'a> {
     carried_locals: BTreeSet<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Element<'a> {
     Ins(Instruction<'a>),
     Block(Block<'a>),
@@ -1644,7 +1663,7 @@ fn split_func_ref_regs<S: Settings + ?Sized>(func_ref_reg: Range<u32>) -> [Range
     let i32_word_count = word_count_type::<S>(ValType::I32);
 
     let type_index = func_ref_reg.start..func_ref_reg.start + i32_word_count;
-    let func_addr = type_index.end..type_index.end + i32_word_count;
+    let func_addr = type_index.end..type_index.end + S::words_per_ptr();
     let func_frame_size = func_addr.end..func_addr.end + i32_word_count;
 
     assert_eq!(func_frame_size.end, func_ref_reg.end);

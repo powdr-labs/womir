@@ -1,12 +1,12 @@
 use crate::loader::rwm::register_allocation::Allocation;
 use crate::loader::{dag::ValueOrigin, rwm::liveness_dag::Liveness};
+use crate::utils::range_consolidation::RangeConsolidationIterator;
 use iset::IntervalMap;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::io::Write;
 use std::{
-    collections::BTreeMap, fs::File, io::BufWriter, iter::FusedIterator, num::NonZeroU32,
-    ops::Range, path::Path,
+    collections::BTreeMap, fs::File, io::BufWriter, num::NonZeroU32, ops::Range, path::Path,
 };
 
 #[derive(Debug)]
@@ -40,14 +40,14 @@ pub struct Occupation {
 }
 
 impl Occupation {
-    fn reg_occupation(&self, live_range: Range<usize>) -> Vec<Range<u32>> {
+    pub fn reg_occupation(&self, live_range: Range<usize>) -> Vec<Range<u32>> {
         self.alive_interval_map
             .values(live_range)
             .map(move |entry_idx| self.allocations[*entry_idx].reg_range.clone())
             .collect_vec()
     }
 
-    pub fn consolidated_reg_occupation(
+    fn consolidated_reg_occupation(
         &self,
         live_range: Range<usize>,
     ) -> impl Iterator<Item = Range<u32>> {
@@ -57,48 +57,13 @@ impl Occupation {
 }
 
 /// Tracks what registers are currently occupied by what values.
+#[derive(Debug)]
 pub struct OccupationTracker {
     liveness: Liveness,
     occupation: Occupation,
     origin_map: BTreeMap<ValueOrigin, usize>,
     call_frames: HashMap<usize, u32>,
 }
-
-/// Iterates over the consolidated ranges of a given set of overlapping ranges.
-struct RangeConsolidationIterator<T> {
-    reverse_sorted_ranges: Vec<Range<T>>,
-}
-
-impl<T: Ord> RangeConsolidationIterator<T> {
-    fn new(occupied_ranges: Vec<Range<T>>) -> Self {
-        let mut reverse_sorted_ranges = occupied_ranges;
-        reverse_sorted_ranges.sort_unstable_by(|a, b| b.start.cmp(&a.start));
-        Self {
-            reverse_sorted_ranges,
-        }
-    }
-}
-
-impl<T: Ord> Iterator for RangeConsolidationIterator<T> {
-    type Item = Range<T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut curr = self.reverse_sorted_ranges.pop()?;
-
-        while let Some(next) = self.reverse_sorted_ranges.last() {
-            if next.start <= curr.end {
-                // Overlaps/adjacent: extend current range
-                let next = self.reverse_sorted_ranges.pop().unwrap();
-                curr.end = curr.end.max(next.end);
-            } else {
-                break;
-            }
-        }
-        Some(curr)
-    }
-}
-
-impl<T: Ord> FusedIterator for RangeConsolidationIterator<T> {}
 
 impl OccupationTracker {
     pub fn new(liveness: Liveness) -> Self {
@@ -209,14 +174,24 @@ impl OccupationTracker {
         call_index: usize,
         output_sizes: impl Iterator<Item = u32>,
     ) -> u32 {
-        // Find the highest allocated register at this point
+        // For the frame start, find the highest allocated register at this point,
+        // excluding the outputs of this call itself, that may already be allocated
+        // and can overlap with the call frame, since they are only produced at the
+        // end of the call.
         let frame_start = self
             .occupation
             .alive_interval_map
             .values_overlap(call_index)
-            .map(|entry_idx| {
+            .filter_map(|entry_idx| {
                 let alloc = &self.occupation.allocations[*entry_idx];
-                alloc.reg_range.end
+                if let AllocationType::Value(origin) = alloc.kind
+                    && origin.node == call_index
+                {
+                    // This is an output of the call itself, ignore it.
+                    None
+                } else {
+                    Some(alloc.reg_range.end)
+                }
             })
             .max()
             .unwrap_or(0);
@@ -322,7 +297,7 @@ impl OccupationTracker {
         }
     }
 
-    pub fn dump(&self, path: &Path) {
+    pub fn _dump(&self, path: &Path) {
         let mut file =
             BufWriter::new(File::create(path).expect("could not create allocation dump file"));
         for (life_range, alloc) in self.occupation.alive_interval_map.unsorted_iter() {

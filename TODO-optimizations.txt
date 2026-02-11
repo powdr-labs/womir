@@ -1,5 +1,7 @@
 This files describes all the optimizations ideas we left out for now.
 
+Things that are not needed if the WASM was optimized in the first place:
+
 - [block_tree]: track whether a block is ever broken to (explicitly or
   implictly), so that we know if anything after it is dead code to be
   removed. Dead code removal translates to less data dependency in the
@@ -10,7 +12,9 @@ This files describes all the optimizations ideas we left out for now.
 - [locals_data_flow]: track locals permutation. If some locals are read into
   a block, but in the end they are just output unmodified (either on stack
   or on some local), this can be resolved statically when building the DAG,
-  eliding copies.
+  eliding copies. It is hard to imagine why this would happen in optimized code.
+
+Unlikely to be useful optimizations:
 
 - [locals_data_flow]: sometimes a loop needs to take locals as inputs
   just to output them in certain breaks, unmodified. Such locals would
@@ -25,6 +29,8 @@ This files describes all the optimizations ideas we left out for now.
   detects a conflict. It may be possible to model the problem to a SAT
   solver or something like that.
 
+Likely to be useful optimizations
+
 - if there are more than one loop nested inside each other, and the inner
   loop falls through the outer loop, which then breaks or falls through
   again, it is better to have the inner loop break directly to the final
@@ -32,9 +38,12 @@ This files describes all the optimizations ideas we left out for now.
   each frame barrier potentially adds multiple copies.
 
 - [tail call]: a call immediately followed by a return can be optimized
-  to a tail call. We can even do this for calls where its outputs
+  to a tail call. In WOM we can even do this for calls where its outputs
   are not related to the return values, because we can set the
-  return registers before the tail call.
+  return registers before the tail call. Note on RW: it seems the chosen
+  calling convention for RW, where the return address and frame pointer
+  are stored after the arguments, makes this optimization impossible in
+  most cases. We should revise the calling convention eventually.
 
 - [liveness]: calculate the liveness for all possible control flow paths,
   releasing values earlier when possible, which may reduce register
@@ -63,3 +72,15 @@ This files describes all the optimizations ideas we left out for now.
  
   It might leave holes in the register allocation, but the
   optimization problem is NP-hard, so we must stop somewhere.
+
+- [(rw)constant-lift]: in RW mode, since loops are executed inside the same
+  frame as the function, Const instructions that are executed repeatedly
+  should be lifted to outside of the loops. It is theoretically possible
+  for this optimization to worsen the performance, in case there are unlikely
+  branches inside the loop with Const instructions that would otherwise
+  never be executed. These should only a problem in very specific cases,
+  but to work around that, we can only lift Consts that are unconditionally
+  executed in the loop.
+
+- [(rw)constant-deduplication]: unlike in WOM mode, constant deduplication
+  should work across loop boundaries.
