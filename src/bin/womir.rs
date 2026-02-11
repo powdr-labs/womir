@@ -126,11 +126,11 @@ fn main() -> wasmparser::Result<()> {
             trace: bool,
 
             /// Comma separated arguments for the function (u32)
-            #[arg(short,long, value_delimiter = ',', value_parser = clap::value_parser!(u32), default_value = "")]
+            #[arg(short,long, value_delimiter = ',', value_parser = clap::value_parser!(u32))]
             args: Vec<u32>,
 
             /// Comma separated data inputs (u32)
-            #[arg(short, long, value_delimiter = ',', value_parser = clap::value_parser!(u32), default_value = "")]
+            #[arg(short, long, value_delimiter = ',', value_parser = clap::value_parser!(u32))]
             inputs: Vec<u32>,
         },
     }
