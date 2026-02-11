@@ -2156,9 +2156,6 @@ impl<'a> MemoryAccessor<'a> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         let value = self.ram.get(ram_addr);
-        if byte_addr == 7774620 {
-            println!("### get_word: byte_addr={byte_addr}, value={value}");
-        }
         Ok(value)
     }
 
