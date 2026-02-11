@@ -244,8 +244,12 @@ mod tests {
 
         for (exec_model, program) in pipelines {
             println!("Testing execution model: {exec_model:?}");
-            let mut interpreter =
-                Interpreter::new(program, exec_model, DataInput::new(data_inputs.clone()));
+            let mut interpreter = Interpreter::new(
+                program,
+                exec_model,
+                DataInput::new(data_inputs.clone()),
+                false,
+            );
             let got_output = interpreter.run(main_function, func_inputs);
             assert_eq!(got_output, outputs);
         }
@@ -595,7 +599,7 @@ mod tests {
                     for (program, exec_model) in pipelines {
                         println!("  Execution model: {:?}", exec_model);
                         let mut interpreter =
-                            Interpreter::new(program, exec_model, SpectestExternalFunctions);
+                            Interpreter::new(program, exec_model, SpectestExternalFunctions, false);
 
                         asserts
                             .iter()
