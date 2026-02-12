@@ -15,6 +15,7 @@ use core::panic;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::ops::Range;
 use wasmparser::Operator as Op;
 
 // How a null reference is represented in the VROM
@@ -38,8 +39,8 @@ trait RegisterBank {
     /// Set a concrete u32 value at the given absolute address.
     fn set(&mut self, addr: u32, value: u32);
 
-    /// Copy a u32 value (potentially a future) from one register to another.
-    fn copy(&mut self, src: u32, dest: u32);
+    /// Copy a range of u32 values (potentially futures) from one register range to another.
+    fn copy_range(&mut self, src: Range<u32>, dest: Range<u32>);
 
     /// Set a future value at the given absolute address.
     /// Only valid for write-once execution model.
@@ -100,6 +101,33 @@ impl WriteOnceRegisterBank {
         self.future_counter += 1;
         future
     }
+
+    fn copy_word(&mut self, src: u32, dest: u32) {
+        let value = self.get(src);
+        let dest_slot = &mut self.regs[dest as usize];
+        match (*dest_slot, value) {
+            (RegisterValue::Unassigned, RegisterValue::Unassigned) => {
+                // This is important to catch to prevent bugs.
+                panic!("Attempted to assign an unassigned value to register");
+            }
+            (RegisterValue::Unassigned, _) => {
+                *dest_slot = value;
+            }
+            (RegisterValue::Future(future), RegisterValue::Concrete(v)) => {
+                // Assigning Concrete values to Futures materializes it.
+                if let Some(old_value) = self.future_assignments.insert(future, v) {
+                    assert_eq!(old_value, v, "Attempted to overwrite a value in register");
+                }
+                log::debug!("Future {future} materialized to value {v}");
+            }
+            (_, _) => {
+                assert_eq!(
+                    *dest_slot, value,
+                    "Attempted to overwrite a value in register"
+                );
+            }
+        }
+    }
 }
 
 impl RegisterBank for WriteOnceRegisterBank {
@@ -159,30 +187,9 @@ impl RegisterBank for WriteOnceRegisterBank {
         }
     }
 
-    fn copy(&mut self, src: u32, dest: u32) {
-        let value = self.get(src);
-        let dest_slot = &mut self.regs[dest as usize];
-        match (*dest_slot, value) {
-            (RegisterValue::Unassigned, RegisterValue::Unassigned) => {
-                // This is important to catch to prevent bugs.
-                panic!("Attempted to assign an unassigned value to register");
-            }
-            (RegisterValue::Unassigned, _) => {
-                *dest_slot = value;
-            }
-            (RegisterValue::Future(future), RegisterValue::Concrete(v)) => {
-                // Assigning Concrete values to Futures materializes it.
-                if let Some(old_value) = self.future_assignments.insert(future, v) {
-                    assert_eq!(old_value, v, "Attempted to overwrite a value in register");
-                }
-                log::debug!("Future {future} materialized to value {v}");
-            }
-            (_, _) => {
-                assert_eq!(
-                    *dest_slot, value,
-                    "Attempted to overwrite a value in register"
-                );
-            }
+    fn copy_range(&mut self, src: Range<u32>, dest: Range<u32>) {
+        for (src_reg, dest_reg) in src.zip_eq(dest) {
+            self.copy_word(src_reg, dest_reg);
         }
     }
 
@@ -224,9 +231,19 @@ impl RegisterBank for ReadWriteRegisterBank {
         self.regs[addr] = value;
     }
 
-    fn copy(&mut self, src: u32, dest: u32) {
-        let value = self.get(src).as_concrete();
-        self.set(dest, value);
+    fn copy_range(&mut self, src: Range<u32>, dest: Range<u32>) {
+        assert_eq!(src.len(), dest.len());
+        if src.len() == 1 {
+            // Optimize the common case of copying a single word to avoid the overhead of collect_vec()
+            let value = self.get(src.start).as_concrete();
+            self.set(dest.start, value);
+        } else {
+            // Read all the values first to allow for overlapping src and dest
+            let value = src.map(|addr| self.get(addr).as_concrete()).collect_vec();
+            for (dest, value) in dest.zip_eq(value) {
+                self.set(dest, value);
+            }
+        }
     }
 
     fn allocate(&mut self, _size: u32) -> u32 {
@@ -1307,9 +1324,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let selected = inputs[if condition != 0 { 0 } else { 1 }].clone();
                         let output = output.unwrap();
-                        for (src_reg, dest_reg) in selected.zip_eq(output) {
-                            t.copy_reg_relative(src_reg, dest_reg);
-                        }
+                        t.copy_reg_range_relative(selected, output);
                     }
                     Op::GlobalGet { global_index } => {
                         let Global::Mutable(global_info) =
@@ -1748,7 +1763,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     src_word,
                     dest_word,
                 } => {
-                    t.copy_reg_relative(src_word, dest_word);
+                    t.copy_reg_range_relative(src_word..src_word + 1, dest_word..dest_word + 1);
                 }
                 Directive::CopyIntoFrame {
                     src_word,
@@ -1964,13 +1979,13 @@ mod trace {
             addr.map(|i| self.get_reg(i))
         }
 
-        pub fn copy_reg_relative(&mut self, src: u32, dest: u32) {
-            self.copy_reg(src, self.i.fp, dest);
+        pub fn copy_reg_range_relative(&mut self, src: Range<u32>, dest: Range<u32>) {
+            self.copy_reg_range(src, self.i.fp, dest);
         }
 
         pub fn copy_reg_into_frame(&mut self, src: u32, dest_frame: u32, dest: u32) {
             let target_fp = self.get_reg(dest_frame);
-            self.copy_reg(src, target_fp, dest);
+            self.copy_reg_range(src..src + 1, target_fp, dest..dest + 1);
         }
 
         pub fn set_reg_relative_u32(&mut self, addr: Range<u32>, value: u32) {
@@ -2061,19 +2076,28 @@ mod trace {
             });
         }
 
-        fn copy_reg(&mut self, src_offset: u32, dest_fp: u32, dest_offset: u32) {
-            let src_addr = self.i.fp + src_offset;
-            let value = self.i.regs.get(src_addr);
-            self.i.regs.copy(src_addr, dest_fp + dest_offset);
-            self.reads.push(ReadOp {
-                addr: src_offset,
-                value,
-            });
-            self.writes.push(WriteOp {
-                offset: dest_offset,
-                fp: dest_fp,
-                value,
-            });
+        fn copy_reg_range(
+            &mut self,
+            src_offset: Range<u32>,
+            dest_fp: u32,
+            dest_offset: Range<u32>,
+        ) {
+            let src_addr = (src_offset.start + self.i.fp)..(src_offset.end + self.i.fp);
+            let dest_addr = (dest_offset.start + dest_fp)..(dest_offset.end + dest_fp);
+            self.i.regs.copy_range(src_addr.clone(), dest_addr.clone());
+
+            for (src_offset, dest_addr) in src_offset.zip_eq(dest_addr) {
+                let value = self.i.regs.get(dest_addr);
+                self.reads.push(ReadOp {
+                    addr: src_offset,
+                    value,
+                });
+                self.writes.push(WriteOp {
+                    offset: dest_addr - dest_fp,
+                    fp: dest_fp,
+                    value,
+                });
+            }
         }
     }
 
