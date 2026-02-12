@@ -2086,10 +2086,10 @@ mod trace {
             let dest_addr = (dest_offset.start + dest_fp)..(dest_offset.end + dest_fp);
             self.i.regs.copy_range(src_addr.clone(), dest_addr.clone());
 
-            for (src_addr, dest_addr) in src_addr.zip_eq(dest_addr) {
+            for (src_offset, dest_addr) in src_offset.zip_eq(dest_addr) {
                 let value = self.i.regs.get(dest_addr);
                 self.reads.push(ReadOp {
-                    addr: src_addr,
+                    addr: src_offset,
                     value,
                 });
                 self.writes.push(WriteOp {
