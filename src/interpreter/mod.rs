@@ -1,6 +1,7 @@
 pub mod generic_ir;
 pub mod linker;
 
+use crate::interpreter::trace::Tracer;
 use crate::loader::Module;
 use crate::loader::{
     FunctionRef, Global, MemoryEntry, Program, Segment, WASM_PAGE_SIZE,
@@ -13,7 +14,7 @@ use crate::{
 use core::panic;
 use itertools::Itertools;
 use std::collections::HashMap;
-use std::ops::Range;
+use std::fmt::Display;
 use wasmparser::Operator as Op;
 
 // How a null reference is represented in the VROM
@@ -31,9 +32,8 @@ trait RegisterBank {
     /// Only valid for write-once execution model.
     fn allocate(&mut self, size: u32) -> u32;
 
-    /// Get the value at the given absolute address, resolved to a concrete u32.
-    /// Panics if the value cannot be resolved (e.g., unassigned or unresolved future).
-    fn get(&mut self, addr: u32) -> u32;
+    /// Get the value at the given absolute address.
+    fn get(&mut self, addr: u32) -> RegisterValue;
 
     /// Set a concrete u32 value at the given absolute address.
     fn set(&mut self, addr: u32, value: u32);
@@ -51,6 +51,32 @@ enum RegisterValue {
     Unassigned,
     Future(u32),
     Concrete(u32),
+}
+
+impl RegisterValue {
+    fn as_concrete(&self) -> u32 {
+        match self {
+            RegisterValue::Concrete(v) => *v,
+            RegisterValue::Future(future) => {
+                panic!(
+                    "Can not convert future {future} to u32. It has not been assigned a value yet."
+                );
+            }
+            RegisterValue::Unassigned => {
+                panic!("Can not convert unassigned to u32");
+            }
+        }
+    }
+}
+
+impl Display for RegisterValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegisterValue::Unassigned => write!(f, "U"),
+            RegisterValue::Future(fut) => write!(f, "F{}", fut),
+            RegisterValue::Concrete(value) => write!(f, "{}", value),
+        }
+    }
 }
 
 struct WriteOnceRegisterBank {
@@ -74,8 +100,17 @@ impl WriteOnceRegisterBank {
         self.future_counter += 1;
         future
     }
+}
 
-    fn resolve_value(&mut self, addr: u32) -> RegisterValue {
+impl RegisterBank for WriteOnceRegisterBank {
+    fn allocate(&mut self, size: u32) -> u32 {
+        let addr = self.regs.len();
+        self.regs
+            .resize_with(addr + size as usize, || RegisterValue::Unassigned);
+        addr as u32
+    }
+
+    fn get(&mut self, addr: u32) -> RegisterValue {
         let value = self.regs[addr as usize];
         match value {
             RegisterValue::Concrete(_) => value,
@@ -98,35 +133,9 @@ impl WriteOnceRegisterBank {
             }
         }
     }
-}
-
-impl RegisterBank for WriteOnceRegisterBank {
-    fn allocate(&mut self, size: u32) -> u32 {
-        let addr = self.regs.len();
-        self.regs
-            .resize_with(addr + size as usize, || RegisterValue::Unassigned);
-        addr as u32
-    }
-
-    fn get(&mut self, addr: u32) -> u32 {
-        let value = self.resolve_value(addr);
-        log::trace!("Reading register address {addr}: {value:?}");
-        match value {
-            RegisterValue::Concrete(v) => v,
-            RegisterValue::Future(future) => {
-                panic!(
-                    "Can not convert future {future} to u32. It has not been assigned a value yet."
-                );
-            }
-            RegisterValue::Unassigned => {
-                panic!("Can not convert unassigned to u32");
-            }
-        }
-    }
 
     fn set(&mut self, addr: u32, value: u32) {
         let slot = &mut self.regs[addr as usize];
-        log::trace!("Setting register address {addr}: {value}");
         match *slot {
             RegisterValue::Unassigned => {
                 *slot = RegisterValue::Concrete(value);
@@ -151,8 +160,7 @@ impl RegisterBank for WriteOnceRegisterBank {
     }
 
     fn copy(&mut self, src: u32, dest: u32) {
-        let value = self.resolve_value(src);
-        log::trace!("Copying register {src} -> {dest}: {value:?}");
+        let value = self.get(src);
         let dest_slot = &mut self.regs[dest as usize];
         match (*dest_slot, value) {
             (RegisterValue::Unassigned, RegisterValue::Unassigned) => {
@@ -181,7 +189,6 @@ impl RegisterBank for WriteOnceRegisterBank {
     fn set_future(&mut self, addr: u32) {
         let future = self.new_future();
         let slot = &mut self.regs[addr as usize];
-        log::trace!("Setting register address {addr} to future {future}");
         match *slot {
             RegisterValue::Unassigned => {
                 *slot = RegisterValue::Future(future);
@@ -204,14 +211,12 @@ impl ReadWriteRegisterBank {
 }
 
 impl RegisterBank for ReadWriteRegisterBank {
-    fn get(&mut self, addr: u32) -> u32 {
+    fn get(&mut self, addr: u32) -> RegisterValue {
         let value = self.regs.get(addr as usize).copied().unwrap_or(0);
-        log::trace!("Reading register address {addr}: {value}");
-        value
+        RegisterValue::Concrete(value)
     }
 
     fn set(&mut self, addr: u32, value: u32) {
-        log::trace!("Setting register address {addr}: {value}");
         let addr = addr as usize;
         if addr >= self.regs.len() {
             self.regs.resize(addr + 1, 0);
@@ -220,7 +225,7 @@ impl RegisterBank for ReadWriteRegisterBank {
     }
 
     fn copy(&mut self, src: u32, dest: u32) {
-        let value = self.get(src);
+        let value = self.get(src).as_concrete();
         self.set(dest, value);
     }
 
@@ -234,17 +239,21 @@ impl RegisterBank for ReadWriteRegisterBank {
 }
 
 pub struct Interpreter<'a, E: ExternalFunctions> {
-    // TODO: maybe these 4 initial fields should be unique per `run()` call?
+    // TODO: maybe these 6 initial fields should be unique per `run()` call?
     pc: u32,
     fp: u32,
     regs: Box<dyn RegisterBank>,
     ram: Ram,
+    call_stack: Vec<u32>,
+    trace_enabled: bool,
+    // Unchanging across `run()` calls:
     exec_model: ExecutionModel,
     func_stack_sizes: Vec<u32>,
     module: Module<'a>,
     external_functions: E,
     flat_program: Vec<Directive<'a>>,
     labels: HashMap<String, linker::LabelValue>,
+    addr_to_func_id: HashMap<u32, u32>,
 }
 
 pub trait ExternalFunctions {
@@ -284,6 +293,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         program: Program<'a, FunctionAsm<Directive<'a>>>,
         exec_model: ExecutionModel,
         external_functions: E,
+        trace_enabled: bool,
     ) -> Self {
         const START_ROM_ADDR: u32 = 0x1;
 
@@ -329,17 +339,24 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             })
             .collect::<HashMap<_, _>>();
 
+        let addr_to_func_id = labels
+            .iter()
+            .filter_map(|(_, label)| label.func_idx.map(|func_idx| (label.pc, func_idx)))
+            .collect::<HashMap<_, _>>();
         let mut interpreter = Self {
             pc: 0,
             fp: 0,
             regs,
             ram: Ram(ram),
             exec_model,
+            call_stack: Vec::new(),
+            trace_enabled,
             func_stack_sizes,
             module: program.m,
             external_functions,
             flat_program,
             labels,
+            addr_to_func_id,
         };
 
         if let Some(start_function) = interpreter.module.start_function {
@@ -368,13 +385,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             ExecutionModel::WriteOnceRegisters => {
                 // Use WOM calling convention
                 self.fp = self.allocate(func_label.frame_size.unwrap());
+                let mut regs = Tracer::new(self);
 
-                self.set_reg_relative_u32(0..1, 0); // final return pc
-                self.set_reg_relative_u32(1..2, 0); // return fp success
-                self.set_reg_relative_range(2..2 + inputs.len() as u32, inputs);
+                regs.set_reg_relative_u32(0..1, 0); // final return pc
+                regs.set_reg_relative_u32(1..2, 0); // return fp success
+                regs.set_reg_relative_range(2..2 + inputs.len() as u32, inputs);
 
                 let output_start = 2 + inputs.len() as u32;
-                self.set_reg_relative_range_future(output_start..output_start + n_outputs);
+                regs.set_reg_relative_range_future(output_start..output_start + n_outputs);
 
                 // We assume that all output futures will be resolved after run_loop()
                 output_start..output_start + n_outputs
@@ -382,29 +400,37 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             ExecutionModel::InfiniteRegisters => {
                 // Use RW calling convention
                 self.fp = 1;
+                let mut regs = Tracer::new(self);
 
-                self.set_reg_relative_range(0..inputs.len() as u32, inputs);
+                regs.set_reg_relative_range(0..inputs.len() as u32, inputs);
                 let ret_pc_reg = n_inputs.max(n_outputs);
-                self.set_reg_relative_u32(ret_pc_reg..(ret_pc_reg + 1), 0); // final return pc
-                self.set_reg_relative_u32(ret_pc_reg + 1..ret_pc_reg + 2, 0); // return fp success
+                regs.set_reg_relative_u32(ret_pc_reg..(ret_pc_reg + 1), 0); // final return pc
+                regs.set_reg_relative_u32(ret_pc_reg + 1..ret_pc_reg + 2, 0); // return fp success
 
                 0..n_outputs
             }
         };
 
         let first_fp = self.fp;
+        // Push the initial function address onto the stack for instrumentation
+        self.call_stack.push(self.addr_to_func_id[&self.pc]);
         self.run_loop();
+        // Pop the initial function address
+        self.call_stack.pop();
 
         outputs_range
-            .map(|i| self.get_reg_absolute_u32(first_fp + i))
+            .map(|i| self.regs.get(first_fp + i).as_concrete())
             .collect::<Vec<u32>>()
     }
 
     fn run_loop(&mut self) {
         let mut cycles = 0usize;
+
+        let mut t = Tracer::new(self);
         let final_fp = loop {
-            let instr = self.flat_program[self.pc as usize].clone();
-            log::trace!("PC: {}, FP: {}, Instr: {instr}", self.pc, self.fp);
+            t.reset();
+
+            let instr = t.i.flat_program[t.i.pc as usize].clone();
 
             let mut should_inc_pc = true;
 
@@ -414,13 +440,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     // do nothing
                 }
                 Directive::Return { ret_pc, ret_fp } => {
-                    let pc = self.get_reg_relative_u32(ret_pc..ret_pc + 1);
-                    let fp = self.get_reg_relative_u32(ret_fp..ret_fp + 1);
+                    let pc = t.get_reg_relative_u32(ret_pc..ret_pc + 1);
+                    let fp = t.get_reg_relative_u32(ret_fp..ret_fp + 1);
                     if pc == 0 {
                         break fp;
                     } else {
-                        self.pc = pc;
-                        self.fp = fp;
+                        // Pop the current function from the stack
+                        t.i.call_stack.pop();
+                        t.i.pc = pc;
+                        t.i.fp = fp;
                     }
                     should_inc_pc = false;
                 }
@@ -433,91 +461,91 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         // No operation, just continue
                     }
                     Op::I32Const { value } => {
-                        self.set_reg_relative_u32(output.unwrap(), value as u32);
+                        t.set_reg_relative_u32(output.unwrap(), value as u32);
                     }
                     Op::F32Const { value } => {
-                        self.set_reg_relative_u32(output.unwrap(), value.bits());
+                        t.set_reg_relative_u32(output.unwrap(), value.bits());
                     }
                     Op::I64Const { value } => {
-                        self.set_reg_relative_u64(output.unwrap(), value as u64);
+                        t.set_reg_relative_u64(output.unwrap(), value as u64);
                     }
                     Op::F64Const { value } => {
                         let value = value.bits();
-                        self.set_reg_relative_u64(output.unwrap(), value);
+                        t.set_reg_relative_u64(output.unwrap(), value);
                     }
                     Op::I32Add => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
                         let r = a.wrapping_add(b);
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Add => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = a.wrapping_add(b);
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32Sub => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
                         let r = a.wrapping_sub(b);
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Sub => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = a.wrapping_sub(b);
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32Mul => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
                         let r = a.wrapping_mul(b);
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Mul => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = a.wrapping_mul(b);
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32DivU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
 
                         if b == 0 {
                             panic!("integer divide by zero in I32DivU");
@@ -525,15 +553,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a / b;
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32DivS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
-                        let b = self.get_reg_relative_u32(b) as i32;
+                        let a = t.get_reg_relative_u32(a) as i32;
+                        let b = t.get_reg_relative_u32(b) as i32;
 
                         if b == 0 {
                             panic!("integer divide by zero in I32DivS");
@@ -544,15 +572,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a.wrapping_div(b) as u32;
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64DivU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
 
                         if b == 0 {
                             panic!("integer divide by zero in I64DivU");
@@ -560,15 +588,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a / b;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I64DivS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a) as i64;
-                        let b = self.get_reg_relative_u64(b) as i64;
+                        let a = t.get_reg_relative_u64(a) as i64;
+                        let b = t.get_reg_relative_u64(b) as i64;
 
                         if b == 0 {
                             panic!("integer divide by zero in I64DivS");
@@ -579,15 +607,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a.wrapping_div(b) as u64;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32RemU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
 
                         if b == 0 {
                             panic!("integer divide by zero in I32RemU");
@@ -595,15 +623,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a % b;
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32RemS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
-                        let b = self.get_reg_relative_u32(b) as i32;
+                        let a = t.get_reg_relative_u32(a) as i32;
+                        let b = t.get_reg_relative_u32(b) as i32;
 
                         if b == 0 {
                             panic!("integer divide by zero in I32RemS");
@@ -611,15 +639,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a.wrapping_rem(b);
 
-                        self.set_reg_relative_u32(c, r as u32);
+                        t.set_reg_relative_u32(c, r as u32);
                     }
                     Op::I64RemU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
 
                         if b == 0 {
                             panic!("integer divide by zero in I64RemU");
@@ -627,15 +655,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a % b;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I64RemS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a) as i64;
-                        let b = self.get_reg_relative_u64(b) as i64;
+                        let a = t.get_reg_relative_u64(a) as i64;
+                        let b = t.get_reg_relative_u64(b) as i64;
 
                         if b == 0 {
                             panic!("integer divide by zero in I64RemS");
@@ -643,570 +671,570 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let r = a.wrapping_rem(b);
 
-                        self.set_reg_relative_u64(c, r as u64);
+                        t.set_reg_relative_u64(c, r as u64);
                     }
                     Op::I32LtU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
 
                         let r = if a < b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64LtU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = if a < b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32LtS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
-                        let b = self.get_reg_relative_u32(b) as i32;
+                        let a = t.get_reg_relative_u32(a) as i32;
+                        let b = t.get_reg_relative_u32(b) as i32;
 
                         let r = if a < b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64LtS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a) as i64;
-                        let b = self.get_reg_relative_u64(b) as i64;
+                        let a = t.get_reg_relative_u64(a) as i64;
+                        let b = t.get_reg_relative_u64(b) as i64;
                         let r = if a < b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32LeS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
-                        let b = self.get_reg_relative_u32(b) as i32;
+                        let a = t.get_reg_relative_u32(a) as i32;
+                        let b = t.get_reg_relative_u32(b) as i32;
 
                         let r = if a <= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64LeS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a) as i64;
-                        let b = self.get_reg_relative_u64(b) as i64;
+                        let a = t.get_reg_relative_u64(a) as i64;
+                        let b = t.get_reg_relative_u64(b) as i64;
                         let r = if a <= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32LeU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
 
                         let r = if a <= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64LeU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = if a <= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32GtU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
                         let r = if a > b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64GtU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = if a > b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32GtS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
-                        let b = self.get_reg_relative_u32(b) as i32;
+                        let a = t.get_reg_relative_u32(a) as i32;
+                        let b = t.get_reg_relative_u32(b) as i32;
 
                         let r = if a > b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64GtS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a) as i64;
-                        let b = self.get_reg_relative_u64(b) as i64;
+                        let a = t.get_reg_relative_u64(a) as i64;
+                        let b = t.get_reg_relative_u64(b) as i64;
                         let r = if a > b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32GeS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
-                        let b = self.get_reg_relative_u32(b) as i32;
+                        let a = t.get_reg_relative_u32(a) as i32;
+                        let b = t.get_reg_relative_u32(b) as i32;
 
                         let r = if a >= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64GeS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a) as i64;
-                        let b = self.get_reg_relative_u64(b) as i64;
+                        let a = t.get_reg_relative_u64(a) as i64;
+                        let b = t.get_reg_relative_u64(b) as i64;
                         let r = if a >= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32GeU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
 
                         let r = if a >= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64GeU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = if a >= b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32And => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
                         let r = a & b;
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32Or => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
                         let r = a | b;
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64And => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = a & b;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I64Or => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = a | b;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I64Xor => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
                         let r = a ^ b;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32Xor => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
                         let r = a ^ b;
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32Shl => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b);
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b);
 
                         let r = a.wrapping_shl(b);
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Shl => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
 
                         let r = a.wrapping_shl(b as u32);
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I64Rotl => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b);
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b);
 
                         let r = a.rotate_left(b as u32);
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32ShrU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b) & 0x1F;
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b) & 0x1F;
 
                         let r = a.wrapping_shr(b);
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64ShrU => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b) as u32;
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b) as u32;
 
                         let r = a.wrapping_shr(b);
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32ShrS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
-                        let b = self.get_reg_relative_u32(b) & 0x1F;
+                        let a = t.get_reg_relative_u32(a) as i32;
+                        let b = t.get_reg_relative_u32(b) & 0x1F;
 
                         let r = a.wrapping_shr(b);
 
-                        self.set_reg_relative_u32(c, r as u32);
+                        t.set_reg_relative_u32(c, r as u32);
                     }
                     Op::I64ShrS => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a) as i64;
-                        let b = self.get_reg_relative_u64(b) as u32;
+                        let a = t.get_reg_relative_u64(a) as i64;
+                        let b = t.get_reg_relative_u64(b) as u32;
 
                         let r = a.wrapping_shr(b);
 
-                        self.set_reg_relative_u64(c, r as u64);
+                        t.set_reg_relative_u64(c, r as u64);
                     }
                     Op::I32Rotl => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b) & 0x1F;
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b) & 0x1F;
 
                         let r = a.rotate_left(b);
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I32Rotr => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
-                        let b = self.get_reg_relative_u32(b) & 0x1F;
+                        let a = t.get_reg_relative_u32(a);
+                        let b = t.get_reg_relative_u32(b) & 0x1F;
 
                         let r = a.rotate_right(b);
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Rotr => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
-                        let b = self.get_reg_relative_u64(b) as u32;
+                        let a = t.get_reg_relative_u64(a);
+                        let b = t.get_reg_relative_u64(b) as u32;
 
                         let r = a.rotate_right(b);
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32Clz => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
+                        let a = t.get_reg_relative_u32(a);
 
                         let r = a.leading_zeros();
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Clz => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
 
                         let r = a.leading_zeros() as u64;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32Ctz => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
+                        let a = t.get_reg_relative_u32(a);
 
                         let r = a.trailing_zeros();
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Ctz => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
 
                         let r = a.trailing_zeros() as u64;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32Popcnt => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
+                        let a = t.get_reg_relative_u32(a);
 
                         let r = a.count_ones();
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::I64Popcnt => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
 
                         let r = a.count_ones() as u64;
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::I32Extend8S => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
+                        let a = t.get_reg_relative_u32(a);
 
                         let r = (a as u8) as i8 as i32;
 
-                        self.set_reg_relative_u32(c, r as u32);
+                        t.set_reg_relative_u32(c, r as u32);
                     }
                     Op::I64Extend8S => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
 
                         let r = (a as u8) as i8 as i64;
 
-                        self.set_reg_relative_u64(c, r as u64);
+                        t.set_reg_relative_u64(c, r as u64);
                     }
                     Op::I32Extend16S => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
+                        let a = t.get_reg_relative_u32(a);
 
                         let r = (a as u16) as i16 as i32;
 
-                        self.set_reg_relative_u32(c, r as u32);
+                        t.set_reg_relative_u32(c, r as u32);
                     }
                     Op::I64Extend16S => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
 
                         let r = (a as u16) as i16 as i64;
 
-                        self.set_reg_relative_u64(c, r as u64);
+                        t.set_reg_relative_u64(c, r as u64);
                     }
                     Op::I64Extend32S => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
 
                         let r = (a as u32) as i32 as i64;
 
-                        self.set_reg_relative_u64(c, r as u64);
+                        t.set_reg_relative_u64(c, r as u64);
                     }
                     Op::I64ExtendI32U => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a);
+                        let a = t.get_reg_relative_u32(a);
 
-                        self.set_reg_relative_u64(c, a as u64);
+                        t.set_reg_relative_u64(c, a as u64);
                     }
                     Op::I64ExtendI32S => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u32(a) as i32;
+                        let a = t.get_reg_relative_u32(a) as i32;
 
-                        self.set_reg_relative_u64(c, a as u64);
+                        t.set_reg_relative_u64(c, a as u64);
                     }
                     Op::I32Eq | Op::I64Eq => {
-                        let a = self.get_reg_relative_range(inputs[0].clone()).collect_vec();
-                        let b = self.get_reg_relative_range(inputs[1].clone());
+                        let a = t.get_reg_relative_range(inputs[0].clone()).collect_vec();
+                        let b = t.get_reg_relative_range(inputs[1].clone());
                         let c = output.unwrap();
 
                         let val = if b.eq(a) { 1 } else { 0 };
-                        self.set_reg_relative_u32(c, val);
+                        t.set_reg_relative_u32(c, val);
                     }
                     Op::I32Ne | Op::I64Ne => {
-                        let a = self.get_reg_relative_range(inputs[0].clone()).collect_vec();
-                        let b = self.get_reg_relative_range(inputs[1].clone());
+                        let a = t.get_reg_relative_range(inputs[0].clone()).collect_vec();
+                        let b = t.get_reg_relative_range(inputs[1].clone());
                         let c = output.unwrap();
 
                         let val = if !b.eq(a) { 1 } else { 0 };
-                        self.set_reg_relative_u32(c, val);
+                        t.set_reg_relative_u32(c, val);
                     }
                     Op::I32Eqz | Op::I64Eqz => {
-                        let mut a = self.get_reg_relative_range(inputs[0].clone());
+                        let mut a = t.get_reg_relative_range(inputs[0].clone());
                         let c = output.unwrap();
 
                         let val = if a.all(|x| x == 0) { 1 } else { 0 };
                         drop(a);
-                        self.set_reg_relative_u32(c, val);
+                        t.set_reg_relative_u32(c, val);
                     }
                     Op::I32WrapI64 => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
 
                         let r = a as u32;
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::F32Add => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = f32::from_bits(self.get_reg_relative_u32(a));
-                        let b = f32::from_bits(self.get_reg_relative_u32(b));
+                        let a = f32::from_bits(t.get_reg_relative_u32(a));
+                        let b = f32::from_bits(t.get_reg_relative_u32(b));
 
                         let r = a + b;
                         let r = r.to_bits();
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::F32Sub => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = f32::from_bits(self.get_reg_relative_u32(a));
-                        let b = f32::from_bits(self.get_reg_relative_u32(b));
+                        let a = f32::from_bits(t.get_reg_relative_u32(a));
+                        let b = f32::from_bits(t.get_reg_relative_u32(b));
 
                         let r = a - b;
                         let r = r.to_bits();
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::F32Div => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = f32::from_bits(self.get_reg_relative_u32(a));
-                        let b = f32::from_bits(self.get_reg_relative_u32(b));
+                        let a = f32::from_bits(t.get_reg_relative_u32(a));
+                        let b = f32::from_bits(t.get_reg_relative_u32(b));
 
                         if b == 0f32 {
                             panic!("integer divide by zero in I32DivU");
@@ -1215,77 +1243,77 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let r = a / b;
                         let r = r.to_bits();
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::F32Neg => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = f32::from_bits(self.get_reg_relative_u32(a));
+                        let a = f32::from_bits(t.get_reg_relative_u32(a));
 
                         let r = -a;
                         let r = r.to_bits();
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::F64Neg => {
                         let a = inputs[0].clone();
                         let c = output.unwrap();
 
-                        let a = self.get_reg_relative_u64(a);
+                        let a = t.get_reg_relative_u64(a);
                         let r = -f64::from_bits(a);
                         let r = r.to_bits();
 
-                        self.set_reg_relative_u64(c, r);
+                        t.set_reg_relative_u64(c, r);
                     }
                     Op::F32Eq => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = f32::from_bits(self.get_reg_relative_u32(a));
-                        let b = f32::from_bits(self.get_reg_relative_u32(b));
+                        let a = f32::from_bits(t.get_reg_relative_u32(a));
+                        let b = f32::from_bits(t.get_reg_relative_u32(b));
 
                         let r = if a == b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::F32Lt => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = f32::from_bits(self.get_reg_relative_u32(a));
-                        let b = f32::from_bits(self.get_reg_relative_u32(b));
+                        let a = f32::from_bits(t.get_reg_relative_u32(a));
+                        let b = f32::from_bits(t.get_reg_relative_u32(b));
 
                         let r = if a < b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::F32Gt => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
                         let c = output.unwrap();
 
-                        let a = f32::from_bits(self.get_reg_relative_u32(a));
-                        let b = f32::from_bits(self.get_reg_relative_u32(b));
+                        let a = f32::from_bits(t.get_reg_relative_u32(a));
+                        let b = f32::from_bits(t.get_reg_relative_u32(b));
 
                         let r = if a > b { 1 } else { 0 };
 
-                        self.set_reg_relative_u32(c, r);
+                        t.set_reg_relative_u32(c, r);
                     }
                     Op::Select | Op::TypedSelect { .. } => {
-                        let condition = self.get_reg_relative_u32(inputs[2].clone());
+                        let condition = t.get_reg_relative_u32(inputs[2].clone());
 
                         let selected = inputs[if condition != 0 { 0 } else { 1 }].clone();
                         let output = output.unwrap();
                         for (src_reg, dest_reg) in selected.zip_eq(output) {
-                            self.copy_reg_relative(src_reg, dest_reg);
+                            t.copy_reg_relative(src_reg, dest_reg);
                         }
                     }
                     Op::GlobalGet { global_index } => {
                         let Global::Mutable(global_info) =
-                            self.module.globals[global_index as usize]
+                            t.i.module.globals[global_index as usize]
                         else {
                             panic!("immutable GlobalGet should have been resolved at compile time");
                         };
@@ -1295,13 +1323,13 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(size, output.len() as u32);
 
                         let value = (0..size)
-                            .map(|i| self.ram.get(global_info.address + 4 * i))
+                            .map(|i| t.i.ram.get(global_info.address + 4 * i))
                             .collect_vec();
-                        self.set_reg_relative_range(output, &value);
+                        t.set_reg_relative_range(output, &value);
                     }
                     Op::GlobalSet { global_index } => {
                         let Global::Mutable(global_info) =
-                            self.module.globals[global_index as usize]
+                            t.i.module.globals[global_index as usize]
                         else {
                             panic!("GlobalSet expects a mutable global");
                         };
@@ -1315,9 +1343,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let size = word_count_type::<S>(global_info.val_type);
                         assert_eq!(origin.len(), size as usize);
 
-                        let value = self.get_reg_relative_range(origin).collect_vec();
+                        let value = t.get_reg_relative_range(origin).collect_vec();
                         for (i, value) in value.into_iter().enumerate() {
-                            self.ram.set(global_info.address + 4 * i as u32, value);
+                            t.i.ram.set(global_info.address + 4 * i as u32, value);
                         }
                     }
                     Op::I32Store8 { memarg }
@@ -1336,15 +1364,14 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             _ => unreachable!(),
                         };
 
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         // input[1] might have 1 or 2 words, but we only need the first word
                         let val_input = inputs[1].start..(inputs[1].start + 1);
-                        let new_value = mask & self.get_reg_relative_u32(val_input);
+                        let new_value = mask & t.get_reg_relative_u32(val_input);
 
                         assert_eq!(memarg.memory, 0);
-                        let mut memory = self.get_mem();
+                        let mut memory = t.i.get_mem();
 
                         // First word to be written:
                         let word_addr = addr & !3;
@@ -1369,12 +1396,11 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         }
                     }
                     Op::I64Store { memarg } | Op::F64Store { memarg } => {
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
-                        let value = self.get_reg_relative_range(inputs[1].clone()).collect_vec();
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let value = t.get_reg_relative_range(inputs[1].clone()).collect_vec();
 
                         assert_eq!(memarg.memory, 0);
-                        let mut memory = self.get_mem();
+                        let mut memory = t.i.get_mem();
                         memory
                             .write_contiguous(addr, &value)
                             .expect("Out of bounds write");
@@ -1387,11 +1413,10 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
                         let value = memory.read_contiguous_bytes(addr, word_len * 4);
 
                         if value.is_err() {
@@ -1404,18 +1429,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         }
                         let value = value.unwrap();
 
-                        self.set_reg_relative_range(output_reg, &value);
+                        t.set_reg_relative_range(output_reg, &value);
                     }
                     Op::I32Load8U { memarg } | Op::I64Load8U { memarg } => {
                         let output_reg = output.unwrap();
                         let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
 
                         let byte = memory
                             .read_contiguous_bytes(addr, 1)
@@ -1423,18 +1447,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             & 0xff;
 
                         let value = [byte, 0];
-                        self.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
+                        t.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
                     }
                     Op::I32Load8S { memarg } | Op::I64Load8S { memarg } => {
                         let output_reg = output.unwrap();
                         let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
 
                         let byte = memory
                             .read_contiguous_bytes(addr, 1)
@@ -1443,18 +1466,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let signed = byte as i8 as i64;
 
                         let value = [signed as u32, (signed >> 32) as u32];
-                        self.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
+                        t.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
                     }
                     Op::I32Load16U { memarg } | Op::I64Load16U { memarg } => {
                         let output_reg = output.unwrap();
                         let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
 
                         let bytes = memory
                             .read_contiguous_bytes(addr, 2)
@@ -1462,18 +1484,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             & 0xffff;
 
                         let value = [bytes, 0];
-                        self.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
+                        t.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
                     }
                     Op::I32Load16S { memarg } | Op::I64Load16S { memarg } => {
                         let output_reg = output.unwrap();
                         let word_len = output_reg.len() as u32;
 
                         assert_eq!(inputs.len(), 1);
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
 
                         let value = memory
                             .read_contiguous_bytes(addr, 2)
@@ -1482,33 +1503,31 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let signed = value as i16 as i64;
 
                         let value = [signed as u32, (signed >> 32) as u32];
-                        self.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
+                        t.set_reg_relative_range(output_reg, &value[0..word_len as usize]);
                     }
                     Op::I64Load32U { memarg } => {
                         let output_reg = output.unwrap();
 
                         assert_eq!(inputs.len(), 1);
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
 
                         let word = memory
                             .read_contiguous_bytes(addr, 4)
                             .expect("Out of bounds read")[0];
 
-                        self.set_reg_relative_range(output_reg, &[word, 0]);
+                        t.set_reg_relative_range(output_reg, &[word, 0]);
                     }
                     Op::I64Load32S { memarg } => {
                         let output_reg = output.unwrap();
 
                         assert_eq!(inputs.len(), 1);
-                        let addr =
-                            self.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
+                        let addr = t.get_reg_relative_u32(inputs[0].clone()) + memarg.offset as u32;
 
                         assert_eq!(memarg.memory, 0);
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
 
                         let word = memory
                             .read_contiguous_bytes(addr, 4)
@@ -1516,19 +1535,19 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         let signed = word as i32 as i64;
                         let value = [signed as u32, (signed >> 32) as u32];
-                        self.set_reg_relative_range(output_reg, &value);
+                        t.set_reg_relative_range(output_reg, &value);
                     }
                     Op::MemorySize { mem } => {
                         assert_eq!(mem, 0, "Only memory 0 is supported in this interpreter");
-                        let memory = self.get_mem();
+                        let memory = t.i.get_mem();
                         let num_pages = memory.get_size() / WASM_PAGE_SIZE;
-                        self.set_reg_relative_u32(output.unwrap(), num_pages);
+                        t.set_reg_relative_u32(output.unwrap(), num_pages);
                     }
                     Op::MemoryGrow { mem } => {
-                        let extra_pages = self.get_reg_relative_u32(inputs[0].clone());
+                        let extra_pages = t.get_reg_relative_u32(inputs[0].clone());
 
                         assert_eq!(mem, 0, "Only memory 0 is supported in this interpreter");
-                        let mut memory = self.get_mem();
+                        let mut memory = t.i.get_mem();
 
                         let old_num_pages = memory.get_size() / WASM_PAGE_SIZE;
                         let new_num_pages = old_num_pages + extra_pages;
@@ -1540,16 +1559,16 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                             old_num_pages
                         };
 
-                        self.set_reg_relative_u32(output.unwrap(), result);
+                        t.set_reg_relative_u32(output.unwrap(), result);
                     }
                     Op::MemoryFill { mem } => {
                         assert_eq!(mem, 0);
 
-                        let dst = self.get_reg_relative_u32(inputs[0].clone());
-                        let value = self.get_reg_relative_u32(inputs[1].clone()) as u8;
-                        let mut byte_size = self.get_reg_relative_u32(inputs[2].clone());
+                        let dst = t.get_reg_relative_u32(inputs[0].clone());
+                        let value = t.get_reg_relative_u32(inputs[1].clone()) as u8;
+                        let mut byte_size = t.get_reg_relative_u32(inputs[2].clone());
 
-                        let mut memory = self.get_mem();
+                        let mut memory = t.i.get_mem();
 
                         // write the first misaligned bytes
                         let misalignment = dst & 3;
@@ -1599,12 +1618,12 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         assert_eq!(dst_mem, 0);
                         assert_eq!(src_mem, 0);
 
-                        let dst = self.get_reg_relative_u32(inputs[0].clone());
-                        let src = self.get_reg_relative_u32(inputs[1].clone());
-                        let size = self.get_reg_relative_u32(inputs[2].clone());
+                        let dst = t.get_reg_relative_u32(inputs[0].clone());
+                        let src = t.get_reg_relative_u32(inputs[1].clone());
+                        let size = t.get_reg_relative_u32(inputs[2].clone());
                         let mut remaining = size % 4;
 
-                        let mut memory = self.get_mem();
+                        let mut memory = t.i.get_mem();
                         // Load the entire thing into memory, this is the easiest way to
                         // handle overlapping copies.
                         let mut data = memory
@@ -1655,43 +1674,40 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     }
                     Op::TableGet { table } => {
                         assert_eq!(inputs[0].len(), 1);
-                        let index = self.get_reg_relative_u32(inputs[0].clone());
+                        let index = t.get_reg_relative_u32(inputs[0].clone());
 
                         let table =
-                            TableAccessor::new(self.module.tables[table as usize], &mut self.ram);
+                            TableAccessor::new(t.i.module.tables[table as usize], &mut t.i.ram);
                         let entry = table
                             .get_entry(index)
                             .expect("TableGet: index out of bounds");
 
                         let output_reg = output.unwrap();
-                        self.set_reg_relative_range(output_reg, &entry);
+                        t.set_reg_relative_range(output_reg, &entry);
                     }
                     Op::TableSet { table } => {
                         assert_eq!(inputs[0].len(), 1);
-                        let index = self.get_reg_relative_u32(inputs[0].clone());
-                        let value = self
+                        let index = t.get_reg_relative_u32(inputs[0].clone());
+                        let value = t
                             .get_reg_relative_range(inputs[1].clone())
                             .collect_array()
                             .unwrap();
 
                         let mut table =
-                            TableAccessor::new(self.module.tables[table as usize], &mut self.ram);
+                            TableAccessor::new(t.i.module.tables[table as usize], &mut t.i.ram);
                         table
                             .set_entry(index, value)
                             .expect("TableSet: index out of bounds");
                     }
                     Op::RefFunc { function_index } => {
-                        let func_type = self.module.get_func_type(function_index).unique_id;
-                        let frame_size = self.func_stack_sizes[function_index as usize];
-                        let addr = self.labels[&func_idx_to_label(function_index)].pc;
+                        let func_type = t.i.module.get_func_type(function_index).unique_id;
+                        let frame_size = t.i.func_stack_sizes[function_index as usize];
+                        let addr = t.i.labels[&func_idx_to_label(function_index)].pc;
 
-                        self.set_reg_relative_range(
-                            output.unwrap(),
-                            &[func_type, frame_size, addr],
-                        );
+                        t.set_reg_relative_range(output.unwrap(), &[func_type, frame_size, addr]);
                     }
                     Op::RefNull { .. } => {
-                        self.set_reg_relative_range(output.unwrap(), &NULL_REF);
+                        t.set_reg_relative_range(output.unwrap(), &NULL_REF);
                     }
                     Op::RefIsNull => {
                         let mut input = inputs[0].clone();
@@ -1699,9 +1715,9 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         // Read the address part of the reference struct
                         input.start += FunctionRef::<S>::FUNC_ADDR as u32;
-                        let addr = self.get_reg_relative_u32(input);
+                        let addr = t.get_reg_relative_u32(input);
 
-                        self.set_reg_relative_u32(
+                        t.set_reg_relative_u32(
                             output,
                             if addr == NULL_REF[FunctionRef::<S>::FUNC_ADDR] {
                                 1
@@ -1716,30 +1732,30 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     target_frame,
                     result_ptr,
                 } => {
-                    let frame_size = self.labels[&target_frame].frame_size.unwrap();
-                    let ptr = self.allocate(frame_size);
-                    self.set_reg_relative_u32(result_ptr..result_ptr + 1, ptr);
+                    let frame_size = t.i.labels[&target_frame].frame_size.unwrap();
+                    let ptr = t.i.allocate(frame_size);
+                    t.set_reg_relative_u32(result_ptr..result_ptr + 1, ptr);
                 }
                 Directive::AllocateFrameV {
                     frame_size,
                     result_ptr,
                 } => {
-                    let frame_size = self.get_reg_relative_u32(frame_size..frame_size + 1);
-                    let ptr = self.allocate(frame_size);
-                    self.set_reg_relative_u32(result_ptr..result_ptr + 1, ptr);
+                    let frame_size = t.get_reg_relative_u32(frame_size..frame_size + 1);
+                    let ptr = t.i.allocate(frame_size);
+                    t.set_reg_relative_u32(result_ptr..result_ptr + 1, ptr);
                 }
                 Directive::Copy {
                     src_word,
                     dest_word,
                 } => {
-                    self.copy_reg_relative(src_word, dest_word);
+                    t.copy_reg_relative(src_word, dest_word);
                 }
                 Directive::CopyIntoFrame {
                     src_word,
                     dest_frame,
                     dest_word,
                 } => {
-                    self.copy_reg_into_frame(src_word, dest_frame, dest_word);
+                    t.copy_reg_into_frame(src_word, dest_frame, dest_word);
                 }
                 Directive::RwCall {
                     target,
@@ -1747,15 +1763,18 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
-                    let prev_pc = self.pc;
-                    self.pc = self.labels[&target].pc;
+                    let prev_pc = t.i.pc;
+                    t.i.pc = t.i.labels[&target].pc;
                     should_inc_pc = false;
 
-                    let prev_fp = self.fp;
-                    self.fp += new_frame_offset;
+                    // Push the new function id for instrumentation
+                    t.i.call_stack.push(t.i.addr_to_func_id[&t.i.pc]);
 
-                    self.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
-                    self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                    let prev_fp = t.i.fp;
+                    t.i.fp += new_frame_offset;
+
+                    t.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    t.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                 }
                 Directive::RwCallIndirect {
                     target_pc,
@@ -1763,15 +1782,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
-                    let prev_pc = self.pc;
-                    self.pc = self.get_reg_relative_u32(target_pc..target_pc + 1);
+                    let prev_pc = t.i.pc;
+                    t.i.pc = t.get_reg_relative_u32(target_pc..target_pc + 1);
                     should_inc_pc = false;
 
-                    let prev_fp = self.fp;
-                    self.fp += new_frame_offset;
+                    t.i.call_stack.push(t.i.addr_to_func_id[&t.i.pc]);
 
-                    self.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
-                    self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                    let prev_fp = t.i.fp;
+                    t.i.fp += new_frame_offset;
+
+                    t.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    t.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                 }
                 Directive::WomCall {
                     target,
@@ -1779,15 +1800,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
-                    let prev_pc = self.pc;
-                    self.pc = self.labels[&target].pc;
+                    let prev_pc = t.i.pc;
+                    t.i.pc = t.i.labels[&target].pc;
                     should_inc_pc = false;
 
-                    let prev_fp = self.fp;
-                    self.fp = self.get_reg_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+                    t.i.call_stack.push(t.i.addr_to_func_id[&t.i.pc]);
 
-                    self.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
-                    self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                    let prev_fp = t.i.fp;
+                    t.i.fp = t.get_reg_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+
+                    t.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    t.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                 }
                 Directive::WomCallIndirect {
                     target_pc,
@@ -1795,15 +1818,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     saved_ret_pc,
                     saved_caller_fp,
                 } => {
-                    let prev_pc = self.pc;
-                    self.pc = self.get_reg_relative_u32(target_pc..target_pc + 1);
+                    let prev_pc = t.i.pc;
+                    t.i.pc = t.get_reg_relative_u32(target_pc..target_pc + 1);
                     should_inc_pc = false;
 
-                    let prev_fp = self.fp;
-                    self.fp = self.get_reg_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+                    t.i.call_stack.push(t.i.addr_to_func_id[&t.i.pc]);
 
-                    self.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
-                    self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                    let prev_fp = t.i.fp;
+                    t.i.fp = t.get_reg_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+
+                    t.set_reg_relative_u32(saved_ret_pc..saved_ret_pc + 1, prev_pc + 1);
+                    t.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                 }
                 Directive::ImportedCall {
                     module,
@@ -1814,19 +1839,19 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     let args = inputs
                         .into_iter()
                         .flatten()
-                        .map(|addr| self.get_reg_relative_u32(addr..addr + 1))
+                        .map(|addr| t.get_reg_relative_u32(addr..addr + 1))
                         .collect_vec();
-                    let mut accessor = if let Some(mem) = self.module.memory {
-                        Some(MemoryAccessor::new(mem, &mut self.ram))
+                    let mut accessor = if let Some(mem) = t.i.module.memory {
+                        Some(MemoryAccessor::new(mem, &mut t.i.ram))
                     } else {
                         None
                     };
                     let result =
-                        self.external_functions
+                        t.i.external_functions
                             .call(module, function, &args, &mut accessor);
                     for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
                     {
-                        self.set_reg_relative_u32(output..output + 1, value);
+                        t.set_reg_relative_u32(output..output + 1, value);
                     }
                 }
                 Directive::JumpAndActivateFrame {
@@ -1834,48 +1859,50 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     new_frame_ptr,
                     saved_caller_fp,
                 } => {
-                    self.pc = self.labels[&target].pc;
+                    t.i.pc = t.i.labels[&target].pc;
                     should_inc_pc = false;
 
-                    let prev_fp = self.fp;
-                    self.fp = self.get_reg_relative_u32(new_frame_ptr..new_frame_ptr + 1);
+                    let prev_fp = t.i.fp;
+                    t.i.fp = t.get_reg_relative_u32(new_frame_ptr..new_frame_ptr + 1);
 
                     if let Some(saved_caller_fp) = saved_caller_fp {
-                        self.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
+                        t.set_reg_relative_u32(saved_caller_fp..saved_caller_fp + 1, prev_fp);
                     }
                 }
                 Directive::JumpIf { target, condition } => {
-                    let target = self.labels[&target].pc;
-                    let cond = self.get_reg_relative_u32(condition..condition + 1);
+                    let target = t.i.labels[&target].pc;
+                    let cond = t.get_reg_relative_u32(condition..condition + 1);
                     if cond != 0 {
-                        self.pc = target;
+                        t.i.pc = target;
                         should_inc_pc = false;
                     }
                 }
                 Directive::JumpIfZero { target, condition } => {
-                    let target = self.labels[&target].pc;
-                    let cond = self.get_reg_relative_u32(condition..condition + 1);
+                    let target = t.i.labels[&target].pc;
+                    let cond = t.get_reg_relative_u32(condition..condition + 1);
                     if cond == 0 {
-                        self.pc = target;
+                        t.i.pc = target;
                         should_inc_pc = false;
                     }
                 }
                 Directive::Jump { target } => {
-                    self.pc = self.labels[&target].pc;
+                    t.i.pc = t.i.labels[&target].pc;
                     should_inc_pc = false;
                 }
                 Directive::JumpOffset { offset } => {
-                    let offset = self.get_reg_relative_u32(offset..offset + 1);
+                    let offset = t.get_reg_relative_u32(offset..offset + 1);
                     // Offset starts with 0, so we don't prevent the natural increment of the PC.
-                    self.pc += offset;
+                    t.i.pc += offset;
                 }
                 Directive::Trap { reason } => {
                     panic!("Trap encountered: {reason:?}");
                 }
             }
 
+            t.print_trace();
+
             if should_inc_pc {
-                self.pc += 1;
+                t.i.pc += 1;
             }
 
             cycles += 1;
@@ -1888,63 +1915,202 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         }
     }
 
-    fn get_reg_absolute_u32(&mut self, addr: u32) -> u32 {
-        self.regs.get(addr)
-    }
-
-    fn get_reg_relative_u32(&mut self, addr: Range<u32>) -> u32 {
-        assert_eq!(addr.len(), 1, "Expected a single address range");
-        self.regs.get(self.fp + addr.start)
-    }
-
-    fn get_reg_relative_u64(&mut self, addr: Range<u32>) -> u64 {
-        assert_eq!(addr.len(), 2, "Expected a single address range");
-        let low = self.regs.get(self.fp + addr.start);
-        let high = self.regs.get(self.fp + addr.start + 1);
-        (low as u64) | ((high as u64) << 32)
-    }
-
-    fn get_reg_relative_range(&mut self, addr: Range<u32>) -> impl Iterator<Item = u32> + '_ {
-        addr.map(|i| self.regs.get(self.fp + i))
-    }
-
-    fn copy_reg_relative(&mut self, src: u32, dest: u32) {
-        self.regs.copy(self.fp + src, self.fp + dest);
-    }
-
-    fn copy_reg_into_frame(&mut self, src: u32, dest_frame: u32, dest: u32) {
-        let target_ptr = self.regs.get(self.fp + dest_frame) + dest;
-        self.regs.copy(self.fp + src, target_ptr);
-    }
-
-    fn set_reg_relative_u32(&mut self, addr: Range<u32>, value: u32) {
-        assert_eq!(addr.len(), 1, "Expected a single address range");
-        self.regs.set(self.fp + addr.start, value);
-    }
-
-    fn set_reg_relative_u64(&mut self, addr: Range<u32>, value: u64) {
-        self.set_reg_relative_range(addr, &[value as u32, (value >> 32) as u32]);
-    }
-
-    fn set_reg_relative_range(&mut self, addr: Range<u32>, values: &[u32]) {
-        assert_eq!(
-            addr.len(),
-            values.len(),
-            "Address range and values length mismatch"
-        );
-        for (addr, &value) in addr.zip(values.iter()) {
-            self.regs.set(self.fp + addr, value);
-        }
-    }
-
-    fn set_reg_relative_range_future(&mut self, addr: Range<u32>) {
-        for i in addr {
-            self.regs.set_future(self.fp + i);
-        }
-    }
-
     fn allocate(&mut self, size: u32) -> u32 {
         self.regs.allocate(size)
+    }
+}
+
+mod trace {
+    use itertools::Itertools;
+
+    use crate::interpreter::{ExternalFunctions, Interpreter, RegisterValue};
+    use std::{fmt::Display, ops::Range};
+
+    pub struct Tracer<'a, 'b, E: ExternalFunctions> {
+        pub i: &'a mut Interpreter<'b, E>,
+        original_pc: u32,
+        original_fp: u32,
+        reads: Vec<ReadOp>,
+        writes: Vec<WriteOp>,
+    }
+
+    impl<'a, 'b, E: ExternalFunctions> Tracer<'a, 'b, E> {
+        pub fn new(i: &'a mut Interpreter<'b, E>) -> Tracer<'a, 'b, E> {
+            Tracer {
+                original_pc: i.pc,
+                original_fp: i.fp,
+                i,
+                reads: Vec::new(),
+                writes: Vec::new(),
+            }
+        }
+
+        pub fn get_reg_relative_u32(&mut self, addr: Range<u32>) -> u32 {
+            assert_eq!(addr.len(), 1, "Expected a single address range");
+            self.get_reg(addr.start)
+        }
+
+        pub fn get_reg_relative_u64(&mut self, addr: Range<u32>) -> u64 {
+            assert_eq!(addr.len(), 2, "Expected a single address range");
+            let low = self.get_reg(addr.start);
+            let high = self.get_reg(addr.start + 1);
+            (low as u64) | ((high as u64) << 32)
+        }
+
+        pub fn get_reg_relative_range(
+            &mut self,
+            addr: Range<u32>,
+        ) -> impl Iterator<Item = u32> + '_ {
+            addr.map(|i| self.get_reg(i))
+        }
+
+        pub fn copy_reg_relative(&mut self, src: u32, dest: u32) {
+            self.copy_reg(src, self.i.fp, dest);
+        }
+
+        pub fn copy_reg_into_frame(&mut self, src: u32, dest_frame: u32, dest: u32) {
+            let target_fp = self.get_reg(dest_frame);
+            self.copy_reg(src, target_fp, dest);
+        }
+
+        pub fn set_reg_relative_u32(&mut self, addr: Range<u32>, value: u32) {
+            assert_eq!(addr.len(), 1, "Expected a single address range");
+            self.set_reg(addr.start, value);
+        }
+
+        pub fn set_reg_relative_u64(&mut self, addr: Range<u32>, value: u64) {
+            self.set_reg_relative_range(addr, &[value as u32, (value >> 32) as u32]);
+        }
+
+        pub fn set_reg_relative_range(&mut self, addr: Range<u32>, values: &[u32]) {
+            assert_eq!(
+                addr.len(),
+                values.len(),
+                "Address range and values length mismatch"
+            );
+            for (addr, &value) in addr.zip(values.iter()) {
+                self.set_reg(addr, value);
+            }
+        }
+
+        pub fn set_reg_relative_range_future(&mut self, addr: Range<u32>) {
+            for i in addr {
+                self.i.regs.set_future(self.i.fp + i);
+            }
+        }
+
+        pub fn print_trace(&self) {
+            if !self.i.trace_enabled {
+                return;
+            }
+
+            print!(
+                "{} ({}): {}",
+                self.i.call_stack.iter().format(","),
+                self.original_pc,
+                self.i.flat_program[self.original_pc as usize],
+            );
+
+            if !(self.reads.is_empty() && self.writes.is_empty()) {
+                print!(" ({}", self.reads.iter().format(" "));
+                if !self.writes.is_empty() {
+                    if !self.reads.is_empty() {
+                        print!(" | ");
+                    }
+                    print!(
+                        "{}",
+                        self.writes
+                            .iter()
+                            .map(|w| DisplayWriteOp {
+                                original_fp: self.original_fp,
+                                write_op: w
+                            })
+                            .format(" ")
+                    );
+                }
+                print!(")");
+            }
+
+            println!();
+        }
+
+        pub fn reset(&mut self) {
+            self.original_pc = self.i.pc;
+            self.original_fp = self.i.fp;
+            self.reads.clear();
+            self.writes.clear();
+        }
+
+        fn get_reg(&mut self, offset: u32) -> u32 {
+            let addr = self.i.fp + offset;
+            let value = self.i.regs.get(addr).as_concrete();
+            self.reads.push(ReadOp {
+                addr: offset,
+                value: RegisterValue::Concrete(value),
+            });
+            value
+        }
+
+        fn set_reg(&mut self, offset: u32, value: u32) {
+            let addr = self.i.fp + offset;
+            self.i.regs.set(addr, value);
+            self.writes.push(WriteOp {
+                offset,
+                fp: self.i.fp,
+                value: RegisterValue::Concrete(value),
+            });
+        }
+
+        fn copy_reg(&mut self, src_offset: u32, dest_fp: u32, dest_offset: u32) {
+            let src_addr = self.i.fp + src_offset;
+            let value = self.i.regs.get(src_addr);
+            self.i.regs.copy(src_addr, dest_fp + dest_offset);
+            self.reads.push(ReadOp {
+                addr: src_offset,
+                value,
+            });
+            self.writes.push(WriteOp {
+                offset: dest_offset,
+                fp: dest_fp,
+                value,
+            });
+        }
+    }
+
+    struct ReadOp {
+        addr: u32,
+        value: RegisterValue,
+    }
+
+    impl Display for ReadOp {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "r:{}={}", self.addr, self.value)
+        }
+    }
+
+    struct WriteOp {
+        fp: u32,
+        offset: u32,
+        value: RegisterValue,
+    }
+
+    struct DisplayWriteOp<'a> {
+        original_fp: u32,
+        write_op: &'a WriteOp,
+    }
+
+    impl Display for DisplayWriteOp<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.original_fp == self.write_op.fp {
+                write!(f, "w:{}={}", self.write_op.offset, self.write_op.value)
+            } else {
+                write!(
+                    f,
+                    "w:{}[{}]={}",
+                    self.write_op.fp, self.write_op.offset, self.write_op.value
+                )
+            }
+        }
     }
 }
 
@@ -1990,7 +2156,6 @@ impl<'a> MemoryAccessor<'a> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         let value = self.ram.get(ram_addr);
-        log::trace!("Reading Memory word at {ram_addr}: {value}");
         Ok(value)
     }
 
@@ -2001,7 +2166,6 @@ impl<'a> MemoryAccessor<'a> {
         }
         let ram_addr = self.segment.start + 8 + byte_addr;
         self.ram.set(ram_addr, value);
-        log::trace!("Writing Memory word at {ram_addr}: {value}");
         Ok(())
     }
 
