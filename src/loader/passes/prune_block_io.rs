@@ -90,12 +90,12 @@ impl InputUsage {
                     max_depth: d_other,
                     slots: s_other,
                 },
-            ) => match (*d_self).cmp(&d_other) {
+            ) => match (*d_self).cmp(d_other) {
                 Ordering::Less => {
                     *self = other;
                 }
                 Ordering::Equal => {
-                    s_self.union(&s_other);
+                    s_self.extend(s_other);
                 }
                 Ordering::Greater => (),
             },
@@ -231,11 +231,12 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                 });
                 process_block(&mut sub_dag.nodes, cs);
                 let mut sub_entry = cs.pop_front().unwrap();
+                assert_eq!(sub_entry.input_usage.len(), node.inputs.len());
 
                 // Calculate what outputs can be removed
                 let mut sub_block_doesnt_return = false;
                 let mut outputs_to_remove = Vec::new();
-                if sub_entry.was_ever_broken_to {
+                if !sub_entry.was_ever_broken_to {
                     // Invariant check: there can only be an unknown redirection if the block is
                     // never broken to, in which case, all must be unknown.
                     assert!(
@@ -301,13 +302,19 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                 }
 
                 // Calculate what inputs can be removed.
-                let mut inputs_to_remove = Vec::new();
+                #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+                enum CanRemoveInput {
+                    Unknown,
+                    Yes,
+                    No,
+                }
+                let mut can_remove_input = vec![CanRemoveInput::Unknown; node.inputs.len()];
                 for (input_idx, usage) in sub_entry.input_usage.iter().enumerate() {
                     let input_idx = input_idx as u32;
                     let slots = match usage {
                         InputUsage::Unused => {
                             // This input is not used at all in the sub-block, so it can be removed from the block inputs.
-                            inputs_to_remove.push(input_idx);
+                            can_remove_input[input_idx as usize] = CanRemoveInput::Yes;
                             continue;
                         }
                         InputUsage::RedirectedTo {
@@ -323,18 +330,84 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                         }
                         _ => {
                             // This input is used in some way, or redirected to some outer block, so it cannot be removed.
+                            can_remove_input[input_idx as usize] = CanRemoveInput::No;
                             continue;
                         }
                     };
 
-                    // The input is a redirection in a loop.
-                    // Can we remove it? It is tricky, because the new input it was redirected to
-                    // might be useful. We must follow the redirection chain until either we find
-                    // a redirection cycle, in which case the entire path can be removed, or we
-                    // find a useful input, in which case the entire path must be preserved.
+                    if let BlockKind::Loop = kind
+                        && can_remove_input[input_idx as usize] == CanRemoveInput::Unknown
+                    {
+                        // The input is a redirection in a loop.
+                        //
+                        // Can we remove it? It is tricky, because the new input it was redirected to
+                        // might be useful. We must follow all possible redirections paths to be sure
+                        // none leads to a useful input, in which case the entire graph can be removed,
+                        // or we find a useful input, in which case that particular path must be preserved.
+                        let mut visited = vec![false; can_remove_input.len()];
+                        visited[input_idx as usize] = true;
+                        let mut path_visited = visited.clone();
 
-                    // to be continued...
-                    todo!();
+                        let mut stack = vec![slots.iter().copied().peekable()];
+                        let mut curr_slots = &mut stack[0];
+                        loop {
+                            if let Some(slot) = curr_slots.peek() {
+                                let rm_status = can_remove_input[*slot as usize];
+                                if rm_status == CanRemoveInput::No {
+                                    // The entire path up to this point can not be removed, we are done.
+                                    for input in path_visited
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(idx, visited)| visited.then_some(idx as u32))
+                                    {
+                                        can_remove_input[input as usize] = CanRemoveInput::No;
+                                    }
+                                    break;
+                                }
+                                if rm_status == CanRemoveInput::Yes || path_visited[*slot as usize]
+                                {
+                                    // This path is a dead end.
+                                    // The current slot was never added to the path_visited, so we don't need to unwind it.
+                                    curr_slots.next();
+                                } else {
+                                    visited[*slot as usize] = true;
+                                    path_visited[*slot as usize] = true;
+
+                                    // Since rm_status is Unknown, this must be a redirection to some input in the loop:
+                                    let InputUsage::RedirectedTo {
+                                        max_depth: 0,
+                                        slots: new_slots,
+                                    } = &sub_entry.input_usage[*slot as usize]
+                                    else {
+                                        unreachable!()
+                                    };
+
+                                    stack.push(new_slots.iter().copied().peekable());
+                                    curr_slots = stack.last_mut().unwrap();
+                                }
+                            } else {
+                                // We have explored all the redirections in this path. Must explore all others
+                                // to be sure no one leads to a useful input, before we can mark the entire graph
+                                // as removable.
+                                stack.pop();
+                                if let Some(prev_slots) = stack.last_mut() {
+                                    curr_slots = prev_slots;
+                                    // Unwind the visited status for the current path, so we can explore other paths.
+                                    path_visited[curr_slots.next().unwrap() as usize] = false;
+                                } else {
+                                    // We have explored all paths, and none leads to a useful input, so we can remove the entire graph.
+                                    for input in visited
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(idx, visited)| visited.then_some(idx as u32))
+                                    {
+                                        can_remove_input[input as usize] = CanRemoveInput::Yes;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // We need to update this block usage information based on the usage in the sub-block
