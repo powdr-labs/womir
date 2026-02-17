@@ -311,101 +311,84 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                 let mut can_remove_input = vec![CanRemoveInput::Unknown; node.inputs.len()];
                 for (input_idx, usage) in sub_entry.input_usage.iter().enumerate() {
                     let input_idx = input_idx as u32;
-                    let slots = match usage {
-                        InputUsage::Unused => {
-                            // This input is not used at all in the sub-block, so it can be removed from the block inputs.
-                            can_remove_input[input_idx as usize] = CanRemoveInput::Yes;
-                            continue;
-                        }
+                    let removal_status = match usage {
+                        // This input is not used at all in the sub-block, so it can be removed from the block inputs.
+                        InputUsage::Unused => CanRemoveInput::Yes,
                         InputUsage::RedirectedTo {
                             max_depth: 0,
                             slots,
                         } => {
-                            if let BlockKind::Block = kind {
+                            match kind {
                                 // The input is redirected as-is to some output that we already marked for removal,
                                 // so we can remove this input as well.
-                                continue;
+                                BlockKind::Block => CanRemoveInput::Yes,
+                                // The loop case is handled below, because it is more complex.
+                                BlockKind::Loop => CanRemoveInput::Unknown,
                             }
-                            slots
                         }
-                        _ => {
-                            // This input is used in some way, or redirected to some outer block, so it cannot be removed.
-                            can_remove_input[input_idx as usize] = CanRemoveInput::No;
-                            continue;
-                        }
+                        // This input is used in some way, or redirected to some outer block, so it cannot be removed.
+                        _ => CanRemoveInput::No,
                     };
+                    can_remove_input[input_idx as usize] = removal_status;
+                }
 
-                    if let BlockKind::Loop = kind
-                        && can_remove_input[input_idx as usize] == CanRemoveInput::Unknown
-                    {
-                        // The input is a redirection in a loop.
-                        //
-                        // Can we remove it? It is tricky, because the new input it was redirected to
-                        // might be useful. We must follow all possible redirections paths to be sure
-                        // none leads to a useful input, in which case the entire graph can be removed,
-                        // or we find a useful input, in which case that particular path must be preserved.
-                        let mut visited = vec![false; can_remove_input.len()];
-                        visited[input_idx as usize] = true;
-                        let mut path_visited = visited.clone();
+                if let BlockKind::Loop = kind {
+                    // Resolve Unknown inputs in a loop by propagating No backwards.
+                    //
+                    // Each Unknown input is only used as a redirection to other loop
+                    // inputs (its slots). If any of those targets is No, then this
+                    // input is also No. We propagate by building reverse edges
+                    // (target → source) and BFS-ing from all No inputs.
+                    // Whatever remains Unknown afterwards is safely removable (Yes).
 
-                        let mut stack = vec![slots.iter().copied().peekable()];
-                        let mut curr_slots = &mut stack[0];
-                        loop {
-                            if let Some(slot) = curr_slots.peek() {
-                                let rm_status = can_remove_input[*slot as usize];
-                                if rm_status == CanRemoveInput::No {
-                                    // The entire path up to this point can not be removed, we are done.
-                                    for input in path_visited
-                                        .iter()
-                                        .enumerate()
-                                        .filter_map(|(idx, visited)| visited.then_some(idx as u32))
-                                    {
-                                        can_remove_input[input as usize] = CanRemoveInput::No;
-                                    }
-                                    break;
-                                }
-                                if rm_status == CanRemoveInput::Yes || path_visited[*slot as usize]
-                                {
-                                    // This path is a dead end.
-                                    // The current slot was never added to the path_visited, so we don't need to unwind it.
-                                    curr_slots.next();
-                                } else {
-                                    visited[*slot as usize] = true;
-                                    path_visited[*slot as usize] = true;
-
-                                    // Since rm_status is Unknown, this must be a redirection to some input in the loop:
-                                    let InputUsage::RedirectedTo {
-                                        max_depth: 0,
-                                        slots: new_slots,
-                                    } = &sub_entry.input_usage[*slot as usize]
-                                    else {
-                                        unreachable!()
-                                    };
-
-                                    stack.push(new_slots.iter().copied().peekable());
-                                    curr_slots = stack.last_mut().unwrap();
-                                }
-                            } else {
-                                // We have explored all the redirections in this path. Must explore all others
-                                // to be sure no one leads to a useful input, before we can mark the entire graph
-                                // as removable.
-                                stack.pop();
-                                if let Some(prev_slots) = stack.last_mut() {
-                                    curr_slots = prev_slots;
-                                    // Unwind the visited status for the current path, so we can explore other paths.
-                                    path_visited[curr_slots.next().unwrap() as usize] = false;
-                                } else {
-                                    // We have explored all paths, and none leads to a useful input, so we can remove the entire graph.
-                                    for input in visited
-                                        .iter()
-                                        .enumerate()
-                                        .filter_map(|(idx, visited)| visited.then_some(idx as u32))
-                                    {
-                                        can_remove_input[input as usize] = CanRemoveInput::Yes;
-                                    }
-                                    break;
-                                }
+                    // Build reverse edges: for each Unknown input, its redirection
+                    // slots point forward; we record the reverse (slot → input).
+                    let mut reverse_edges: Vec<Vec<u32>> = vec![vec![]; can_remove_input.len()];
+                    for (idx, status) in can_remove_input.iter().enumerate() {
+                        if *status == CanRemoveInput::Unknown {
+                            let InputUsage::RedirectedTo {
+                                max_depth: 0,
+                                slots,
+                            } = &sub_entry.input_usage[idx]
+                            else {
+                                unreachable!()
+                            };
+                            for &slot in slots {
+                                reverse_edges[slot as usize].push(idx as u32);
                             }
+                        }
+                    }
+
+                    // Seed the worklist with all No inputs.
+                    let mut worklist: VecDeque<u32> = can_remove_input
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| **s == CanRemoveInput::No)
+                        .map(|(i, _)| i as u32)
+                        .collect();
+
+                    // Propagate No backwards through the reverse edges.
+                    while let Some(idx) = worklist.pop_front() {
+                        for &source in &reverse_edges[idx as usize] {
+                            match can_remove_input[source as usize] {
+                                CanRemoveInput::Unknown => {
+                                    can_remove_input[source as usize] = CanRemoveInput::No;
+                                    worklist.push_back(source);
+                                }
+                                CanRemoveInput::Yes => {
+                                    // This should not happen: a Yes input cannot point to a No input.
+                                    unreachable!()
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Everything still Unknown is part of a cycle that never
+                    // reaches a useful input, so it can be removed.
+                    for status in &mut can_remove_input {
+                        if *status == CanRemoveInput::Unknown {
+                            *status = CanRemoveInput::Yes;
                         }
                     }
                 }
