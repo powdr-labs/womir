@@ -314,10 +314,7 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                     let removal_status = match usage {
                         // This input is not used at all in the sub-block, so it can be removed from the block inputs.
                         InputUsage::Unused => CanRemoveInput::Yes,
-                        InputUsage::RedirectedTo {
-                            max_depth: 0,
-                            slots,
-                        } => {
+                        InputUsage::RedirectedTo { max_depth: 0, .. } => {
                             match kind {
                                 // The input is redirected as-is to some output that we already marked for removal,
                                 // so we can remove this input as well.
@@ -393,20 +390,54 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                     }
                 }
 
-                // We need to update this block usage information based on the usage in the sub-block
-                // TODO: make sure this takes into consideration just removed inputs.
+                // TODO: actually apply the input and output removals on the sub-block.
+                // or maybe leave it for a pass at the end of this function, where further
+                // outputs could be removed (in case they are never used).
                 todo!();
-                for (input_idx, usage) in sub_entry.input_usage.iter().enumerate() {
-                    if let Some(input_idx) = sub_entry.input_map.get(&(input_idx as u32)) {
+
+                // Update this node outputs.
+                let mut outputs_to_remove = outputs_to_remove.into_iter().peekable();
+                let mut old_idx = 0..;
+                let mut new_idx = 0..;
+                node.output_types.retain(|_| {
+                    let old_idx = old_idx.next().unwrap();
+                    if old_idx != *outputs_to_remove.peek().unwrap() {
+                        let new_idx = new_idx.next().unwrap();
+                        if old_idx != new_idx {
+                            input_substitutions.insert(
+                                ValueOrigin {
+                                    node: node_idx,
+                                    output_idx: old_idx,
+                                },
+                                ValueOrigin {
+                                    node: node_idx,
+                                    output_idx: new_idx,
+                                },
+                            );
+                        }
+                        true
+                    } else {
+                        outputs_to_remove.next();
+                        false
+                    }
+                });
+
+                // Update this node inputs.
+                let mut idx = 0..;
+                node.inputs.retain(|_| {
+                    let remove = can_remove_input[idx.next().unwrap() as usize];
+                    assert_ne!(remove, CanRemoveInput::Unknown);
+                    remove == CanRemoveInput::No
+                });
+
+                // Update this block input usage based on the sub-block input usage and the removals we have done.
+                for (sub_input_idx, usage) in sub_entry.input_usage.iter().enumerate() {
+                    if can_remove_input[sub_input_idx] == CanRemoveInput::No
+                        && let Some(input_idx) = sub_entry.input_map.get(&(sub_input_idx as u32))
+                    {
                         cs[0].input_usage[*input_idx as usize].combine(usage.depth_down());
                     }
                 }
-
-                // TODO: actually apply the input and output removals on the sub-block.
-                // or maybe leave it for a pass at the end of this function.
-                // "input_substitutions" must also contain the origins that were
-                // backshifted to fill holes left by removed outputs.
-                todo!();
 
                 if sub_block_doesnt_return {
                     // The rest of this block is unreachable, so we can stop processing it.
