@@ -1590,7 +1590,7 @@ pub enum Instruction<'a> {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockKind {
     Block,
     Loop,
