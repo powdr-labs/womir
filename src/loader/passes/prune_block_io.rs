@@ -594,31 +594,6 @@ fn apply_substitutions(
     }
 }
 
-fn apply_input_sub_or_removal(
-    node_inputs: &mut Vec<NodeInput>,
-    input_substitutions: &HashMap<ValueOrigin, Option<ValueOrigin>>,
-    mut removal_callback: impl FnMut(u32),
-) {
-    let mut slot_idx = 0u32..;
-    node_inputs.retain_mut(|input| {
-        let slot_idx = slot_idx.next().unwrap();
-        if let NodeInput::Reference(origin) = input
-            && let Some(subst) = input_substitutions.get(origin)
-        {
-            if let Some(subst) = subst {
-                *origin = *subst;
-                true
-            } else {
-                // This input was removed.
-                removal_callback(slot_idx);
-                false
-            }
-        } else {
-            true
-        }
-    });
-}
-
 fn remove_block_node_io(
     block_node: &mut Node,
     inputs_to_remove: &[u32],
@@ -662,7 +637,7 @@ fn remove_block_node_io(
                 let mut input_changed = false;
                 let mut inputs_to_remove = inputs_to_remove.iter().cloned().peekable();
                 for (_, input_idx) in block_inputs(&node.inputs) {
-                    if is_in_sorted_iter(&mut inputs_to_remove, &(input_idx as u32)) {
+                    if is_in_sorted_iter(&mut inputs_to_remove, &input_idx) {
                         sub_input_to_remove.push(input_idx);
                         input_changed = true;
                     }
@@ -685,7 +660,7 @@ fn remove_block_node_io(
             Operation::WASMOp(Op::Br { relative_depth }) => {
                 remove_break_inputs(
                     &mut node.inputs,
-                    |x| x,
+                    |x: &NodeInput| x.clone(),
                     *relative_depth,
                     outputs_to_remove,
                     outs_removed,
@@ -698,7 +673,7 @@ fn remove_block_node_io(
                 let selector = node.inputs.pop().unwrap();
                 remove_break_inputs(
                     &mut node.inputs,
-                    |x| x,
+                    |x: &NodeInput| x.clone(),
                     *relative_depth,
                     outputs_to_remove,
                     outs_removed,
@@ -715,7 +690,7 @@ fn remove_block_node_io(
                 for t in targets.iter_mut() {
                     let removed = remove_break_inputs(
                         &mut t.input_permutation,
-                        |perm| &node.inputs[*perm as usize],
+                        |perm: &u32| node.inputs[*perm as usize].clone(),
                         t.relative_depth,
                         outputs_to_remove,
                         outs_removed,
@@ -771,9 +746,9 @@ fn remove_block_node_io(
     }
 }
 
-fn remove_break_inputs<'a, 'b, T>(
+fn remove_break_inputs<'a, T>(
     node_inputs: &mut Vec<T>,
-    get_input: impl Fn(&'b T) -> &'b NodeInput,
+    get_input: impl Fn(&T) -> NodeInput,
     relative_depth: u32,
     outputs_to_remove: &[(u32, Option<ValueOrigin>)],
     outs_removed: &'a mut VecDeque<Option<Vec<u32>>>,
@@ -801,7 +776,7 @@ fn remove_break_inputs<'a, 'b, T>(
         } else if let NodeInput::Reference(origin) = get_input(input) {
             input_substitutions
                 .get(&origin)
-                .map_or(true, |subst| subst.is_some())
+                .is_none_or(|subst| subst.is_some())
         } else {
             panic!("Break input is not a reference");
         };
