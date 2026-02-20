@@ -100,7 +100,7 @@ graph that may contain:
 **Phase 2 — Cycle breaking:**
 1. The remaining graph consists only of pure cycles.
 2. Pick a temporary register — either reuse a destination register from Phase 1
-   (since it was already written and can serve double duty before Phase 1's copies
+   (since its original value is never read it can serve double duty before Phase 1's copies
    execute), or allocate a new `Temp` register.
 3. For each cycle: save one value to temp, rotate the rest, restore from temp.
 
