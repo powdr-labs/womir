@@ -105,7 +105,7 @@ graph that may contain:
 3. For each cycle: save one value to temp, rotate the rest, restore from temp.
 
 **Output ordering:** Phase 2 copies are emitted first, then Phase 1 copies in
-reverse. This ensures the temporary register is not overwritten by Phase 1 copies
+sequence. This ensures the temporary register is not overwritten by Phase 1 copies
 before it is consumed by Phase 2.
 
 ### Correctness Guarantee
