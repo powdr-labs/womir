@@ -11,7 +11,7 @@ use crate::{
         BlockKind,
         dag::{Dag, Node, NodeInput, Operation, ValueOrigin},
     },
-    utils::remove_indices,
+    utils::{offset_map::OffsetMap, remove_indices},
 };
 
 #[derive(Default, Debug)]
@@ -32,50 +32,6 @@ impl AddAssign for Statistics {
 
 struct StackElement {
     sorted_removed_outputs: Vec<u32>,
-}
-
-struct OffsetMap<K: Ord, V: PartialEq + Eq> {
-    default: V,
-    counter: V,
-    /// Holds the (index, value), sorted by index for binary search.
-    map: Vec<(K, V)>,
-}
-
-impl<K: Ord + PartialEq + Eq, V: Copy + PartialEq + Eq + AddAssign<V> + From<u8>> OffsetMap<K, V> {
-    fn new(default: V) -> Self {
-        Self {
-            default,
-            counter: default,
-            map: Vec::new(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-
-    fn append(&mut self, index: K) {
-        if let Some((k, _)) = self.map.last() {
-            // The keys must be in ascending order.
-            assert!(index >= *k);
-        }
-
-        self.counter += 1.into();
-        self.map.push((index, self.counter));
-    }
-
-    fn get(&self, index: &K) -> &V {
-        match self.map.binary_search_by(|(i, _)| i.cmp(index)) {
-            Ok(idx) => &self.map[idx].1,
-            Err(idx) => {
-                if idx == 0 {
-                    &self.default
-                } else {
-                    &self.map[idx - 1].1
-                }
-            }
-        }
-    }
 }
 
 fn _print_nodes(indent: usize, nodes: &[Node<'_>]) {
@@ -194,7 +150,7 @@ fn recursive_removal(
         assert!(matches!(inputs.operation, Operation::Inputs { .. }));
 
         let mut output_idx = 0u32..;
-        let mut offset_map = OffsetMap::new(0);
+        let mut offset_map = OffsetMap::new();
         inputs.output_types.retain(|_| {
             let origin = ValueOrigin::new(0, output_idx.next().unwrap());
             if used_outputs.contains(&origin) {
@@ -210,7 +166,7 @@ fn recursive_removal(
     }
 
     // The second pass happens top down, and actually removes the nodes.
-    let mut offset_map = OffsetMap::new(0);
+    let mut offset_map = OffsetMap::new();
     let mut to_be_removed = to_be_removed.into_iter().rev().peekable();
     let mut node_idx = 0usize..;
     nodes.retain_mut(|node| {
@@ -275,14 +231,14 @@ fn recurse_into_block(
         remove_indices_from_vec(&mut node.output_types, &stack_elem.sorted_removed_outputs);
         stats.removed_block_outputs += stack_elem.sorted_removed_outputs.len();
 
-        let mut offset_map = OffsetMap::new(0);
+        let mut offset_map = OffsetMap::new();
         for removed in stack_elem.sorted_removed_outputs {
             offset_map.append(removed);
         }
 
         (stats, offset_map)
     } else {
-        (Statistics::default(), OffsetMap::new(0))
+        (Statistics::default(), OffsetMap::new())
     }
 }
 
@@ -314,7 +270,7 @@ fn fix_breaks(node: &mut Node, ctrl_stack: &mut VecDeque<StackElement>) {
             }
 
             // Remove the inputs that are not used in any target.
-            let mut offset_map = OffsetMap::new(0);
+            let mut offset_map = OffsetMap::new();
             let mut is_input_still_used = (0u32..).zip(is_input_still_used);
             node.inputs.retain(|_| {
                 let (input_idx, is_used) = is_input_still_used.next().unwrap();
