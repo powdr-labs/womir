@@ -2,10 +2,6 @@
 //! blocks. These spurious inputs and outputs may come from the original Wasm
 //! code, but they can also be introduced by the `locals_data_flow` pass, which is
 //! conservative in its analysis of local usage.
-//!
-//! As part of the algorithm, loop inputs that are carried through the loop iterations
-//! without modification are detected, so we save this information for later passes,
-//! which can use it to optimize register allocation and code generation.
 
 use std::{
     cmp::Ordering,
@@ -24,18 +20,6 @@ use crate::{
     },
     utils::remove_indices,
 };
-
-/// The set of outputs indexed from the Input node that are redirected
-/// as-is to the next iteration of the loop.
-///
-/// The vector is sorted, and contains no duplicates.
-///
-/// This is useful to detect outer values that are read by the loop, but
-/// not written, so they can be preserved across the entire loop execution,
-/// eliding unnecessary copies.
-///
-/// On the toplevel block (which is not a loop), this is always empty.
-struct InputRedirection(Vec<u32>);
 
 pub fn prune_block_io(dag: &mut Dag<'_>) {
     process_block(&mut dag.nodes, &mut VecDeque::new())
@@ -163,19 +147,27 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
     for node_idx in 0..dag.len() {
         let node = &mut dag[node_idx];
         apply_substitutions(&mut node.inputs, &input_substitutions);
-        match &mut node.operation {
-            Operation::Inputs => {
+
+        // In the function body, we can't change the inputs and outputs of the function,
+        // so we can skip a lot of processing.
+        let is_func_body = cs.is_empty();
+
+        match (&mut node.operation, is_func_body) {
+            (Operation::Inputs, false) => {
                 // This is the first node of a block, which lists the block inputs.
                 // We use its information to initialize the input usage information for this block.
                 cs[0]
                     .input_usage
                     .resize(node.output_types.len(), InputUsage::Unused);
             }
-            Operation::WASMOp(Op::Br { relative_depth }) => {
+            (Operation::WASMOp(Op::Br { relative_depth }), false) => {
                 handle_break_target(cs, &node.inputs, *relative_depth);
             }
-            Operation::BrIfZero { relative_depth }
-            | Operation::WASMOp(Op::BrIf { relative_depth }) => {
+            (
+                Operation::BrIfZero { relative_depth }
+                | Operation::WASMOp(Op::BrIf { relative_depth }),
+                false,
+            ) => {
                 let (condition, break_inputs) = node.inputs.split_last().unwrap();
                 // Handle the condition as a normal node input:
                 for (_, input_idx) in block_inputs([condition]) {
@@ -184,7 +176,7 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
 
                 handle_break_target(cs, break_inputs, *relative_depth);
             }
-            Operation::BrTable { targets } => {
+            (Operation::BrTable { targets }, false) => {
                 let (condition, break_inputs) = node.inputs.split_last().unwrap();
                 // Handle the condition as a normal node input:
                 for (_, input_idx) in block_inputs([condition]) {
@@ -202,7 +194,7 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                     handle_break_target(cs, target_inputs, *relative_depth);
                 }
             }
-            Operation::Block { .. } => {
+            (Operation::Block { .. }, is_func_body) => {
                 let mut total_outputs_to_remove = Vec::new();
 
                 let last_pass = loop {
@@ -259,13 +251,17 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                 //
                 // Both entry.input_usage and entry.input_map are relative to the original block inputs (they are
                 // calculated before the input removals), so we need to filter out inputs that were removed.
-                let mut inputs_removed = last_pass.inputs_removed.into_iter().peekable();
-                for (sub_input_idx, usage) in last_pass.entry.input_usage.into_iter().enumerate() {
-                    if !is_in_sorted_iter(&mut inputs_removed, &(sub_input_idx as u32))
-                        && let Some(input_idx) =
-                            last_pass.entry.input_map.get(&(sub_input_idx as u32))
+                if !is_func_body {
+                    let mut inputs_removed = last_pass.inputs_removed.into_iter().peekable();
+                    for (sub_input_idx, usage) in
+                        last_pass.entry.input_usage.into_iter().enumerate()
                     {
-                        cs[0].input_usage[*input_idx as usize].combine(usage.depth_down());
+                        if !is_in_sorted_iter(&mut inputs_removed, &(sub_input_idx as u32))
+                            && let Some(input_idx) =
+                                last_pass.entry.input_map.get(&(sub_input_idx as u32))
+                        {
+                            cs[0].input_usage[*input_idx as usize].combine(usage.depth_down());
+                        }
                     }
                 }
 
@@ -275,12 +271,15 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                     break;
                 }
             }
-            _ => {
+            (_, false) => {
                 // This is a normal node that might use some block inputs
                 for (_, input_idx) in block_inputs(&node.inputs) {
                     // This block input is being used in some way...
                     cs[0].input_usage[input_idx as usize] = InputUsage::Used;
                 }
+            }
+            _ => {
+                // We are processing a non-block node in the function body, we can just skip.
             }
         }
     }
@@ -307,6 +306,13 @@ fn handle_break_target<'a>(
         } else {
             None
         };
+
+        // We can't change the function signature, so if the target is a return,
+        // we don't track the redirections.
+        if relative_depth >= cs.len() as u32 {
+            assert_eq!(relative_depth, cs.len() as u32);
+            continue;
+        }
 
         // For each block down in the control stack up to the break target
         // we try to find if the inputs are still block inputs.
