@@ -38,8 +38,7 @@ label_42:
   ; continuation
 ```
 
-The flattening pass does not attempt to detect this during emission because the
-DAG structure does not guarantee any particular ordering. Instead, this cheap
+The flattening pass does not attempt to detect this during emission. Instead, this cheap
 post-processing pass cleans them up.
 
 ## Statistics
