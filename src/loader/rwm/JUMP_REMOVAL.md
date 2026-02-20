@@ -9,7 +9,7 @@
 
 This is a simple peephole optimization that removes unconditional jumps whose target
 is the immediately following instruction. These "dumb jumps" are an artifact of the
-flattening pass, which always emits jumps for breaks even when the target label
+DAG representation, where all breaks are explicit, even when the target
 happens to be placed right after the jump.
 
 ## Algorithm
