@@ -6,9 +6,12 @@ use std::{
 use itertools::Itertools;
 use wasmparser::Operator as Op;
 
-use crate::loader::{
-    BlockKind,
-    dag::{Dag, Node, NodeInput, Operation, ValueOrigin},
+use crate::{
+    loader::{
+        BlockKind,
+        dag::{Dag, Node, NodeInput, Operation, ValueOrigin},
+    },
+    utils::remove_indices,
 };
 
 #[derive(Default, Debug)]
@@ -172,8 +175,9 @@ fn recursive_removal(
                 for input in node.inputs.iter() {
                     if let NodeInput::Reference(origin) = input {
                         used_outputs.insert(*origin);
+                    } else {
+                        // Constants don't reference other nodes, so we ignore them
                     }
-                    // Constants don't reference other nodes, so we ignore them
                 }
                 None
             } else {
@@ -229,8 +233,9 @@ fn recursive_removal(
                     }
 
                     origin.node -= offset_map.get(&origin.node);
+                } else {
+                    // Constants don't need remapping
                 }
-                // Constants don't need remapping
             }
             true
         }
@@ -337,27 +342,7 @@ fn fix_breaks(node: &mut Node, ctrl_stack: &mut VecDeque<StackElement>) {
 }
 
 fn remove_indices_from_vec<T>(vec: &mut Vec<T>, sorted_ids: &[u32]) {
-    let mut sorted_ids = sorted_ids.iter().cloned().peekable();
-
-    // We start the removal from the first index to be removed,
-    // cutting the iteration short.
-    let Some(initial_idx) = sorted_ids.next() else {
-        return;
-    };
-
-    let mut dest = initial_idx as usize;
-    for src in dest + 1..vec.len() {
-        if sorted_ids.peek() == Some(&(src as u32)) {
-            // If the current index is in the list of indices to be removed, skip it.
-            sorted_ids.next();
-        } else {
-            // Otherwise, swap the value to the destination index.
-            vec.swap(dest, src);
-            dest += 1;
-        }
-    }
-    // All the unused elements are at the end of the vector.
-    vec.truncate(dest);
+    remove_indices(vec, sorted_ids.iter().map(|x| *x as usize), |_, _| {});
 }
 
 /// Checks if a node has side effects

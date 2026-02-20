@@ -471,6 +471,8 @@ pub enum CommonStages<'a> {
     ConstCollapsedDag(Dag<'a>),
     /// The DAG after deduplicating constant definitions.
     ConstDedupDag(Dag<'a>),
+    /// The DAG after removing unecessary inputs and outputs of blocks.
+    CleanBlockIODag(Dag<'a>),
     /// The DAG after removing dangling nodes that do not contribute to the output.
     DanglingOptDag(Dag<'a>),
     /// The blockless DAG representation of the function, where block nodes are expanded
@@ -531,6 +533,11 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
                 Self::ConstDedupDag(dag)
             }
             Self::ConstDedupDag(mut dag) => {
+                // Optimization pass: remove unecessary inputs and outputs of blocks.
+                dag::prune_block_io::prune_block_io(&mut dag);
+                Self::CleanBlockIODag(dag)
+            }
+            Self::CleanBlockIODag(mut dag) => {
                 // Optimization passes: remove pure nodes that does not contribute to the output.
                 let mut removed_nodes = 0;
                 let mut removed_block_outputs = 0;
