@@ -2,27 +2,22 @@ This files describes all the optimizations ideas we left out for now.
 
 Things that are not needed if the WASM was optimized in the first place:
 
-- [block_tree]: track whether a block is ever broken to (explicitly or
-  implictly), so that we know if anything after it is dead code to be
-  removed. Dead code removal translates to less data dependency in the
-  DAG, which translates to possibly less data copies in the final code.
-  But there shouldn't be any already, if the WASM is from an optimizing
-  compiler.
-
-- [locals_data_flow]: track locals permutation. If some locals are read into
-  a block, but in the end they are just output unmodified (either on stack
-  or on some local), this can be resolved statically when building the DAG,
-  eliding copies. It is hard to imagine why this would happen in optimized code.
+- [prune_block_io]: if the same value is given at diferent input slots
+  of a block, we can unify them into a single slot and remap the block
+  inputs accordingly. This is not trivial to detect in loops, but
+  something of the sorts is already implemented, when detecting if some
+  input is redirected unchanged to the next iterations.
 
 Unlikely to be useful optimizations:
 
-- [locals_data_flow]: sometimes a loop needs to take locals as inputs
-  just to output them in certain breaks, unmodified. Such locals would
-  have to be copied over through all the iterations, but never actually
-  used inside the loop. In such cases, it is worth to make these breaks
-  indirect, by creating blocks surrounding the loop just to forward the
-  breaks. The passthrough locals will be handled by the outside blocks
-  and breaks, avoiding them to be copied into the loop.
+- [(wom)prune_block_io]: sometimes a loop needs to take inputs just to output
+  them in certain breaks, unmodified. Such values would have to be copied
+  over through all the iterations, but never actually used inside the loop.
+  In such cases, it is worth to make these breaks indirect, by creating
+  blocks surrounding the loop just to forward the breaks. The passthrough
+  values will be handled by the outside blocks and breaks, avoiding them
+  to be copied into the loop (the information wether each input fits this
+  criteria should already be available inside prune_block_io).
 
 - [register_allocation]: the register allocation is not perfectly optimal,
   it just uses a greedy approach to assign registers, and give up when it
@@ -31,10 +26,10 @@ Unlikely to be useful optimizations:
 
 Likely to be useful optimizations
 
-- if there are more than one loop nested inside each other, and the inner
-  loop falls through the outer loop, which then breaks or falls through
-  again, it is better to have the inner loop break directly to the final
-  destination instead of going through multiple frame barriers, because
+- [(wom)]: if there are more than one loop nested inside each other, and
+  the inner loop falls through the outer loop, which then breaks or falls
+  through again, it is better to have the inner loop break directly to the
+  final destination instead of going through multiple frame barriers, because
   each frame barrier potentially adds multiple copies.
 
 - [tail call]: a call immediately followed by a return can be optimized
@@ -49,7 +44,7 @@ Likely to be useful optimizations
   releasing values earlier when possible, which may reduce register
   pressure.
 
-- [rw-register-allocation]: implement a simple heuristic to try to avoid
+- [(rw)register-allocation]: implement a simple heuristic to try to avoid
   having to copy the function outputs to the slots allocated for them by
   the nodes who uses them as inputs.
   

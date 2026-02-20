@@ -306,7 +306,6 @@ fn handle_break_target<'a>(
 
         // For each block down in the control stack up to the break target
         // we try to find if the inputs are still block inputs.
-
         let block_input_idx = block_input_idx.and_then(|mut input_idx| {
             for entry in cs.iter().take(relative_depth as usize) {
                 if let Some(mapped_input) = entry.input_map.get(&input_idx) {
@@ -375,14 +374,15 @@ fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) 
     let outputs_redirections = vec![Redirection::Unknown; num_outputs];
 
     // Map from the input inside of the sub-block to the input of the current block.
-    // TODO: MAJOR BUG: you can't just remap the inputs to a loop sub-block,
+    //
+    // [MAJOR BUG] TODO: you can't just remap the inputs to a loop sub-block,
     // because this only guarantees the mapping on the first iteration. You can only do
     // this if the input is redirected as-is to the next iteration, but we don't have
     // that information at this point.
     //
     // Since this information is also used by the register allocator later,
     // we should have a pass calculating this earlier.
-    todo!()
+    // todo!();
     let input_map = block_inputs(&node.inputs)
         .map(|(node_input_idx, block_input_idx)| (node_input_idx as u32, block_input_idx))
         .collect();
