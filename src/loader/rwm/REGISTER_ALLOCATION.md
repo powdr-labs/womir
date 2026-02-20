@@ -42,8 +42,7 @@ For each node, processed in reverse order:
 - **Function calls (Call/CallIndirect):** The allocator first determines the call
   frame start (the first register after all currently occupied ones). Then it tries
   to place each input at the exact register where the callee expects it, saving a
-  copy if successful. Function outputs are pre-allocated at their natural position
-  on the call frame.
+  copy if successful.
 
 - **Labels:** Outputs are allocated at whatever position is available. Break
   instructions targeting this label will try to match these positions.
