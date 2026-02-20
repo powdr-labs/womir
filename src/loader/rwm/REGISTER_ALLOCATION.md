@@ -73,7 +73,7 @@ It maintains an `IntervalMap<usize, usize>` that maps **liveness ranges** (expre
 as node index ranges) to allocation entries. Each entry records:
 
 - **`AllocationType`**: What kind of allocation it is:
-  - `Value(ValueOrigin)` — A normal DAG value.
+  - `Value(ValueOrigin)` — A value produced by a DAG node (pointed by the `ValueOrigin` data).
   - `FunctionFrame` — Space reserved for a callee's frame during a function call.
   - `SubBlockInternal` — Registers used inside a loop body, blocked at the parent level.
   - `BlockedRegistersAtParent` — Parent-level registers inherited by a sub-tracker.
