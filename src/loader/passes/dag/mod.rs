@@ -1,6 +1,7 @@
 pub mod const_collapse;
 pub mod const_dedup;
 pub mod dangling_removal;
+pub mod prune_block_io;
 
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
