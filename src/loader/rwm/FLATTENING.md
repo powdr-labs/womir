@@ -141,6 +141,6 @@ Key emission methods used by flattening:
 - `emit_conditional_jump_cmp_immediate` — Jump on comparison with immediate (for BrTable bounds)
 - `emit_relative_jump` — Jump by offset (for BrTable dispatch)
 - `emit_return` — Function return (restores RA/FP)
-- `emit_function_call`, `emit_indirect_call` — Local and indirect calls
+- `emit_function_call`, `emit_indirect_call` — Static and indirect calls
 - `emit_imported_call` — Imported (external) function call
 - `emit_wasm_op` — Generic WASM instruction emission
