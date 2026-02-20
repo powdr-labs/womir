@@ -96,7 +96,7 @@ as node index ranges) to allocation entries. Each entry records:
 - **`reserve_range(range)`**: Permanently blocks a register range (used for RA/FP).
 
 - **`allocate_fn_call(call_index, output_sizes)`**: Reserves a function call frame
-  starting after all currently occupied registers. Pre-allocates outputs at their
+  starting after all currently occupied registers. Allocates unused outputs at their
   natural positions on the frame.
 
 - **`make_sub_tracker(sub_block_index, sub_liveness)`**: Creates a child tracker
