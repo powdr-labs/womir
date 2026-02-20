@@ -440,7 +440,7 @@ fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) 
             }
         }
     } else {
-        // This is a loop, and loops "never" returns. Due to an earlier DAG
+        // This is a loop, and loops "never" returns: due to an earlier DAG
         // transformation that made all breaks explicit, when we break out of
         // a loop, it is always an explicit break to an outer block.
         block_returns = false;
@@ -494,7 +494,7 @@ fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) 
     }
 
     if let BlockKind::Loop = kind {
-        // Resolve Unknown inputs in a loop by propagating No backwards.
+        // Resolve Unknown inputs in a loop by propagating CanRemoveInput::No backwards.
         //
         // Each Unknown input is only used as a redirection to other loop
         // inputs (its slots). If any of those targets is No, then this
