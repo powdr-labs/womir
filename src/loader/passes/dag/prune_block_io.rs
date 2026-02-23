@@ -160,7 +160,7 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
             ) => {
                 let (condition, break_inputs) = node.inputs.split_last().unwrap();
                 // Handle the condition as a normal node input:
-                for (_, input_idx) in block_inputs([condition]) {
+                if let Some((_, input_idx)) = block_inputs([condition]).next() {
                     cs[0].input_usage[input_idx as usize] = InputUsage::Used;
                 }
 
@@ -169,7 +169,7 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
             (Operation::BrTable { targets }, false) => {
                 let (condition, break_inputs) = node.inputs.split_last().unwrap();
                 // Handle the condition as a normal node input:
-                for (_, input_idx) in block_inputs([condition]) {
+                if let Some((_, input_idx)) = block_inputs([condition]).next() {
                     cs[0].input_usage[input_idx as usize] = InputUsage::Used;
                 }
 
