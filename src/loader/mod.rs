@@ -26,6 +26,8 @@ use wasmparser::{
     WasmFeatures,
 };
 
+use crate::loader::passes::calc_input_redirection::{self, RedirDag};
+
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
     Mutable(AllocatedVar),
@@ -471,6 +473,9 @@ pub enum CommonStages<'a> {
     ConstCollapsedDag(Dag<'a>),
     /// The DAG after deduplicating constant definitions.
     ConstDedupDag(Dag<'a>),
+    /// The DAG with information, on each block, of which inputs are redirected unchanged
+    /// to the outputs.
+    RedirectionDag(RedirDag<'a>),
     /// The DAG after removing dangling nodes that do not contribute to the output.
     DanglingOptDag(Dag<'a>),
     /// The blockless DAG representation of the function, where block nodes are expanded
@@ -530,7 +535,15 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
                 }
                 Self::ConstDedupDag(dag)
             }
-            Self::ConstDedupDag(mut dag) => {
+            Self::ConstDedupDag(dag) => {
+                // Optimization pass: calculate what block inputs are redirected unchanged
+                // to the outputs.
+                let dag = calc_input_redirection::calculate_input_redirection(dag);
+                println!("Redirection DAG;\n{dag:#?}");
+                Self::RedirectionDag(dag)
+            }
+            Self::RedirectionDag(mut dag) => {
+                let dag = todo!();
                 // Optimization passes: remove pure nodes that does not contribute to the output.
                 let mut removed_nodes = 0;
                 let mut removed_block_outputs = 0;
