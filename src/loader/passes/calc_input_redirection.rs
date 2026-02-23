@@ -117,10 +117,12 @@ where
 {
     let mut new_nodes = Vec::with_capacity(nodes.len());
     let mut fixed_point = true;
+    let mut block_ended = false;
     for node in nodes {
         let op = match node.operation {
             Operation::WASMOp(Op::Br { relative_depth }) => {
                 fixed_point &= handle_break_target(cs, &node.inputs, relative_depth);
+                block_ended = true;
                 node.operation
             }
             Operation::BrIfZero { relative_depth }
@@ -140,6 +142,7 @@ where
                         .map(|perm| &node.inputs[*perm as usize]);
                     fixed_point &= handle_break_target(cs, target_inputs, *relative_depth);
                 }
+                block_ended = true;
                 node.operation
             }
             Operation::Block { .. } => {
@@ -174,6 +177,11 @@ where
         };
 
         new_nodes.push(new_node);
+
+        if block_ended {
+            // No more nodes in this block can be reached, so we can stop processing it.
+            break;
+        }
     }
 
     (new_nodes, fixed_point)
@@ -282,13 +290,24 @@ where
     // This is optimistic in the inner passes: we assume inputs to loops will be redirected
     // if it can happen according to the current redirections. Wrong choices will be fixed
     // in the following passes.
-    let input_map = block_inputs(&node.inputs)
-        .filter_map(|(node_input_idx, block_input_idx)| {
-            let redir = &redirections[node_input_idx];
-            (*redir == Redirection::Unknown || *redir == Redirection::FromInput(block_input_idx))
+    let input_map: HashMap<u32, u32> = if let BlockKind::Loop = kind {
+        // For loops, only include inputs whose corresponding output
+        // is (optimistically) redirected to the same parent input.
+        block_inputs(&node.inputs)
+            .filter_map(|(node_input_idx, block_input_idx)| {
+                let redir = &redirections[node_input_idx];
+                (*redir == Redirection::Unknown
+                    || *redir == Redirection::FromInput(block_input_idx))
                 .then_some((node_input_idx as u32, block_input_idx))
-        })
-        .collect();
+            })
+            .collect()
+    } else {
+        // For non-loop blocks, inputs never change,
+        // so all parent-sourced inputs are always valid mappings.
+        block_inputs(&node.inputs)
+            .map(|(node_input_idx, block_input_idx)| (node_input_idx as u32, block_input_idx))
+            .collect()
+    };
 
     // Call the processing recursively
     cs.push_front(ControlStackEntry {
