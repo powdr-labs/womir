@@ -14,12 +14,44 @@ use womir::{
 
 struct DataInput {
     values: <Vec<u32> as IntoIterator>::IntoIter,
+    /// Pre-formatted hint items: each is `[byte_len, word0, word1, ...]`.
+    hint_items: Vec<Vec<u32>>,
+    hint_item_idx: usize,
+    /// Word-level read cursor within the current hint item.
+    hint_cursor: usize,
 }
 
 impl DataInput {
     fn new(values: Vec<u32>) -> Self {
         Self {
             values: values.into_iter(),
+            hint_items: Vec::new(),
+            hint_item_idx: 0,
+            hint_cursor: 0,
+        }
+    }
+
+    fn new_with_binary_inputs(values: Vec<u32>, binary_inputs: Vec<Vec<u8>>) -> Self {
+        let hint_items = binary_inputs
+            .iter()
+            .map(|data| {
+                let byte_len = data.len() as u32;
+                let num_words = data.len().div_ceil(4);
+                let mut words = Vec::with_capacity(1 + num_words);
+                words.push(byte_len);
+                for chunk in data.chunks(4) {
+                    let mut word_bytes = [0u8; 4];
+                    word_bytes[..chunk.len()].copy_from_slice(chunk);
+                    words.push(u32::from_le_bytes(word_bytes));
+                }
+                words
+            })
+            .collect();
+        Self {
+            values: values.into_iter(),
+            hint_items,
+            hint_item_idx: 0,
+            hint_cursor: 0,
         }
     }
 }
@@ -35,6 +67,54 @@ impl ExternalFunctions for DataInput {
         match (module, function) {
             ("env", "read_u32") => {
                 vec![self.values.next().expect("Not enough input values")]
+            }
+            ("env", "__hint_input") => {
+                assert!(
+                    self.hint_item_idx < self.hint_items.len(),
+                    "No more hint items (requested item {}, have {})",
+                    self.hint_item_idx,
+                    self.hint_items.len()
+                );
+                self.hint_cursor = 0;
+                vec![]
+            }
+            ("env", "__hint_buffer") => {
+                let ptr = args[0];
+                let num_words = args[1] as usize;
+                let item = &self.hint_items[self.hint_item_idx];
+                assert!(
+                    self.hint_cursor + num_words <= item.len(),
+                    "hint_buffer: reading {} words at cursor {} but item only has {} words",
+                    num_words,
+                    self.hint_cursor,
+                    item.len()
+                );
+                let mem = mem.as_mut().unwrap();
+                for i in 0..num_words {
+                    mem.set_word(ptr + (i as u32) * 4, item[self.hint_cursor + i])
+                        .unwrap();
+                }
+                self.hint_cursor += num_words;
+                // Advance to next item when fully consumed.
+                if self.hint_cursor >= item.len() {
+                    self.hint_item_idx += 1;
+                }
+                vec![]
+            }
+            ("env", "__debug_print") => {
+                let ptr = args[0];
+                let num_bytes = args[1] as usize;
+                let mem = mem.as_mut().unwrap();
+                let bytes: Vec<u8> = (0..num_bytes)
+                    .map(|i| {
+                        let addr = ptr + (i as u32);
+                        let word = mem.get_word(addr & !3).unwrap();
+                        (word >> ((addr % 4) * 8)) as u8
+                    })
+                    .collect();
+                let msg = String::from_utf8_lossy(&bytes);
+                eprintln!("[guest] {msg}");
+                vec![]
             }
             ("env", "abort") => {
                 panic!("Abort called with args: {:?}", args);
@@ -132,6 +212,10 @@ fn main() -> wasmparser::Result<()> {
             /// Comma separated data inputs (u32)
             #[arg(short, long, value_delimiter = ',', value_parser = clap::value_parser!(u32))]
             inputs: Vec<u32>,
+
+            /// Binary files to feed via the hint stream (__hint_input / __hint_buffer)
+            #[arg(long)]
+            binary_input_files: Vec<String>,
         },
     }
 
@@ -154,6 +238,7 @@ fn main() -> wasmparser::Result<()> {
             function,
             args,
             inputs,
+            binary_input_files,
             trace,
         } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
@@ -164,8 +249,19 @@ fn main() -> wasmparser::Result<()> {
                 log::error!("Failed to dump IR: {err}");
             }
 
-            let mut interpreter =
-                Interpreter::new(program, cli.exec_model, DataInput::new(inputs), trace);
+            let binary_inputs: Vec<Vec<u8>> = binary_input_files
+                .iter()
+                .map(|path| {
+                    std::fs::read(path).unwrap_or_else(|e| panic!("Failed to read {path}: {e}"))
+                })
+                .collect();
+            let data_input = if binary_inputs.is_empty() {
+                DataInput::new(inputs)
+            } else {
+                DataInput::new_with_binary_inputs(inputs, binary_inputs)
+            };
+
+            let mut interpreter = Interpreter::new(program, cli.exec_model, data_input, trace);
             log::info!("Executing function: {function}");
             let outputs = interpreter.run(&function, &args);
             log::info!("Outputs: {:?}", outputs);
@@ -369,6 +465,65 @@ mod tests {
         // Compile command:
         //   GOOS=js GOARCH=wasm go -gcflags=all=-d=softfloat build -tags "example" -o keeper.wasm
         test_interpreter_from_sample_programs("keeper_js.wasm", "run", &[0, 0], vec![], &[]);
+    }
+
+    /// Like `test_interpreter_from_sample_programs` but feeds binary files as hint stream inputs.
+    fn test_interpreter_with_binary_inputs(
+        wasm_path: &str,
+        main_function: &str,
+        func_inputs: &[u32],
+        binary_input_paths: &[&str],
+        outputs: &[u32],
+    ) {
+        let base = format!("{}/sample-programs", env!("CARGO_MANIFEST_DIR"));
+        let wasm_file =
+            std::fs::read(format!("{base}/{wasm_path}")).expect("failed to read wasm file");
+        let binary_inputs: Vec<Vec<u8>> = binary_input_paths
+            .iter()
+            .map(|p| std::fs::read(format!("{base}/{p}")).expect("failed to read binary input"))
+            .collect();
+
+        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+
+        let program = program
+            .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+            .unwrap();
+
+        let mut interpreter = Interpreter::new(
+            program,
+            ExecutionModel::InfiniteRegisters,
+            DataInput::new_with_binary_inputs(vec![], binary_inputs),
+            false,
+        );
+        let got_output = interpreter.run(main_function, func_inputs);
+        assert_eq!(got_output, outputs);
+    }
+
+    #[test]
+    fn test_reth_guest_block_1() {
+        // Executes Ethereum block 1 inside the reth guest compiled to wasm32.
+        // The guest reads block input via the hint stream, executes the block, and verifies the
+        // state root and post-execution checks.
+        test_interpreter_with_binary_inputs(
+            "reth-guest.wasm",
+            "main",
+            &[0, 0],
+            &["reth-block-1.bin"],
+            &[0],
+        );
+    }
+
+    #[test]
+    #[ignore] // ~7.5 MB input, takes a long time
+    fn test_reth_guest_block_24171377() {
+        // Executes Ethereum block 24171377 inside the reth guest compiled to wasm32.
+        test_interpreter_with_binary_inputs(
+            "reth-guest.wasm",
+            "main",
+            &[0, 0],
+            &["reth-block-24171377.bin"],
+            &[0],
+        );
     }
 
     #[test]
