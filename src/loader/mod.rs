@@ -7,7 +7,7 @@ use core::panic;
 use itertools::Itertools;
 use passes::{
     block_tree::BlockTree,
-    blockless_dag::{self, BlocklessDag, BreakTarget},
+    blockless_dag::{self, BreakTarget},
     dag::{self, Dag, NodeInput, ValueOrigin},
     locals_data_flow::{self, LiftedBlockTree},
 };
@@ -26,7 +26,10 @@ use wasmparser::{
     WasmFeatures,
 };
 
-use crate::loader::passes::calc_input_redirection::{self, RedirDag};
+use crate::loader::passes::{
+    blockless_dag::BlocklessDag,
+    calc_input_redirection::{self, RedirDag, Redirection},
+};
 
 #[derive(Debug, Clone)]
 pub enum Global<'a> {
@@ -477,7 +480,7 @@ pub enum CommonStages<'a> {
     /// to the outputs.
     RedirectionDag(RedirDag<'a>),
     /// The DAG after removing dangling nodes that do not contribute to the output.
-    DanglingOptDag(Dag<'a>),
+    DanglingOptDag(RedirDag<'a>),
     /// The blockless DAG representation of the function, where block nodes are expanded
     /// into the parent block and labels are introduced. Loops are still kept as blocks.
     BlocklessDag(BlocklessDag<'a>),
@@ -538,12 +541,10 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
             Self::ConstDedupDag(dag) => {
                 // Optimization pass: calculate what block inputs are redirected unchanged
                 // to the outputs.
-                let dag = calc_input_redirection::calculate_input_redirection(dag);
-                println!("Redirection DAG;\n{dag:#?}");
+                let dag: RedirDag = calc_input_redirection::calculate_input_redirection(dag);
                 Self::RedirectionDag(dag)
             }
             Self::RedirectionDag(mut dag) => {
-                let dag = todo!();
                 // Optimization passes: remove pure nodes that does not contribute to the output.
                 let mut removed_nodes = 0;
                 let mut removed_block_outputs = 0;
@@ -564,7 +565,7 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
             }
             Self::DanglingOptDag(dag) => {
                 // Convert the DAG to a blockless DAG representation.
-                let blockless_dag = BlocklessDag::new(dag, label_gen);
+                let blockless_dag = BlocklessDag::from_dag(dag, label_gen);
                 Self::BlocklessDag(blockless_dag)
             }
             Self::BlocklessDag(blockless_dag) => {
@@ -1531,12 +1532,12 @@ fn generate_imported_func_wrapper<'a, S: Settings>(
     // A very simple DAG that just calls the imported function.
     BlocklessDag {
         nodes: vec![
-            blockless_dag::Node {
+            blockless_dag::GenericNode {
                 operation: blockless_dag::Operation::Inputs,
                 inputs: Vec::new(),
                 output_types: func_type.params().to_vec(),
             },
-            blockless_dag::Node {
+            blockless_dag::GenericNode {
                 operation: blockless_dag::Operation::WASMOp(Operator::Call {
                     function_index: function_idx,
                 }),
@@ -1550,7 +1551,7 @@ fn generate_imported_func_wrapper<'a, S: Settings>(
                     .collect(),
                 output_types: func_type.results().to_vec(),
             },
-            blockless_dag::Node {
+            blockless_dag::GenericNode {
                 operation: blockless_dag::Operation::Br(BreakTarget {
                     depth: 0,
                     kind: blockless_dag::TargetType::FunctionOrLoop,
@@ -1566,7 +1567,7 @@ fn generate_imported_func_wrapper<'a, S: Settings>(
                 output_types: Vec::new(),
             },
         ],
-        block_data: (),
+        block_data: vec![Redirection::NotRedirected; func_type.results().len()],
     }
 }
 

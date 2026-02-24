@@ -117,12 +117,10 @@ where
 {
     let mut new_nodes = Vec::with_capacity(nodes.len());
     let mut fixed_point = true;
-    let mut block_ended = false;
     for node in nodes {
         let op = match node.operation {
             Operation::WASMOp(Op::Br { relative_depth }) => {
                 fixed_point &= handle_break_target(cs, &node.inputs, relative_depth);
-                block_ended = true;
                 node.operation
             }
             Operation::BrIfZero { relative_depth }
@@ -142,7 +140,6 @@ where
                         .map(|perm| &node.inputs[*perm as usize]);
                     fixed_point &= handle_break_target(cs, target_inputs, *relative_depth);
                 }
-                block_ended = true;
                 node.operation
             }
             Operation::Block { .. } => {
@@ -160,6 +157,13 @@ where
                     continue;
                 } else {
                     // The rest of this block is unreachable, so we can stop processing it.
+                    //
+                    // Other dead code cases (namely, after Loop blocks, Br, BrTable and
+                    // Unreachable) were handled in a previous pass, so we don't need to
+                    // worry about them here.
+                    //
+                    // Only this dead code removal, when after a Block never broken to,
+                    // is new to this pass.
                     break;
                 }
             }
@@ -177,11 +181,6 @@ where
         };
 
         new_nodes.push(new_node);
-
-        if block_ended {
-            // No more nodes in this block can be reached, so we can stop processing it.
-            break;
-        }
     }
 
     (new_nodes, fixed_point)

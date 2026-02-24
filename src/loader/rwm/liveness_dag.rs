@@ -8,9 +8,10 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::loader::{
     blockless_dag::{
-        BlocklessDag, BreakTarget, GenericBlocklessDag, GenericNode, Node as BDNode, TargetType,
+        BreakTarget, GenericBlocklessDag, GenericNode, GenericNode as BDNode, TargetType,
     },
     dag::{NodeInput, ValueOrigin},
+    passes::blockless_dag::BlocklessDag,
 };
 
 #[derive(Debug)]
@@ -55,7 +56,7 @@ pub type LivenessDag<'a> = GenericBlocklessDag<'a, Liveness>;
 pub type Node<'a> = GenericNode<'a, Liveness>;
 
 impl<'a> LivenessDag<'a> {
-    pub fn new(dag: BlocklessDag<'a>) -> Self {
+    pub fn from_blockless_dag(dag: BlocklessDag<'a>) -> Self {
         // The top-level block does not have a stack entry,
         // because it is not a loop.
         process_block(dag, &mut VecDeque::new())
