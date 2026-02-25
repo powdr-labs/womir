@@ -8,7 +8,7 @@ use std::{
 use wasmparser::Operator as Op;
 
 use crate::loader::{
-    BlockKind,
+    BlockKind, Module,
     passes::dag::{
         BrTableTarget, Dag, GenericDag, GenericNode, Node, NodeInput, Operation, ValueOrigin,
     },
@@ -30,16 +30,20 @@ pub enum Redirection {
 pub type RedirDag<'a> = GenericDag<'a, Vec<Redirection>>;
 pub type RedirNode<'a> = GenericNode<'a, Vec<Redirection>>;
 
-pub fn calculate_input_redirection(dag: Dag<'_>) -> RedirDag<'_> {
-    let input_size = dag.nodes[0].output_types.len();
+pub fn calculate_input_redirection<'a>(
+    dag: Dag<'a>,
+    module: &Module<'a>,
+    func_idx: u32,
+) -> RedirDag<'a> {
+    let output_size = module.get_func_type(func_idx).ty.results().len();
 
-    let top_level_entry = ControlStackEntry {
-        redirections: vec![Redirection::Unknown; input_size],
+    let entry = ControlStackEntry {
+        redirections: vec![Redirection::Unknown; output_size],
         input_map: HashMap::new(),
         was_ever_broken_to: false,
     };
 
-    let cs = &mut VecDeque::from(vec![top_level_entry]);
+    let cs = &mut VecDeque::from(vec![entry]);
     let (mut nodes, mut at_fixed_point) = process_block(dag.nodes, cs);
     while !at_fixed_point {
         let result = process_block(nodes, cs);
@@ -47,9 +51,23 @@ pub fn calculate_input_redirection(dag: Dag<'_>) -> RedirDag<'_> {
         at_fixed_point = result.1;
     }
 
+    let mut redirections = cs.pop_front().unwrap().redirections;
+    if redirections.contains(&Redirection::Unknown) {
+        assert!(
+            redirections
+                .iter()
+                .all(|redir| *redir == Redirection::Unknown)
+        );
+
+        // The function never returns, so it can't be a redirection.
+        redirections
+            .iter_mut()
+            .for_each(|redir| *redir = Redirection::NotRedirected);
+    }
+
     RedirDag {
         nodes,
-        block_data: cs.pop_front().unwrap().redirections,
+        block_data: redirections,
     }
 }
 

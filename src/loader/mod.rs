@@ -541,7 +541,8 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
             Self::ConstDedupDag(dag) => {
                 // Optimization pass: calculate what block inputs are redirected unchanged
                 // to the outputs.
-                let dag: RedirDag = calc_input_redirection::calculate_input_redirection(dag);
+                let dag: RedirDag =
+                    calc_input_redirection::calculate_input_redirection(dag, ctx, func_idx);
                 Self::RedirectionDag(dag)
             }
             Self::RedirectionDag(mut dag) => {
