@@ -179,7 +179,7 @@ fn main() -> wasmparser::Result<()> {
     #[command(author, version, about = "womir tool: compile or run a Wasm file", long_about = None)]
     struct Cli {
         /// Execution model (wom = write-once registers, rw = infinite/read-write registers)
-        #[arg(short = 'e', long = "exec-model", default_value = "wom", global = true, value_parser = parse_exec_model)]
+        #[arg(short = 'e', long = "exec-model", default_value = "rw", global = true, value_parser = parse_exec_model)]
         exec_model: ExecutionModel,
         #[command(subcommand)]
         command: Command,
