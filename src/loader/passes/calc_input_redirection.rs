@@ -211,6 +211,10 @@ fn handle_break_target<'a>(
     relative_depth: u32,
 ) -> bool {
     let mut fixed_point = true;
+
+    // Mark the break target block as being broken to, which is useful for dead code elimination.
+    cs[relative_depth as usize].was_ever_broken_to = true;
+
     for (slot_idx, input) in node_inputs.into_iter().enumerate() {
         // Determine if this input is a block input.
         let block_input_idx = if let NodeInput::Reference(ValueOrigin {
@@ -238,12 +242,9 @@ fn handle_break_target<'a>(
             Some(input_idx)
         });
 
-        let target_entry = &mut cs[relative_depth as usize];
-        target_entry.was_ever_broken_to = true;
-
         // If we have found a block input in the break target block,
         // we must decide if it is a redirection or not.
-        let redirection = &mut target_entry.redirections[slot_idx];
+        let redirection = &mut cs[relative_depth as usize].redirections[slot_idx];
         let old_redirection = *redirection;
         if let Some(input_idx) = block_input_idx {
             if let Redirection::Unknown = redirection {
