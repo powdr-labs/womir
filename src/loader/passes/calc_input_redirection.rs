@@ -354,7 +354,6 @@ where
                 // If the sub-block is a plain block, all outputs can be removed,
                 // and the rest of this block is unreachable, and we can stop processing it.
                 node.output_types.clear();
-                sub_entry.redirections.clear();
             }
             BlockKind::Loop => {
                 // If the sub-block is a loop, it can be turned into a plain block with no outputs,
@@ -363,6 +362,8 @@ where
                 assert!(node.output_types.is_empty());
             }
         }
+        // Either way, we have a Block with no outputs.
+        sub_entry.redirections.clear();
         block_returns = false;
     } else if let BlockKind::Loop = kind {
         // This is a loop, and loops "never" returns. When we break out of
