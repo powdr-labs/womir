@@ -1283,6 +1283,177 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
 
                         t.set_reg_relative_u64(c, r);
                     }
+                    Op::F64Abs => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+                        let a = f64::from_bits(t.get_reg_relative_u64(a));
+                        t.set_reg_relative_u64(c, a.abs().to_bits());
+                    }
+                    Op::F64Ceil => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+                        let a = f64::from_bits(t.get_reg_relative_u64(a));
+                        t.set_reg_relative_u64(c, a.ceil().to_bits());
+                    }
+                    Op::F64Floor => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+                        let a = f64::from_bits(t.get_reg_relative_u64(a));
+                        t.set_reg_relative_u64(c, a.floor().to_bits());
+                    }
+                    Op::F64Trunc => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+                        let a = f64::from_bits(t.get_reg_relative_u64(a));
+                        t.set_reg_relative_u64(c, a.trunc().to_bits());
+                    }
+                    Op::F64Nearest => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+                        let a = f64::from_bits(t.get_reg_relative_u64(a));
+                        t.set_reg_relative_u64(c, a.round_ties_even().to_bits());
+                    }
+                    Op::F64Sqrt => {
+                        let a = inputs[0].clone();
+                        let c = output.unwrap();
+                        let a = f64::from_bits(t.get_reg_relative_u64(a));
+                        t.set_reg_relative_u64(c, a.sqrt().to_bits());
+                    }
+                    Op::F64Add => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), (a + b).to_bits());
+                    }
+                    Op::F64Sub => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), (a - b).to_bits());
+                    }
+                    Op::F64Mul => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), (a * b).to_bits());
+                    }
+                    Op::F64Div => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), (a / b).to_bits());
+                    }
+                    Op::F64Eq => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), if a == b { 1 } else { 0 });
+                    }
+                    Op::F64Ne => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), if a != b { 1 } else { 0 });
+                    }
+                    Op::F64Lt => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), if a < b { 1 } else { 0 });
+                    }
+                    Op::F64Le => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), if a <= b { 1 } else { 0 });
+                    }
+                    Op::F64Gt => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), if a > b { 1 } else { 0 });
+                    }
+                    Op::F64Ge => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), if a >= b { 1 } else { 0 });
+                    }
+                    Op::F64Copysign => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), a.copysign(b).to_bits());
+                    }
+                    Op::F64Min => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), a.min(b).to_bits());
+                    }
+                    Op::F64Max => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        let b = f64::from_bits(t.get_reg_relative_u64(inputs[1].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), a.max(b).to_bits());
+                    }
+                    Op::F64ConvertI32S => {
+                        let a = t.get_reg_relative_u32(inputs[0].clone()) as i32;
+                        t.set_reg_relative_u64(output.unwrap(), (a as f64).to_bits());
+                    }
+                    Op::F64ConvertI32U => {
+                        let a = t.get_reg_relative_u32(inputs[0].clone());
+                        t.set_reg_relative_u64(output.unwrap(), (a as f64).to_bits());
+                    }
+                    Op::F64ConvertI64S => {
+                        let a = t.get_reg_relative_u64(inputs[0].clone()) as i64;
+                        t.set_reg_relative_u64(output.unwrap(), (a as f64).to_bits());
+                    }
+                    Op::F64ConvertI64U => {
+                        let a = t.get_reg_relative_u64(inputs[0].clone());
+                        t.set_reg_relative_u64(output.unwrap(), (a as f64).to_bits());
+                    }
+                    Op::F64PromoteF32 => {
+                        let a = f32::from_bits(t.get_reg_relative_u32(inputs[0].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), (a as f64).to_bits());
+                    }
+                    Op::F64ReinterpretI64 => {
+                        // Just copy the bits (already stored as u64)
+                        let a = t.get_reg_relative_u64(inputs[0].clone());
+                        t.set_reg_relative_u64(output.unwrap(), a);
+                    }
+                    Op::I64ReinterpretF64 => {
+                        let a = t.get_reg_relative_u64(inputs[0].clone());
+                        t.set_reg_relative_u64(output.unwrap(), a);
+                    }
+                    Op::I32TruncF64S => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), a as i32 as u32);
+                    }
+                    Op::I32TruncF64U => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), a as u32);
+                    }
+                    Op::I64TruncF64S => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), a as i64 as u64);
+                    }
+                    Op::I64TruncF64U => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        t.set_reg_relative_u64(output.unwrap(), a as u64);
+                    }
+                    Op::F32DemoteF64 => {
+                        let a = f64::from_bits(t.get_reg_relative_u64(inputs[0].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), (a as f32).to_bits());
+                    }
+                    Op::F32Mul => {
+                        let a = f32::from_bits(t.get_reg_relative_u32(inputs[0].clone()));
+                        let b = f32::from_bits(t.get_reg_relative_u32(inputs[1].clone()));
+                        t.set_reg_relative_u32(output.unwrap(), (a * b).to_bits());
+                    }
+                    Op::F32ConvertI32S => {
+                        let a = t.get_reg_relative_u32(inputs[0].clone()) as i32;
+                        t.set_reg_relative_u32(output.unwrap(), (a as f32).to_bits());
+                    }
+                    Op::F32ConvertI32U => {
+                        let a = t.get_reg_relative_u32(inputs[0].clone());
+                        t.set_reg_relative_u32(output.unwrap(), (a as f32).to_bits());
+                    }
+                    Op::F32ConvertI64S => {
+                        let a = t.get_reg_relative_u64(inputs[0].clone()) as i64;
+                        t.set_reg_relative_u32(output.unwrap(), (a as f32).to_bits());
+                    }
+                    Op::F32ConvertI64U => {
+                        let a = t.get_reg_relative_u64(inputs[0].clone());
+                        t.set_reg_relative_u32(output.unwrap(), (a as f32).to_bits());
+                    }
                     Op::F32Eq => {
                         let a = inputs[0].clone();
                         let b = inputs[1].clone();
