@@ -32,6 +32,7 @@ const TYPE_FLAG_FUNCTION: u32 = 4;
 
 /// A JS value stored in our table.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum JsValue {
     Undefined,
     Null,
@@ -329,9 +330,8 @@ impl GoJsRuntime {
                 let obj_ref = read_ref(mem, sp + 8);
                 let name_ptr = read_i64(mem, sp + 16) as u32;
                 let name_len = read_i64(mem, sp + 24) as u32;
-                let name =
-                    String::from_utf8_lossy(&read_bytes(mem, name_ptr, name_len as usize))
-                        .to_string();
+                let name = String::from_utf8_lossy(&read_bytes(mem, name_ptr, name_len as usize))
+                    .to_string();
 
                 let result_ref = if let Some(obj_id) = decode_ref_id(obj_ref) {
                     if let Some(prop_id) = self.values.get_prop(obj_id, &name) {
@@ -353,17 +353,15 @@ impl GoJsRuntime {
                 let obj_ref = read_ref(mem, sp + 8);
                 let name_ptr = read_i64(mem, sp + 16) as u32;
                 let name_len = read_i64(mem, sp + 24) as u32;
-                let name =
-                    String::from_utf8_lossy(&read_bytes(mem, name_ptr, name_len as usize))
-                        .to_string();
+                let name = String::from_utf8_lossy(&read_bytes(mem, name_ptr, name_len as usize))
+                    .to_string();
                 let val_ref = read_ref(mem, sp + 32);
 
-                if let Some(obj_id) = decode_ref_id(obj_ref) {
-                    if let Some(val_id) = decode_ref_id(val_ref) {
-                        self.values.set_prop(obj_id, &name, val_id);
-                    }
+                if let (Some(obj_id), Some(val_id)) =
+                    (decode_ref_id(obj_ref), decode_ref_id(val_ref))
+                {
+                    self.values.set_prop(obj_id, &name, val_id);
                 }
-                let _ = name; // suppress warning
             }
             "syscall/js.valueLength" => {
                 // Return 0 for everything
@@ -391,12 +389,11 @@ impl GoJsRuntime {
                 // Input: ref at sp+8, dst slice (ptr i64 sp+16, len i64 sp+24)
                 let val_ref = read_ref(mem, sp + 8);
                 let dst_ptr = read_i64(mem, sp + 16) as u32;
-                if let Some(id) = decode_ref_id(val_ref) {
-                    if let JsValue::String(s) = self.values.get(id).clone() {
-                        let bytes = s.as_bytes();
-                        for (i, &b) in bytes.iter().enumerate() {
-                            write_byte(mem, dst_ptr + i as u32, b);
-                        }
+                if let Some(id) = decode_ref_id(val_ref)
+                    && let JsValue::String(ref s) = *self.values.get(id)
+                {
+                    for (i, &b) in s.as_bytes().iter().enumerate() {
+                        write_byte(mem, dst_ptr + i as u32, b);
                     }
                 }
             }
@@ -475,13 +472,13 @@ impl GoJsRuntime {
                             let fd = f64::from_bits(fd_ref) as u32;
                             let length = f64::from_bits(length_ref) as usize;
 
-                            if let Some(buf_id) = decode_ref_id(buf_ref) {
-                                if let JsValue::Uint8Array(data) = self.values.get(buf_id) {
-                                    let end = length.min(data.len());
-                                    let msg = String::from_utf8_lossy(&data[..end]);
-                                    if fd == 1 || fd == 2 {
-                                        eprint!("{msg}");
-                                    }
+                            if let Some(buf_id) = decode_ref_id(buf_ref)
+                                && let JsValue::Uint8Array(ref data) = *self.values.get(buf_id)
+                            {
+                                let end = length.min(data.len());
+                                let msg = String::from_utf8_lossy(&data[..end]);
+                                if fd == 1 || fd == 2 {
+                                    eprint!("{msg}");
                                 }
                             }
 
@@ -512,12 +509,12 @@ impl GoJsRuntime {
                 let dst_len = read_i64(mem, sp + 16) as usize;
                 let src_ref = read_ref(mem, sp + 32);
                 let mut n = 0usize;
-                if let Some(src_id) = decode_ref_id(src_ref) {
-                    if let JsValue::Uint8Array(data) = self.values.get(src_id).clone() {
-                        n = dst_len.min(data.len());
-                        for i in 0..n {
-                            write_byte(mem, dst_ptr + i as u32, data[i]);
-                        }
+                if let Some(src_id) = decode_ref_id(src_ref)
+                    && let JsValue::Uint8Array(ref data) = *self.values.get(src_id)
+                {
+                    n = dst_len.min(data.len());
+                    for (i, &b) in data[..n].iter().enumerate() {
+                        write_byte(mem, dst_ptr + i as u32, b);
                     }
                 }
                 write_i64(mem, sp + 40, n as i64);
