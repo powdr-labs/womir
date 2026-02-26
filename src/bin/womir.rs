@@ -545,6 +545,181 @@ impl GoJsRuntime {
     }
 }
 
+// ============== WASI snapshot_preview1 syscall support ==============
+// Minimal WASI implementation for running Go wasip1 binaries.
+// Logs every syscall name to stderr for discovery purposes.
+
+/// WASI errno codes
+const WASI_ESUCCESS: u32 = 0;
+const WASI_EBADF: u32 = 8;
+const WASI_ENOSYS: u32 = 52;
+
+use std::sync::atomic::{AtomicU64, Ordering};
+static WASI_CLOCK_MONOTONIC: AtomicU64 = AtomicU64::new(1_000_000_000); // start at 1 second in ns
+
+fn wasi_call(fname: &str, args: &[u32], mem: &mut Option<MemoryAccessor<'_>>) -> Vec<u32> {
+    eprintln!("[wasi] syscall: {fname}(args={args:?})");
+    let mem = mem.as_mut().unwrap();
+
+    match fname {
+        "args_sizes_get" => {
+            // args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
+            // Return 0 args.
+            let argc_ptr = args[0];
+            let argv_buf_size_ptr = args[1];
+            mem.set_word(argc_ptr, 0).unwrap();
+            mem.set_word(argv_buf_size_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "args_get" => {
+            // args_get(argv, argv_buf) -> errno
+            // No args to return.
+            vec![WASI_ESUCCESS]
+        }
+        "environ_sizes_get" => {
+            // environ_sizes_get(count_ptr, buf_size_ptr) -> errno
+            let count_ptr = args[0];
+            let buf_size_ptr = args[1];
+            mem.set_word(count_ptr, 0).unwrap();
+            mem.set_word(buf_size_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "environ_get" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_write" => {
+            // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
+            let fd = args[0];
+            let iovs_ptr = args[1];
+            let iovs_len = args[2];
+            let nwritten_ptr = args[3];
+            let mut total = 0u32;
+            for i in 0..iovs_len {
+                let iov_base = mem.get_word(iovs_ptr + i * 8).unwrap();
+                let iov_len = mem.get_word(iovs_ptr + i * 8 + 4).unwrap();
+                let bytes: Vec<u8> = (0..iov_len)
+                    .map(|j| {
+                        let addr = iov_base + j;
+                        let word = mem.get_word(addr & !3).unwrap();
+                        (word >> ((addr % 4) * 8)) as u8
+                    })
+                    .collect();
+                let msg = String::from_utf8_lossy(&bytes);
+                match fd {
+                    1 => eprint!("[wasi stdout] {msg}"),
+                    2 => eprint!("[wasi stderr] {msg}"),
+                    _ => eprint!("[wasi fd={fd}] {msg}"),
+                }
+                total += iov_len;
+            }
+            mem.set_word(nwritten_ptr, total).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "fd_read" => {
+            // fd_read(fd, iovs_ptr, iovs_len, nread_ptr) -> errno
+            let nread_ptr = args[3];
+            mem.set_word(nread_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "fd_close" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_seek" => {
+            // fd_seek(fd, offset_lo, offset_hi, whence, newoffset_ptr) -> errno
+            vec![WASI_EBADF]
+        }
+        "fd_fdstat_get" => {
+            // fd_fdstat_get(fd, buf) -> errno
+            // Write a zeroed fdstat struct (24 bytes = 6 words).
+            let buf = args[1];
+            for i in 0..6 {
+                mem.set_word(buf + i * 4, 0).unwrap();
+            }
+            vec![WASI_ESUCCESS]
+        }
+        "fd_fdstat_set_flags" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_prestat_get" => {
+            // fd_prestat_get(fd, buf) -> errno
+            // Return EBADF to signal no more preopened dirs.
+            vec![WASI_EBADF]
+        }
+        "fd_prestat_dir_name" => {
+            vec![WASI_EBADF]
+        }
+        "fd_filestat_get" => {
+            vec![WASI_EBADF]
+        }
+        "fd_filestat_set_size" => {
+            vec![WASI_EBADF]
+        }
+        "fd_sync" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_pread" => {
+            vec![WASI_EBADF]
+        }
+        "fd_readdir" => {
+            vec![WASI_EBADF]
+        }
+        "clock_time_get" => {
+            // clock_time_get(clock_id, precision_lo, precision_hi, time_ptr) -> errno
+            // Return a fake but non-zero and incrementing timestamp.
+            let time_ptr = args[3];
+            let ns = WASI_CLOCK_MONOTONIC.fetch_add(1_000_000, Ordering::Relaxed); // +1ms each call
+            mem.set_word(time_ptr, ns as u32).unwrap();
+            mem.set_word(time_ptr + 4, (ns >> 32) as u32).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "random_get" => {
+            // random_get(buf, buf_len) -> errno
+            // Fill with deterministic "random" bytes (zeros for now).
+            let buf_ptr = args[0];
+            let buf_len = args[1];
+            for i in 0..buf_len {
+                let addr = buf_ptr + i;
+                let word_addr = addr & !3;
+                let byte_offset = addr % 4;
+                let old_word = mem.get_word(word_addr).unwrap();
+                // Set byte to a simple deterministic pattern.
+                let new_byte = (i * 7 + 13) & 0xFF;
+                let mask = !(0xFFu32 << (byte_offset * 8));
+                let new_word = (old_word & mask) | (new_byte << (byte_offset * 8));
+                mem.set_word(word_addr, new_word).unwrap();
+            }
+            vec![WASI_ESUCCESS]
+        }
+        "sched_yield" => {
+            vec![WASI_ESUCCESS]
+        }
+        "proc_exit" => {
+            let exit_code = args[0];
+            eprintln!("[wasi] proc_exit({exit_code})");
+            panic!("wasi_proc_exit_{exit_code}");
+        }
+        "poll_oneoff" => {
+            // poll_oneoff(in_ptr, out_ptr, nsubscriptions, nevents_ptr) -> errno
+            let nevents_ptr = args[3];
+            mem.set_word(nevents_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "path_create_directory"
+        | "path_remove_directory"
+        | "path_unlink_file"
+        | "path_rename"
+        | "path_filestat_get"
+        | "path_open" => {
+            eprintln!("[wasi] path operation {fname} not supported, returning ENOSYS");
+            vec![WASI_ENOSYS]
+        }
+        _ => {
+            eprintln!("[wasi] UNIMPLEMENTED syscall: {fname}");
+            vec![WASI_ENOSYS]
+        }
+    }
+}
+
 struct DataInput {
     values: <Vec<u32> as IntoIterator>::IntoIter,
     /// Pre-formatted hint items: each is `[byte_len, word0, word1, ...]`.
@@ -661,6 +836,7 @@ impl ExternalFunctions for DataInput {
                 self.gojs.call(fname, sp, mem.as_mut().unwrap());
                 vec![]
             }
+            ("wasi_snapshot_preview1", fname) => wasi_call(fname, args, mem),
             _ => {
                 panic!(
                     "External function not implemented: module: {module}, function: {function} with args: {:?}",
@@ -989,6 +1165,34 @@ mod tests {
             &["keeper/hoodi_payload.bin"],
             &[],
         );
+    }
+
+    #[test]
+    fn test_keeper_wasi() {
+        // Go keeper compiled with GOOS=wasip1 GOARCH=wasm -tags "womir".
+        // Reads the hoodi block payload via the hint stream (__hint_input / __hint_buffer),
+        // verifies the block, and exits with proc_exit(0).
+        // Compile command:
+        //   GOOS=wasip1 GOARCH=wasm go build -gcflags=all=-d=softfloat -tags "womir" -o keeper_wasi.wasm
+        let result = std::panic::catch_unwind(|| {
+            test_interpreter_with_binary_inputs(
+                "keeper_wasi.wasm",
+                "_start",
+                &[],
+                &["keeper/hoodi_payload.bin"],
+                &[],
+            );
+        });
+        match result {
+            Ok(()) => {} // no proc_exit was called, that's also fine
+            Err(e) => {
+                let msg = e.downcast_ref::<String>().map(|s| s.as_str()).unwrap_or("");
+                assert_eq!(
+                    msg, "wasi_proc_exit_0",
+                    "Expected proc_exit(0) but got: {msg}"
+                );
+            }
+        }
     }
 
     /// Like `test_interpreter_from_sample_programs` but feeds binary files as hint stream inputs.
