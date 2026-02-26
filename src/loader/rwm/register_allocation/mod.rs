@@ -11,10 +11,9 @@ use wasmparser::{Operator as Op, ValType};
 use crate::{
     loader::{
         Module,
-        blockless_dag::{
-            BreakTarget, GenericBlocklessDag, GenericNode, NodeInput, Operation, TargetType,
-        },
+        blockless_dag::{BreakTarget, GenericBlocklessDag, NodeInput, Operation, TargetType},
         dag::ValueOrigin,
+        passes::blockless_dag::GenericNode,
         rwm::{
             liveness_dag::{self, LivenessDag},
             register_allocation::occupation_tracker::{Occupation, OccupationTracker},
@@ -84,7 +83,6 @@ impl Allocation {
 }
 
 pub type AllocatedDag<'a> = GenericBlocklessDag<'a, Allocation>;
-
 pub type Node<'a> = GenericNode<'a, Allocation>;
 
 struct OptimisticAllocator {

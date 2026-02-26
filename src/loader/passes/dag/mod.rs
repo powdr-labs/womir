@@ -17,12 +17,19 @@ use crate::loader::{
 };
 
 #[derive(Debug, Clone)]
-pub enum Operation<'a> {
+pub enum Operation<'a, T> {
     Inputs,
     WASMOp(Op<'a>),
-    BrIfZero { relative_depth: u32 },
-    BrTable { targets: Vec<BrTableTarget> },
-    Block { kind: BlockKind, sub_dag: Dag<'a> },
+    BrIfZero {
+        relative_depth: u32,
+    },
+    BrTable {
+        targets: Vec<BrTableTarget>,
+    },
+    Block {
+        kind: BlockKind,
+        sub_dag: GenericDag<'a, T>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -99,16 +106,21 @@ impl From<ValueOrigin> for NodeInput {
 }
 
 #[derive(Debug, Clone)]
-pub struct Node<'a> {
-    pub operation: Operation<'a>,
+pub struct GenericNode<'a, T> {
+    pub operation: Operation<'a, T>,
     pub inputs: Vec<NodeInput>,
     pub output_types: Vec<ValType>,
 }
 
+pub type Node<'a> = GenericNode<'a, ()>;
+
 #[derive(Debug, Clone)]
-pub struct Dag<'a> {
-    pub nodes: Vec<Node<'a>>,
+pub struct GenericDag<'a, T> {
+    pub nodes: Vec<GenericNode<'a, T>>,
+    pub block_data: T,
 }
+
+pub type Dag<'a> = GenericDag<'a, ()>;
 
 impl<'a> Dag<'a> {
     pub fn new(
@@ -161,7 +173,10 @@ impl<'a> Dag<'a> {
             &get_local_or_default,
         )?;
 
-        Ok(Dag { nodes })
+        Ok(Dag {
+            nodes,
+            block_data: (),
+        })
     }
 }
 
@@ -538,7 +553,10 @@ fn build_dag_for_block<'a>(
     Ok(Node {
         operation: Operation::Block {
             kind: block_kind,
-            sub_dag: Dag { nodes },
+            sub_dag: Dag {
+                nodes,
+                block_data: (),
+            },
         },
         inputs,
         output_types,
@@ -615,7 +633,7 @@ enum Value {
 
 /// Returns a constant with the default value for the given type.
 /// This is used to materialize the locals that are read before being written.
-fn default_const_for_type(value_type: ValType) -> Operation<'static> {
+fn default_const_for_type(value_type: ValType) -> Operation<'static, ()> {
     match value_type {
         ValType::I32 => Operation::WASMOp(Op::I32Const { value: 0 }),
         ValType::I64 => Operation::WASMOp(Op::I64Const { value: 0 }),

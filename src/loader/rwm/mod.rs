@@ -43,7 +43,7 @@ impl<'a, S: Settings<'a>> FunctionProcessingStage<'a, S> for RWMStages<'a, S> {
             Self::CommonStages(stage) => {
                 if let CommonStages::BlocklessDag(blockless_dag) = stage {
                     // Convert the blockless DAG to a liveness DAG representation.
-                    let liveness_dag = LivenessDag::new(blockless_dag);
+                    let liveness_dag = LivenessDag::from_blockless_dag(blockless_dag);
                     Self::LivenessDag(liveness_dag)
                 } else {
                     // Advance the common stage first.
