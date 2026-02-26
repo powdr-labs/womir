@@ -8,7 +8,8 @@ use wasmparser::Operator as Op;
 
 use crate::loader::{
     BlockKind,
-    dag::{Dag, Node, NodeInput, Operation, ValueOrigin},
+    dag::{Node, NodeInput, Operation, ValueOrigin},
+    passes::calc_input_redirection::{RedirDag, RedirNode, Redirection},
 };
 
 #[derive(Default, Debug)]
@@ -118,7 +119,7 @@ fn _print_nodes(indent: usize, nodes: &[Node<'_>]) {
 /// nodes that produce them, if they don't have side effects.
 ///
 /// Returns the new DAG and the number of removed nodes.
-pub fn clean_dangling_outputs(dag: &mut Dag) -> Statistics {
+pub fn clean_dangling_outputs(dag: &mut RedirDag) -> Statistics {
     //println!("\nBefore dangling removal:");
     //_print_nodes(0, &dag.nodes);
 
@@ -137,7 +138,7 @@ pub fn clean_dangling_outputs(dag: &mut Dag) -> Statistics {
 }
 
 fn recursive_removal(
-    nodes: &mut Vec<Node<'_>>,
+    nodes: &mut Vec<RedirNode>,
     ctrl_stack: &mut VecDeque<StackElement>,
     remove_inputs: bool,
 ) -> (Vec<u32>, Statistics) {
@@ -242,7 +243,7 @@ fn recursive_removal(
 /// Apply the dangling removal recursivelly to a block node.
 fn recurse_into_block(
     node_idx: usize,
-    node: &mut Node,
+    node: &mut RedirNode,
     ctrl_stack: &mut VecDeque<StackElement>,
     used_outputs: &HashSet<ValueOrigin>,
 ) -> (Statistics, OffsetMap<u32, u32>) {
@@ -268,6 +269,29 @@ fn recurse_into_block(
 
         remove_indices_from_vec(&mut node.inputs, &removed_inputs);
         remove_indices_from_vec(&mut node.output_types, &stack_elem.sorted_removed_outputs);
+
+        // Updates the redirections for the block outputs.
+        match kind {
+            BlockKind::Block => {
+                let redirections = &mut sub_dag.block_data;
+
+                // Remove the redirections for the removed outputs.
+                remove_indices_from_vec(redirections, &stack_elem.sorted_removed_outputs);
+
+                // Build an offset map for the removed inputs, so we can adjust the redirections accordingly.
+                let mut in_offset_map = OffsetMap::new(0);
+                for removed in removed_inputs {
+                    in_offset_map.append(removed);
+                }
+                for redir in redirections.iter_mut() {
+                    if let Redirection::FromInput(input_idx) = redir {
+                        *redir = Redirection::FromInput(*input_idx - in_offset_map.get(input_idx));
+                    }
+                }
+            }
+            BlockKind::Loop => assert!(removed_inputs.is_empty()),
+        }
+
         stats.removed_block_outputs += stack_elem.sorted_removed_outputs.len();
 
         let mut offset_map = OffsetMap::new(0);
@@ -282,7 +306,7 @@ fn recurse_into_block(
 }
 
 /// Fix breaks to blocks that had their outputs removed.
-fn fix_breaks(node: &mut Node, ctrl_stack: &mut VecDeque<StackElement>) {
+fn fix_breaks(node: &mut RedirNode, ctrl_stack: &mut VecDeque<StackElement>) {
     match &mut node.operation {
         Operation::WASMOp(Op::Br { relative_depth })
         | Operation::WASMOp(Op::BrIf { relative_depth })
@@ -361,7 +385,7 @@ fn remove_indices_from_vec<T>(vec: &mut Vec<T>, sorted_ids: &[u32]) {
 }
 
 /// Checks if a node has side effects
-fn may_have_side_effect(node: &Node) -> bool {
+fn may_have_side_effect(node: &RedirNode) -> bool {
     if let Operation::WASMOp(
         // Constants are pure.
         Op::I32Const { .. }
