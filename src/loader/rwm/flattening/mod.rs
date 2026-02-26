@@ -778,6 +778,14 @@ impl<'a, 'b> Context<'a, 'b> {
     pub fn new_label(&self, label_type: LabelType) -> String {
         format_label(self.common.label_gen.next(), label_type)
     }
+
+    /// Returns a reference to the module being processed.
+    ///
+    /// The returned reference has lifetime `'b` (independent of the `&self` borrow),
+    /// so callers can use it alongside `&mut self` without borrow conflicts.
+    pub fn module(&self) -> &'b Module<'a> {
+        self.common.prog
+    }
 }
 
 struct FunctionCall<D> {
