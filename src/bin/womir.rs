@@ -6,7 +6,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use womir::{
     interpreter::{
-        ExecutionModel, ExternalFunctions, Interpreter, MemoryAccessor,
+        ExecutionModel, ExternalCallResult, ExternalFunctions, Interpreter, MemoryAccessor,
+        RunResult,
         generic_ir::{Directive, GenericIrSetting},
     },
     loader::{FunctionAsm, PartiallyParsedProgram, Program, rwm::RWMStages, wom::WomStages},
@@ -557,11 +558,15 @@ const WASI_ENOSYS: u32 = 52;
 use std::sync::atomic::{AtomicU64, Ordering};
 static WASI_CLOCK_MONOTONIC: AtomicU64 = AtomicU64::new(1_000_000_000); // start at 1 second in ns
 
-fn wasi_call(fname: &str, args: &[u32], mem: &mut Option<MemoryAccessor<'_>>) -> Vec<u32> {
+fn wasi_call(
+    fname: &str,
+    args: &[u32],
+    mem: &mut Option<MemoryAccessor<'_>>,
+) -> ExternalCallResult {
     eprintln!("[wasi] syscall: {fname}(args={args:?})");
     let mem = mem.as_mut().unwrap();
 
-    match fname {
+    let values = match fname {
         "args_sizes_get" => {
             // args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
             // Return 0 args.
@@ -696,7 +701,7 @@ fn wasi_call(fname: &str, args: &[u32], mem: &mut Option<MemoryAccessor<'_>>) ->
         "proc_exit" => {
             let exit_code = args[0];
             eprintln!("[wasi] proc_exit({exit_code})");
-            panic!("wasi_proc_exit_{exit_code}");
+            return ExternalCallResult::Exit(exit_code);
         }
         "poll_oneoff" => {
             // poll_oneoff(in_ptr, out_ptr, nsubscriptions, nevents_ptr) -> errno
@@ -717,7 +722,8 @@ fn wasi_call(fname: &str, args: &[u32], mem: &mut Option<MemoryAccessor<'_>>) ->
             eprintln!("[wasi] UNIMPLEMENTED syscall: {fname}");
             vec![WASI_ENOSYS]
         }
-    }
+    };
+    ExternalCallResult::Values(values)
 }
 
 struct DataInput {
@@ -775,8 +781,8 @@ impl ExternalFunctions for DataInput {
         function: &str,
         args: &[u32],
         mem: &mut Option<MemoryAccessor<'_>>,
-    ) -> Vec<u32> {
-        match (module, function) {
+    ) -> ExternalCallResult {
+        let values = match (module, function) {
             ("env", "read_u32") => {
                 vec![self.values.next().expect("Not enough input values")]
             }
@@ -836,14 +842,15 @@ impl ExternalFunctions for DataInput {
                 self.gojs.call(fname, sp, mem.as_mut().unwrap());
                 vec![]
             }
-            ("wasi_snapshot_preview1", fname) => wasi_call(fname, args, mem),
+            ("wasi_snapshot_preview1", fname) => return wasi_call(fname, args, mem),
             _ => {
                 panic!(
                     "External function not implemented: module: {module}, function: {function} with args: {:?}",
                     args
                 );
             }
-        }
+        };
+        ExternalCallResult::Values(values)
     }
 }
 
@@ -951,8 +958,10 @@ fn main() -> wasmparser::Result<()> {
 
             let mut interpreter = Interpreter::new(program, cli.exec_model, data_input, trace);
             log::info!("Executing function: {function}");
-            let outputs = interpreter.run(&function, &args);
-            log::info!("Outputs: {:?}", outputs);
+            match interpreter.run(&function, &args) {
+                RunResult::Ok(outputs) => log::info!("Outputs: {:?}", outputs),
+                RunResult::Exit(code) => log::info!("Program exited with code: {code}"),
+            }
 
             Ok(())
         }
@@ -1034,8 +1043,10 @@ mod tests {
                 DataInput::new(data_inputs.clone()),
                 false,
             );
-            let got_output = interpreter.run(main_function, func_inputs);
-            assert_eq!(got_output, outputs);
+            match interpreter.run(main_function, func_inputs) {
+                RunResult::Ok(got_output) => assert_eq!(got_output, outputs),
+                RunResult::Exit(code) => panic!("Unexpected exit with code {code}"),
+            }
         }
     }
 
@@ -1174,24 +1185,29 @@ mod tests {
         // verifies the block, and exits with proc_exit(0).
         // Compile command:
         //   GOOS=wasip1 GOARCH=wasm go build -gcflags=all=-d=softfloat -tags "womir" -o keeper_wasi.wasm
-        let result = std::panic::catch_unwind(|| {
-            test_interpreter_with_binary_inputs(
-                "keeper_wasi.wasm",
-                "_start",
-                &[],
-                &["keeper/hoodi_payload.bin"],
-                &[],
-            );
-        });
-        match result {
-            Ok(()) => {} // no proc_exit was called, that's also fine
-            Err(e) => {
-                let msg = e.downcast_ref::<String>().map(|s| s.as_str()).unwrap_or("");
-                assert_eq!(
-                    msg, "wasi_proc_exit_0",
-                    "Expected proc_exit(0) but got: {msg}"
-                );
-            }
+        let base = format!("{}/sample-programs", env!("CARGO_MANIFEST_DIR"));
+        let wasm_file =
+            std::fs::read(format!("{base}/keeper_wasi.wasm")).expect("failed to read wasm file");
+        let binary_inputs: Vec<Vec<u8>> = vec![
+            std::fs::read(format!("{base}/keeper/hoodi_payload.bin"))
+                .expect("failed to read binary input"),
+        ];
+
+        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+        let program = program
+            .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+            .unwrap();
+
+        let mut interpreter = Interpreter::new(
+            program,
+            ExecutionModel::InfiniteRegisters,
+            DataInput::new_with_binary_inputs(vec![], binary_inputs),
+            false,
+        );
+        match interpreter.run("_start", &[]) {
+            RunResult::Exit(0) => {} // expected: proc_exit(0)
+            RunResult::Exit(code) => panic!("Expected proc_exit(0) but got proc_exit({code})"),
+            RunResult::Ok(_) => {} // no proc_exit was called, that's also fine
         }
     }
 
@@ -1223,8 +1239,10 @@ mod tests {
             DataInput::new_with_binary_inputs(vec![], binary_inputs),
             false,
         );
-        let got_output = interpreter.run(main_function, func_inputs);
-        assert_eq!(got_output, outputs);
+        match interpreter.run(main_function, func_inputs) {
+            RunResult::Ok(got_output) => assert_eq!(got_output, outputs),
+            RunResult::Exit(code) => panic!("Unexpected exit with code {code}"),
+        }
     }
 
     #[test]
@@ -1413,7 +1431,7 @@ mod tests {
             function: &str,
             args: &[u32],
             _mem: &mut Option<MemoryAccessor<'_>>,
-        ) -> Vec<u32> {
+        ) -> ExternalCallResult {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
             (func (export "print_i32") (param i32))
@@ -1448,7 +1466,7 @@ mod tests {
                     args
                 ),
             }
-            Vec::new()
+            ExternalCallResult::Values(Vec::new())
         }
     }
 
@@ -1495,9 +1513,15 @@ mod tests {
                             })
                             .for_each(|assert_case| {
                                 println!("Assert test case: {assert_case:#?}");
-                                let got_output =
-                                    interpreter.run(&assert_case.function_name, &assert_case.args);
-                                assert_eq!(got_output, assert_case.expected);
+                                match interpreter.run(&assert_case.function_name, &assert_case.args)
+                                {
+                                    RunResult::Ok(got_output) => {
+                                        assert_eq!(got_output, assert_case.expected);
+                                    }
+                                    RunResult::Exit(code) => {
+                                        panic!("Unexpected exit with code {code}");
+                                    }
+                                }
                             });
                     }
                 }
