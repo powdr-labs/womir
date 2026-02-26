@@ -422,13 +422,6 @@ fn handle_block_node(
         |_, _| {},
     );
 
-    // Update parent node redirections.
-    remove_indices(
-        redirections,
-        inputs_to_remove.iter().map(|&r| r as usize),
-        |_, _| {},
-    );
-
     // Update parent node outputs.
     remove_indices(
         &mut node.output_types,
@@ -486,21 +479,34 @@ fn remove_block_node_io(
     inputs_to_remove: &[u32],
     outputs_to_remove: &mut VecDeque<Vec<u32>>,
 ) {
-    let sub_dag = if let Operation::Block { sub_dag, kind } = &mut block_node.operation {
-        // For a loop, the block inputs are also its outputs, so we need to mark the corresponding outputs as removed as well.
-        if let BlockKind::Loop = kind {
-            let outs = &mut outputs_to_remove[0];
-            assert!(outs.is_empty());
-            // I couldn't avoid cloning here. I tried making `outputs_to_remove: &mut VecDeque<&[u32]>`,
-            // but there is no lifetime that allows it to hold external references plus local references.
-            *outs = inputs_to_remove.to_vec();
-        }
-
-        sub_dag
+    let (sub_dag, kind) = if let Operation::Block { sub_dag, kind } = &mut block_node.operation {
+        (sub_dag, kind)
     } else {
         panic!()
     };
 
+    // For a loop, the block inputs are also its outputs, so we need to mark the corresponding outputs as removed as well.
+    if let BlockKind::Loop = kind {
+        let outs = &mut outputs_to_remove[0];
+        assert!(outs.is_empty());
+        // I couldn't avoid cloning here. I tried making `outputs_to_remove: &mut VecDeque<&[u32]>`,
+        // but there is no lifetime that allows it to hold external references plus local references.
+        *outs = inputs_to_remove.to_vec();
+    }
+
+    // Update node redirections.
+    let redirs_to_remove = match kind {
+        BlockKind::Loop => inputs_to_remove,
+        BlockKind::Block => &outputs_to_remove[0][..],
+    };
+    let redirections = &mut sub_dag.block_data;
+    remove_indices(
+        redirections,
+        redirs_to_remove.iter().map(|&r| r as usize),
+        |_, _| {},
+    );
+
+    // Walk the DAG and apply the substitutions and removals.
     let mut input_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
     for (node_idx, node) in sub_dag.nodes.iter_mut().enumerate() {
         match &mut node.operation {
