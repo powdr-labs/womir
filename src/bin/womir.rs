@@ -956,11 +956,16 @@ fn main() -> wasmparser::Result<()> {
                 DataInput::new_with_binary_inputs(inputs, binary_inputs)
             };
 
-            let mut interpreter = Interpreter::new(program, cli.exec_model, data_input, trace);
-            log::info!("Executing function: {function}");
-            match interpreter.run(&function, &args) {
-                RunResult::Ok(outputs) => log::info!("Outputs: {:?}", outputs),
-                RunResult::Exit(code) => log::info!("Program exited with code: {code}"),
+            let (mut interpreter, start_exit) =
+                Interpreter::new(program, cli.exec_model, data_input, trace);
+            if let Some(code) = start_exit {
+                log::info!("Start function exited with code: {code}");
+            } else {
+                log::info!("Executing function: {function}");
+                match interpreter.run(&function, &args) {
+                    RunResult::Ok(outputs) => log::info!("Outputs: {:?}", outputs),
+                    RunResult::Exit(code) => log::info!("Program exited with code: {code}"),
+                }
             }
 
             Ok(())
@@ -1037,12 +1042,13 @@ mod tests {
 
         for (exec_model, program) in pipelines {
             println!("Testing execution model: {exec_model:?}");
-            let mut interpreter = Interpreter::new(
+            let (mut interpreter, start_exit) = Interpreter::new(
                 program,
                 exec_model,
                 DataInput::new(data_inputs.clone()),
                 false,
             );
+            assert!(start_exit.is_none(), "Unexpected start function exit");
             match interpreter.run(main_function, func_inputs) {
                 RunResult::Ok(got_output) => assert_eq!(got_output, outputs),
                 RunResult::Exit(code) => panic!("Unexpected exit with code {code}"),
@@ -1198,7 +1204,7 @@ mod tests {
             .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
             .unwrap();
 
-        let mut interpreter = Interpreter::new(
+        let (mut interpreter, _) = Interpreter::new(
             program,
             ExecutionModel::InfiniteRegisters,
             DataInput::new_with_binary_inputs(vec![], binary_inputs),
@@ -1233,12 +1239,13 @@ mod tests {
             .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
             .unwrap();
 
-        let mut interpreter = Interpreter::new(
+        let (mut interpreter, start_exit) = Interpreter::new(
             program,
             ExecutionModel::InfiniteRegisters,
             DataInput::new_with_binary_inputs(vec![], binary_inputs),
             false,
         );
+        assert!(start_exit.is_none(), "Unexpected start function exit");
         match interpreter.run(main_function, func_inputs) {
             RunResult::Ok(got_output) => assert_eq!(got_output, outputs),
             RunResult::Exit(code) => panic!("Unexpected exit with code {code}"),
@@ -1499,7 +1506,7 @@ mod tests {
 
                     for (program, exec_model) in pipelines {
                         println!("  Execution model: {:?}", exec_model);
-                        let mut interpreter =
+                        let (mut interpreter, _) =
                             Interpreter::new(program, exec_model, SpectestExternalFunctions, false);
 
                         asserts

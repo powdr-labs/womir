@@ -321,7 +321,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         exec_model: ExecutionModel,
         external_functions: E,
         trace_enabled: bool,
-    ) -> Self {
+    ) -> (Self, Option<u32>) {
         const START_ROM_ADDR: u32 = 0x1;
 
         let mut func_stack_sizes = Vec::new();
@@ -386,14 +386,17 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             addr_to_func_id,
         };
 
-        if let Some(start_function) = interpreter.module.start_function {
+        let exit_code = if let Some(start_function) = interpreter.module.start_function {
             let label = func_idx_to_label(start_function);
-            if let RunResult::Exit(code) = interpreter.run(&label, &[]) {
-                panic!("Start function exited with code {code}");
+            match interpreter.run(&label, &[]) {
+                RunResult::Exit(code) => Some(code),
+                RunResult::Ok(_) => None,
             }
-        }
+        } else {
+            None
+        };
 
-        interpreter
+        (interpreter, exit_code)
     }
 
     fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b> {
