@@ -979,7 +979,7 @@ mod tests {
         // Source: https://github.com/ethereum/go-ethereum/tree/master/cmd/keeper
         // Compile command:
         //   GOOS=js GOARCH=wasm go -gcflags=all=-d=softfloat build -tags "example" -o keeper.wasm
-        test_interpreter_from_sample_programs("keeper_js.wasm", "run", &[0, 0], vec![], &[]);
+        test_interpreter_with_binary_inputs("keeper_js.wasm", "run", &[0, 0], &[], &[]);
     }
 
     #[test]
