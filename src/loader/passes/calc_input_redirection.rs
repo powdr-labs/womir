@@ -308,14 +308,19 @@ where
     // This is optimistic in the inner passes: we assume inputs to loops will be redirected
     // if it can happen according to the current redirections. Wrong choices will be fixed
     // in the following passes.
+    //
+    // TODO: handle the loop case where the same value is given to multiple inputs,
+    // and their redirections form a strongly connected component, which means
+    // they can be all be treated as the same input. This is the edge or the edge
+    // case, and I don't see how it can happen in non-crafted code.
     let input_map: HashMap<u32, u32> = if let BlockKind::Loop = kind {
         // For loops, only include inputs whose corresponding output
-        // is (optimistically) redirected to the same parent input.
+        // is (optimistically) redirected to the same input.
         block_inputs(&node.inputs)
             .filter_map(|(node_input_idx, block_input_idx)| {
                 let redir = &redirections[node_input_idx];
                 (*redir == Redirection::Unknown
-                    || *redir == Redirection::FromInput(block_input_idx))
+                    || *redir == Redirection::FromInput(node_input_idx as u32))
                 .then_some((node_input_idx as u32, block_input_idx))
             })
             .collect()

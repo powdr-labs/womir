@@ -9,7 +9,7 @@ use wasmparser::Operator as Op;
 use crate::loader::{
     BlockKind,
     dag::{Node, NodeInput, Operation, ValueOrigin},
-    passes::calc_input_redirection::{RedirDag, RedirNode},
+    passes::calc_input_redirection::{RedirDag, RedirNode, Redirection},
 };
 
 #[derive(Default, Debug)]
@@ -273,7 +273,21 @@ fn recurse_into_block(
         // Updates the redirections for the block outputs.
         match kind {
             BlockKind::Block => {
-                remove_indices_from_vec(&mut sub_dag.block_data, &stack_elem.sorted_removed_outputs)
+                let redirections = &mut sub_dag.block_data;
+
+                // Remove the redirections for the removed outputs.
+                remove_indices_from_vec(redirections, &stack_elem.sorted_removed_outputs);
+
+                // Build an offset map for the removed inputs, so we can adjust the redirections accordingly.
+                let mut in_offset_map = OffsetMap::new(0);
+                for removed in removed_inputs {
+                    in_offset_map.append(removed);
+                }
+                for redir in redirections.iter_mut() {
+                    if let Redirection::FromInput(input_idx) = redir {
+                        *redir = Redirection::FromInput(*input_idx - in_offset_map.get(input_idx));
+                    }
+                }
             }
             BlockKind::Loop => assert!(removed_inputs.is_empty()),
         }
