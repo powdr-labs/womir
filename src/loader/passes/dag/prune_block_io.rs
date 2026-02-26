@@ -415,39 +415,13 @@ fn handle_block_node(
         })
         .collect_vec();
 
-    // Update parent node inputs.
-    remove_indices(
-        &mut node.inputs,
-        inputs_to_remove.iter().map(|&r| r as usize),
-        |_, _| {},
-    );
-
-    // Update parent node outputs.
-    remove_indices(
-        &mut node.output_types,
-        outputs_to_remove.iter().map(|r| *r as usize),
-        |old_idx, new_idx| {
-            if let Some(new_idx) = new_idx {
-                // This output was shifted, needs to be mapped to the new index.
-                origin_substitutions.insert(
-                    ValueOrigin {
-                        node: node_idx,
-                        output_idx: old_idx as u32,
-                    },
-                    Some(ValueOrigin {
-                        node: node_idx,
-                        output_idx: new_idx as u32,
-                    }),
-                );
-            }
-        },
-    );
-
     let output_removed = !outputs_to_remove.is_empty();
 
     // Perform the actual removals in the sub-block.
     if !inputs_to_remove.is_empty() || output_removed {
         remove_block_node_io(
+            node_idx,
+            origin_substitutions,
             node,
             &inputs_to_remove,
             &mut VecDeque::from(vec![outputs_to_remove]),
@@ -475,6 +449,8 @@ fn apply_substitutions(
 }
 
 fn remove_block_node_io(
+    parent_node_idx: usize,
+    parend_origin_substitutions: &mut HashMap<ValueOrigin, Option<ValueOrigin>>,
     block_node: &mut RedirNode,
     inputs_to_remove: &[u32],
     outputs_to_remove: &mut VecDeque<Vec<u32>>,
@@ -485,14 +461,33 @@ fn remove_block_node_io(
         panic!()
     };
 
-    // For a loop, the block inputs are also its outputs, so we need to mark the corresponding outputs as removed as well.
-    if let BlockKind::Loop = kind {
-        let outs = &mut outputs_to_remove[0];
-        assert!(outs.is_empty());
-        // I couldn't avoid cloning here. I tried making `outputs_to_remove: &mut VecDeque<&[u32]>`,
-        // but there is no lifetime that allows it to hold external references plus local references.
-        *outs = inputs_to_remove.to_vec();
-    }
+    // Update parent node inputs.
+    remove_indices(
+        &mut block_node.inputs,
+        inputs_to_remove.iter().map(|&r| r as usize),
+        |_, _| {},
+    );
+
+    // Update parent node outputs.
+    remove_indices(
+        &mut block_node.output_types,
+        outputs_to_remove[0].iter().map(|r| *r as usize),
+        |old_idx, new_idx| {
+            if let Some(new_idx) = new_idx {
+                // This output was shifted, needs to be mapped to the new index.
+                parend_origin_substitutions.insert(
+                    ValueOrigin {
+                        node: parent_node_idx,
+                        output_idx: old_idx as u32,
+                    },
+                    Some(ValueOrigin {
+                        node: parent_node_idx,
+                        output_idx: new_idx as u32,
+                    }),
+                );
+            }
+        },
+    );
 
     // Update node redirections.
     let redirs_to_remove = match kind {
@@ -506,8 +501,17 @@ fn remove_block_node_io(
         |_, _| {},
     );
 
+    // For a loop, the block inputs are also its outputs, so we need to mark the corresponding outputs as removed as well.
+    if let BlockKind::Loop = kind {
+        let outs = &mut outputs_to_remove[0];
+        assert!(outs.is_empty());
+        // I couldn't avoid cloning here. I tried making `outputs_to_remove: &mut VecDeque<&[u32]>`,
+        // but there is no lifetime that allows it to hold external references plus local references.
+        *outs = inputs_to_remove.to_vec();
+    }
+
     // Walk the DAG and apply the substitutions and removals.
-    let mut input_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
+    let mut origin_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
     for (node_idx, node) in sub_dag.nodes.iter_mut().enumerate() {
         match &mut node.operation {
             Operation::Inputs => {
@@ -517,7 +521,7 @@ fn remove_block_node_io(
                     &mut node.output_types,
                     inputs_to_remove.iter().map(|&r| r as usize),
                     |old_idx, new_idx| {
-                        input_substitutions.insert(
+                        origin_substitutions.insert(
                             ValueOrigin {
                                 node: node_idx,
                                 output_idx: old_idx as u32,
@@ -549,7 +553,13 @@ fn remove_block_node_io(
                     // the output removals.
 
                     outputs_to_remove.push_front(Vec::new());
-                    remove_block_node_io(node, &sub_input_to_remove, outputs_to_remove);
+                    remove_block_node_io(
+                        node_idx,
+                        &mut origin_substitutions,
+                        node,
+                        &sub_input_to_remove,
+                        outputs_to_remove,
+                    );
                     outputs_to_remove.pop_front();
                 }
             }
@@ -624,7 +634,7 @@ fn remove_block_node_io(
         }
 
         // Apply the input substitutions for this node.
-        apply_substitutions(&mut node.inputs, &input_substitutions);
+        apply_substitutions(&mut node.inputs, &origin_substitutions);
     }
 }
 
@@ -637,7 +647,7 @@ fn remove_break_inputs<T>(
         // If we have specifyed what outputs to remove, apply them.
         remove_indices(
             node_inputs,
-            target_outs_to_remove.iter().cloned().map(|x| x as usize),
+            target_outs_to_remove.iter().map(|x| *x as usize),
             |_, _| {},
         );
     }
