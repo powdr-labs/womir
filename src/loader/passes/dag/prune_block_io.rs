@@ -1,10 +1,8 @@
 //! This pass takes a DAG and removes unnecessary inputs and outputs from
 //! blocks. These spurious inputs and outputs may come from the original Wasm
 //! code, but they can also be introduced by the `locals_data_flow` pass, which is
-//! conservative in its analysis of local usage.
-
-// TODO: store the redirected inputs in the loop block entry, so that we don't
-// have to recompute it in the liveness pass.
+//! conservative in its analysis of local usage, or can be orphans from const
+//! dedup/collapse.
 
 use std::{
     cmp::Ordering,
@@ -19,13 +17,18 @@ use wasmparser::Operator as Op;
 use crate::{
     loader::{
         BlockKind,
-        passes::dag::{BrTableTarget, Dag, Node, NodeInput, Operation, ValueOrigin},
+        passes::{
+            calc_input_redirection::{RedirDag, RedirNode, Redirection},
+            dag::{BrTableTarget, NodeInput, Operation, ValueOrigin},
+        },
     },
     utils::{offset_map::OffsetMap, remove_indices},
 };
 
-pub fn prune_block_io(dag: &mut Dag<'_>) {
-    process_block(&mut dag.nodes, &mut VecDeque::new())
+pub fn prune_block_io(dag: &mut RedirDag<'_>) {
+    // If outputs have been removed, we might have created new opportunities for
+    // input removals, so we need to repeat until we reach a fixed point.
+    while process_block(dag, &mut VecDeque::new()) {}
 }
 
 #[derive(Debug, Clone)]
@@ -108,35 +111,19 @@ impl InputUsage {
     }
 }
 
-/// Tells if an output slot of a block is only written with a single input value, and if so, what is that input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Redirection {
-    /// This is a transient state used during the algorithm, which
-    /// means we have not yet determined if this output has an input
-    /// redirection or not.
-    Unknown,
-    /// The index of the input that is redirected to this output.
-    FromInput(u32),
-    /// Marks this output as not being redirected to by any input.
-    NotRedirected,
-}
-
 struct ControlStackEntry {
-    outputs_redirections: Vec<Redirection>,
-    /// Input map to previous block
-    input_map: HashMap<u32, u32>,
     input_usage: Vec<InputUsage>,
-    was_ever_broken_to: bool,
 }
 
-fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntry>) {
+fn process_block(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> bool {
     // Some output slots might be removed from the block outputs in case they are redundant.
     // We track such cases in this map, and also where the users of those outputs should point
     // to instead.
-    let mut input_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
-    for node_idx in 0..dag.len() {
-        let node = &mut dag[node_idx];
-        apply_substitutions(&mut node.inputs, &input_substitutions);
+    let mut output_removed = false;
+    let mut origin_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
+    for node_idx in 0..dag.nodes.len() {
+        let node = &mut dag.nodes[node_idx];
+        apply_substitutions(&mut node.inputs, &origin_substitutions);
 
         // In the function body, we can't change the inputs and outputs of the function,
         // so we can skip a lot of processing.
@@ -185,80 +172,33 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
                 }
             }
             (Operation::Block { .. }, is_func_body) => {
-                let mut total_outputs_to_remove = Vec::new();
+                let removals = handle_block_node(node_idx, node, cs, &mut origin_substitutions);
 
-                let last_pass = loop {
-                    let mut pass = block_processing_pass(node, cs);
-
-                    // If any output was removed, that might propagate up the block's DAG
-                    // causing more inputs to be removable, so we need to repeat until we
-                    // reach a fixed point.
-                    let done = pass.outputs_to_remove.is_empty();
-
-                    total_outputs_to_remove = combine_removals(
-                        total_outputs_to_remove,
-                        std::mem::take(&mut pass.outputs_to_remove),
-                    );
-
-                    if done {
-                        break pass;
-                    }
-                };
-
-                // Update node outputs.
-                remove_indices(
-                    &mut node.output_types,
-                    total_outputs_to_remove.iter().map(|(r, _)| *r as usize),
-                    |old_idx, new_idx| {
-                        if let Some(new_idx) = new_idx {
-                            // This output was shifted, needs to be mapped to the new index.
-                            input_substitutions.insert(
-                                ValueOrigin {
-                                    node: node_idx,
-                                    output_idx: old_idx as u32,
-                                },
-                                Some(ValueOrigin {
-                                    node: node_idx,
-                                    output_idx: new_idx as u32,
-                                }),
-                            );
-                        }
-                    },
-                );
-
-                // The removed outputs needs to be mapped, too.
-                for (removed_slot, redir) in total_outputs_to_remove {
-                    input_substitutions.insert(
-                        ValueOrigin {
-                            node: node_idx,
-                            output_idx: removed_slot,
-                        },
-                        redir,
-                    );
-                }
+                output_removed |= removals.output_removed;
 
                 // Update this block input usage based on the sub-block input usage and the removals we have done.
-                //
-                // Both entry.input_usage and entry.input_map are relative to the original block inputs (they are
-                // calculated before the input removals), so we need to filter out inputs that were removed.
                 if !is_func_body {
-                    let mut inputs_removed = last_pass.inputs_removed.into_iter().peekable();
-                    for (sub_input_idx, usage) in
-                        last_pass.entry.input_usage.into_iter().enumerate()
+                    // Input usage was calculated based on the original block inputs,
+                    // so we need to adjust it based on the removals we have done.
+                    let mut sub_input_usage = removals.entry.input_usage;
+                    remove_indices(
+                        &mut sub_input_usage,
+                        removals.removed_inputs.iter().map(|r| *r as usize),
+                        |_, _| {},
+                    );
+
+                    let input_usage = &mut cs[0].input_usage;
+                    for (origin, sub_usage) in
+                        node.inputs.iter().zip_eq(sub_input_usage.into_iter())
                     {
-                        if !is_in_sorted_iter(&mut inputs_removed, &(sub_input_idx as u32))
-                            && let Some(input_idx) =
-                                last_pass.entry.input_map.get(&(sub_input_idx as u32))
+                        if let NodeInput::Reference(ValueOrigin {
+                            node: 0,
+                            output_idx,
+                        }) = origin
                         {
-                            cs[0].input_usage[*input_idx as usize].combine(usage.depth_down());
+                            input_usage[*output_idx as usize].combine(sub_usage.depth_down());
                         }
                     }
-                }
-
-                if !last_pass.block_returns {
-                    // The rest of this block is unreachable, so we can stop processing it.
-                    dag.truncate(node_idx + 1);
-                    break;
                 }
             }
             (_, false) => {
@@ -274,6 +214,8 @@ fn process_block<'a>(dag: &mut Vec<Node<'a>>, cs: &mut VecDeque<ControlStackEntr
         }
     }
     // TODO: mark and remove unused sub-blocks outputs...
+
+    output_removed
 }
 
 fn handle_break_target<'a>(
@@ -282,8 +224,8 @@ fn handle_break_target<'a>(
     relative_depth: u32,
 ) {
     for (slot_idx, input) in node_inputs.into_iter().enumerate() {
-        // Determine if this input is a block input.
-        let block_input_idx = if let NodeInput::Reference(ValueOrigin {
+        // Determine if this node input originates at the block input.
+        if let NodeInput::Reference(ValueOrigin {
             node: 0,
             output_idx: input_idx,
         }) = *input
@@ -291,159 +233,68 @@ fn handle_break_target<'a>(
             // This is a block input. Mark the most restrictive usage given for it inside this block.
             let usage = &mut cs[0].input_usage[input_idx as usize];
             usage.combine_with_redirection(relative_depth, slot_idx as u32);
-
-            Some(input_idx)
-        } else {
-            None
-        };
-
-        // We can't change the function signature, so if the target is a return,
-        // we don't track the redirections.
-        if relative_depth >= cs.len() as u32 {
-            assert_eq!(relative_depth, cs.len() as u32);
-            continue;
-        }
-
-        // For each block down in the control stack up to the break target
-        // we try to find if the inputs are still block inputs.
-        let block_input_idx = block_input_idx.and_then(|mut input_idx| {
-            for entry in cs.iter().take(relative_depth as usize) {
-                if let Some(mapped_input) = entry.input_map.get(&input_idx) {
-                    input_idx = *mapped_input;
-                } else {
-                    // This input is not a block input in this block,
-                    return None;
-                }
-            }
-
-            Some(input_idx)
-        });
-
-        let target_entry = &mut cs[relative_depth as usize];
-        target_entry.was_ever_broken_to = true;
-
-        // If we have found a block input in the break target block,
-        // we must decide if it is a redirection or not.
-        let redirection = &mut target_entry.outputs_redirections[slot_idx];
-        if let Some(input_idx) = block_input_idx {
-            if let Redirection::Unknown = redirection {
-                // So far, this could be a redirection.
-                *redirection = Redirection::FromInput(input_idx);
-            } else if let Redirection::FromInput(existing_input) = redirection
-                && *existing_input != input_idx
-            {
-                // Different inputs are being passed to the same output, so it cannot be a redirection.
-                *redirection = Redirection::NotRedirected;
-            }
-        } else {
-            // The value does not come from a block input, so it is certainly not a redirection.
-            *redirection = Redirection::NotRedirected;
         }
     }
 }
 
-struct BlockPassResult {
-    /// Does this block ever return?
-    block_returns: bool,
-
+struct BlockRemovals {
     /// List of the indices of inputs removed from the block.
-    inputs_removed: Vec<u32>,
+    removed_inputs: Vec<u32>,
 
-    /// List of the indices of outputs to be removed from the block,
-    /// together with the redirection users must point to, if any user
-    /// is expected.
-    outputs_to_remove: Vec<(u32, Option<ValueOrigin>)>,
+    /// Was any output removed?
+    output_removed: bool,
 
     /// The resulting entry after processing the block.
     entry: ControlStackEntry,
 }
 
-fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) -> BlockPassResult {
+fn handle_block_node(
+    node_idx: usize,
+    node: &mut RedirNode,
+    cs: &mut VecDeque<ControlStackEntry>,
+    origin_substitutions: &mut HashMap<ValueOrigin, Option<ValueOrigin>>,
+) -> BlockRemovals {
     let (sub_dag, kind) = if let Operation::Block { sub_dag, kind } = &mut node.operation {
         (sub_dag, kind)
     } else {
         panic!()
     };
 
-    let num_outputs = if let BlockKind::Loop = kind {
-        // The outputs of a loop block are its own inputs
-        node.inputs.len()
-    } else {
-        node.output_types.len()
-    };
-    let outputs_redirections = vec![Redirection::Unknown; num_outputs];
-
-    // Map from the input inside of the sub-block to the input of the current block.
-    //
-    // [MAJOR BUG] TODO: you can't just remap the inputs to a loop sub-block,
-    // because this only guarantees the mapping on the first iteration. You can only do
-    // this if the input is redirected as-is to the next iteration, but we don't have
-    // that information at this point.
-    //
-    // Since this information is also used by the register allocator later,
-    // we should have a pass calculating this earlier.
-    // todo!();
-    let input_map = block_inputs(&node.inputs)
-        .map(|(node_input_idx, block_input_idx)| (node_input_idx as u32, block_input_idx))
-        .collect();
-
     // Call the processing recursively
     cs.push_front(ControlStackEntry {
-        outputs_redirections,
-        input_map,
+        //input_map,
         // Let the block initialize the input usage for its inputs...
         input_usage: Vec::new(),
-        was_ever_broken_to: false,
     });
-    process_block(&mut sub_dag.nodes, cs);
+    process_block(sub_dag, cs);
     let mut sub_entry = cs.pop_front().unwrap();
     assert_eq!(sub_entry.input_usage.len(), node.inputs.len());
 
-    // Calculate what outputs can be removed
-    let mut block_returns = true;
-    let mut outputs_to_remove = Vec::new();
-    if !sub_entry.was_ever_broken_to {
-        // Invariant check: there can only be an unknown redirection if the block is
-        // never broken to, in which case, all must be unknown.
-        assert!(
-            sub_entry
-                .outputs_redirections
-                .iter()
-                .all(|redir| *redir == Redirection::Unknown)
-        );
+    let redirections = &mut sub_dag.block_data;
 
-        // Sub-block is never broken to, so we can do the following transformations:
-        match kind {
-            BlockKind::Block => {
-                // If the sub-block is a plain block, all outputs can be removed,
-                // and the rest of this block is unreachable, and we can stop processing it.
-                outputs_to_remove.extend((0..node.output_types.len() as u32).map(|i| (i, None)));
-            }
-            BlockKind::Loop => {
-                // If the sub-block is a loop, it can be turned into a plain block with no outputs,
-                // because it never iterates.
-                *kind = BlockKind::Block;
-                assert!(node.output_types.is_empty());
-            }
-        }
-        block_returns = false;
-    } else if let BlockKind::Block = kind {
+    // Calculate what outputs can be removed
+    // TODO: make the initial set of removals come from the previous pass, because we
+    // can only detect if an output was actually used after processing the block.
+    let mut outputs_to_remove = Vec::new();
+    if let BlockKind::Block = kind {
         // If sub-block is a plain block, we can remove its output slots that were redirected as-is from its inputs.
-        for (output_idx, redir) in sub_entry.outputs_redirections.iter().enumerate() {
+        for (output_idx, redir) in redirections.iter().enumerate() {
             assert!(*redir != Redirection::Unknown);
             if let Redirection::FromInput(input_idx) = redir {
                 // This output is always a redirection of the same input.
                 let NodeInput::Reference(original_input) = node.inputs[*input_idx as usize] else {
                     unreachable!()
                 };
-                outputs_to_remove.push((output_idx as u32, Some(original_input)));
+                origin_substitutions.insert(
+                    ValueOrigin {
+                        node: node_idx,
+                        output_idx: output_idx as u32,
+                    },
+                    Some(original_input),
+                );
+                outputs_to_remove.push(output_idx as u32);
             }
         }
-    } else {
-        // This is a loop, and loops "never" returns: due to an earlier DAG
-        // transformation that made all breaks explicit, when we break out of
-        // a loop, it is always an explicit break to an outer block.
-        block_returns = false;
     }
 
     // Complete the input_usage: to be redirected, it is not enough that an input is
@@ -455,8 +306,7 @@ fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) 
             slots,
         } = usage
             && !slots.iter().all(|slot| {
-                sub_entry.outputs_redirections[*slot as usize]
-                    == Redirection::FromInput(input_idx as u32)
+                redirections[*slot as usize] == Redirection::FromInput(input_idx as u32)
             })
         {
             *usage = InputUsage::Used;
@@ -502,45 +352,46 @@ fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) 
         // (target → source) and BFS-ing from all No inputs.
         // Whatever remains Unknown afterwards is safely removable (Yes).
 
-        // Build reverse edges: for each Unknown input, its redirection
-        // slots point forward; we record the reverse (slot → input).
+        // Build reverse edges map: target input slot → list of source input slots that are redirected to it.
         let mut reverse_edges: Vec<Vec<u32>> = vec![vec![]; can_remove_input.len()];
-        for (idx, status) in can_remove_input.iter().enumerate() {
+        for (source, status) in can_remove_input.iter().enumerate() {
             if *status == CanRemoveInput::Unknown {
                 let InputUsage::RedirectedTo {
                     max_depth: 0,
                     slots,
-                } = &sub_entry.input_usage[idx]
+                } = &sub_entry.input_usage[source]
                 else {
                     unreachable!()
                 };
-                for &slot in slots {
-                    reverse_edges[slot as usize].push(idx as u32);
+                for &target in slots {
+                    reverse_edges[target as usize].push(source as u32);
                 }
             }
         }
 
         // Seed the worklist with all No inputs.
-        let mut worklist: VecDeque<u32> = can_remove_input
+        let mut worklist = can_remove_input
             .iter()
             .enumerate()
             .filter(|(_, s)| **s == CanRemoveInput::No)
             .map(|(i, _)| i as u32)
-            .collect();
+            .collect_vec();
 
         // Propagate No backwards through the reverse edges.
-        while let Some(idx) = worklist.pop_front() {
-            for &source in &reverse_edges[idx as usize] {
+        while let Some(target) = worklist.pop() {
+            for &source in &reverse_edges[target as usize] {
                 match can_remove_input[source as usize] {
                     CanRemoveInput::Unknown => {
                         can_remove_input[source as usize] = CanRemoveInput::No;
-                        worklist.push_back(source);
+                        worklist.push(source);
                     }
                     CanRemoveInput::Yes => {
-                        // This should not happen: a Yes input cannot point to a No input.
+                        // This should not happen: an input to be removed can't feed into an input that must be kept.
                         unreachable!()
                     }
-                    _ => {}
+                    CanRemoveInput::No => {
+                        // Already marked as No, nothing to do.
+                    }
                 }
             }
         }
@@ -564,12 +415,6 @@ fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) 
         })
         .collect_vec();
 
-    remove_block_node_io(
-        node,
-        &inputs_to_remove,
-        &mut VecDeque::from(vec![outputs_to_remove.iter().map(|(r, _)| *r).collect()]),
-    );
-
     // Update parent node inputs.
     remove_indices(
         &mut node.inputs,
@@ -577,10 +422,48 @@ fn block_processing_pass(node: &mut Node, cs: &mut VecDeque<ControlStackEntry>) 
         |_, _| {},
     );
 
-    BlockPassResult {
-        block_returns,
-        inputs_removed: inputs_to_remove,
-        outputs_to_remove,
+    // Update parent node redirections.
+    remove_indices(
+        redirections,
+        inputs_to_remove.iter().map(|&r| r as usize),
+        |_, _| {},
+    );
+
+    // Update parent node outputs.
+    remove_indices(
+        &mut node.output_types,
+        outputs_to_remove.iter().map(|r| *r as usize),
+        |old_idx, new_idx| {
+            if let Some(new_idx) = new_idx {
+                // This output was shifted, needs to be mapped to the new index.
+                origin_substitutions.insert(
+                    ValueOrigin {
+                        node: node_idx,
+                        output_idx: old_idx as u32,
+                    },
+                    Some(ValueOrigin {
+                        node: node_idx,
+                        output_idx: new_idx as u32,
+                    }),
+                );
+            }
+        },
+    );
+
+    let output_removed = !outputs_to_remove.is_empty();
+
+    // Perform the actual removals in the sub-block.
+    if !inputs_to_remove.is_empty() || output_removed {
+        remove_block_node_io(
+            node,
+            &inputs_to_remove,
+            &mut VecDeque::from(vec![outputs_to_remove]),
+        );
+    }
+
+    BlockRemovals {
+        removed_inputs: inputs_to_remove,
+        output_removed,
         entry: sub_entry,
     }
 }
@@ -599,7 +482,7 @@ fn apply_substitutions(
 }
 
 fn remove_block_node_io(
-    block_node: &mut Node,
+    block_node: &mut RedirNode,
     inputs_to_remove: &[u32],
     outputs_to_remove: &mut VecDeque<Vec<u32>>,
 ) {
@@ -608,6 +491,8 @@ fn remove_block_node_io(
         if let BlockKind::Loop = kind {
             let outs = &mut outputs_to_remove[0];
             assert!(outs.is_empty());
+            // I couldn't avoid cloning here. I tried making `outputs_to_remove: &mut VecDeque<&[u32]>`,
+            // but there is no lifetime that allows it to hold external references plus local references.
             *outs = inputs_to_remove.to_vec();
         }
 
@@ -767,37 +652,6 @@ fn block_inputs<'a>(
             None
         }
     })
-}
-
-/// Combines an old list of removed indices with a new list of removed indices,
-/// adjusting the new indices by the number of previous removals that come before them.
-fn combine_removals(
-    previous: Vec<(u32, Option<ValueOrigin>)>,
-    new_indices: Vec<(u32, Option<ValueOrigin>)>,
-) -> Vec<(u32, Option<ValueOrigin>)> {
-    if previous.is_empty() {
-        return new_indices;
-    }
-
-    let mut result = Vec::new();
-    let mut prev = previous.into_iter().peekable();
-    let mut offset = 0;
-
-    for (idx, redir) in new_indices {
-        while let Some((p, _)) = prev.peek() {
-            let original = idx + offset;
-            assert_ne!(*p, original);
-            if *p < original {
-                result.push(prev.next().unwrap());
-                offset += 1;
-            } else {
-                break;
-            }
-        }
-        result.push((idx + offset, redir));
-    }
-    result.extend(prev);
-    result
 }
 
 /// Checks if a value is in a sorted iterator, consuming the iterator up to the value.
