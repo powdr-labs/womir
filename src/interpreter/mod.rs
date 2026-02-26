@@ -273,6 +273,16 @@ pub struct Interpreter<'a, E: ExternalFunctions> {
     addr_to_func_id: HashMap<u32, u32>,
 }
 
+pub enum ExternalCallResult {
+    Values(Vec<u32>),
+    Exit(u32),
+}
+
+pub enum RunResult {
+    Ok(Vec<u32>),
+    Exit(u32),
+}
+
 pub trait ExternalFunctions {
     fn call(
         &mut self,
@@ -280,7 +290,7 @@ pub trait ExternalFunctions {
         func: &str,
         args: &[u32],
         mem: &mut Option<MemoryAccessor<'_>>,
-    ) -> Vec<u32>;
+    ) -> ExternalCallResult;
 }
 
 struct Ram(HashMap<u32, u32>);
@@ -311,7 +321,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         exec_model: ExecutionModel,
         external_functions: E,
         trace_enabled: bool,
-    ) -> Self {
+    ) -> (Self, Option<u32>) {
         const START_ROM_ADDR: u32 = 0x1;
 
         let mut func_stack_sizes = Vec::new();
@@ -376,19 +386,24 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
             addr_to_func_id,
         };
 
-        if let Some(start_function) = interpreter.module.start_function {
+        let exit_code = if let Some(start_function) = interpreter.module.start_function {
             let label = func_idx_to_label(start_function);
-            interpreter.run(&label, &[]);
-        }
+            match interpreter.run(&label, &[]) {
+                RunResult::Exit(code) => Some(code),
+                RunResult::Ok(_) => None,
+            }
+        } else {
+            None
+        };
 
-        interpreter
+        (interpreter, exit_code)
     }
 
     fn get_mem<'b>(&'b mut self) -> MemoryAccessor<'b> {
         MemoryAccessor::new(self.module.memory.unwrap(), &mut self.ram)
     }
 
-    pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> Vec<u32> {
+    pub fn run(&mut self, func_name: &str, inputs: &[u32]) -> RunResult {
         let func_label = &self.labels[func_name];
 
         let func_type = &self.module.get_func_type(func_label.func_idx.unwrap()).ty;
@@ -431,16 +446,22 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         let first_fp = self.fp;
         // Push the initial function address onto the stack for instrumentation
         self.call_stack.push(self.addr_to_func_id[&self.pc]);
-        self.run_loop();
+        let exit_code = self.run_loop();
         // Pop the initial function address
         self.call_stack.pop();
 
-        outputs_range
-            .map(|i| self.regs.get(first_fp + i).as_concrete())
-            .collect::<Vec<u32>>()
+        if let Some(code) = exit_code {
+            return RunResult::Exit(code);
+        }
+
+        RunResult::Ok(
+            outputs_range
+                .map(|i| self.regs.get(first_fp + i).as_concrete())
+                .collect::<Vec<u32>>(),
+        )
     }
 
-    fn run_loop(&mut self) {
+    fn run_loop(&mut self) -> Option<u32> {
         let mut cycles = 0usize;
 
         let mut t = Tracer::new(self);
@@ -2036,9 +2057,15 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                     let result =
                         t.i.external_functions
                             .call(module, function, &args, &mut accessor);
-                    for (value, output) in result.into_iter().zip_eq(outputs.into_iter().flatten())
-                    {
-                        t.set_reg_relative_u32(output..output + 1, value);
+                    match result {
+                        ExternalCallResult::Exit(code) => return Some(code),
+                        ExternalCallResult::Values(values) => {
+                            for (value, output) in
+                                values.into_iter().zip_eq(outputs.into_iter().flatten())
+                            {
+                                t.set_reg_relative_u32(output..output + 1, value);
+                            }
+                        }
                     }
                 }
                 Directive::JumpAndActivateFrame {
@@ -2100,6 +2127,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
         } else {
             log::info!("Program terminated with cycles: {cycles}, final frame pointer: {final_fp}");
         }
+        None
     }
 
     fn allocate(&mut self, size: u32) -> u32 {

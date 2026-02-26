@@ -6,7 +6,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use womir::{
     interpreter::{
-        ExecutionModel, ExternalFunctions, Interpreter, MemoryAccessor,
+        ExecutionModel, ExternalCallResult, ExternalFunctions, Interpreter, MemoryAccessor,
+        RunResult,
         generic_ir::{Directive, GenericIrSetting},
     },
     loader::{FunctionAsm, PartiallyParsedProgram, Program, rwm::RWMStages, wom::WomStages},
@@ -545,6 +546,186 @@ impl GoJsRuntime {
     }
 }
 
+// ============== WASI snapshot_preview1 syscall support ==============
+// Minimal WASI implementation for running Go wasip1 binaries.
+// Logs every syscall name to stderr for discovery purposes.
+
+/// WASI errno codes
+const WASI_ESUCCESS: u32 = 0;
+const WASI_EBADF: u32 = 8;
+const WASI_ENOSYS: u32 = 52;
+
+use std::sync::atomic::{AtomicU64, Ordering};
+static WASI_CLOCK_MONOTONIC: AtomicU64 = AtomicU64::new(1_000_000_000); // start at 1 second in ns
+
+fn wasi_call(
+    fname: &str,
+    args: &[u32],
+    mem: &mut Option<MemoryAccessor<'_>>,
+) -> ExternalCallResult {
+    eprintln!("[wasi] syscall: {fname}(args={args:?})");
+    let mem = mem.as_mut().unwrap();
+
+    let values = match fname {
+        "args_sizes_get" => {
+            // args_sizes_get(argc_ptr, argv_buf_size_ptr) -> errno
+            // Return 0 args.
+            let argc_ptr = args[0];
+            let argv_buf_size_ptr = args[1];
+            mem.set_word(argc_ptr, 0).unwrap();
+            mem.set_word(argv_buf_size_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "args_get" => {
+            // args_get(argv, argv_buf) -> errno
+            // No args to return.
+            vec![WASI_ESUCCESS]
+        }
+        "environ_sizes_get" => {
+            // environ_sizes_get(count_ptr, buf_size_ptr) -> errno
+            let count_ptr = args[0];
+            let buf_size_ptr = args[1];
+            mem.set_word(count_ptr, 0).unwrap();
+            mem.set_word(buf_size_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "environ_get" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_write" => {
+            // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
+            let fd = args[0];
+            let iovs_ptr = args[1];
+            let iovs_len = args[2];
+            let nwritten_ptr = args[3];
+            let mut total = 0u32;
+            for i in 0..iovs_len {
+                let iov_base = mem.get_word(iovs_ptr + i * 8).unwrap();
+                let iov_len = mem.get_word(iovs_ptr + i * 8 + 4).unwrap();
+                let bytes: Vec<u8> = (0..iov_len)
+                    .map(|j| {
+                        let addr = iov_base + j;
+                        let word = mem.get_word(addr & !3).unwrap();
+                        (word >> ((addr % 4) * 8)) as u8
+                    })
+                    .collect();
+                let msg = String::from_utf8_lossy(&bytes);
+                match fd {
+                    1 => eprint!("[wasi stdout] {msg}"),
+                    2 => eprint!("[wasi stderr] {msg}"),
+                    _ => eprint!("[wasi fd={fd}] {msg}"),
+                }
+                total += iov_len;
+            }
+            mem.set_word(nwritten_ptr, total).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "fd_read" => {
+            // fd_read(fd, iovs_ptr, iovs_len, nread_ptr) -> errno
+            let nread_ptr = args[3];
+            mem.set_word(nread_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "fd_close" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_seek" => {
+            // fd_seek(fd, offset_lo, offset_hi, whence, newoffset_ptr) -> errno
+            vec![WASI_EBADF]
+        }
+        "fd_fdstat_get" => {
+            // fd_fdstat_get(fd, buf) -> errno
+            // Write a zeroed fdstat struct (24 bytes = 6 words).
+            let buf = args[1];
+            for i in 0..6 {
+                mem.set_word(buf + i * 4, 0).unwrap();
+            }
+            vec![WASI_ESUCCESS]
+        }
+        "fd_fdstat_set_flags" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_prestat_get" => {
+            // fd_prestat_get(fd, buf) -> errno
+            // Return EBADF to signal no more preopened dirs.
+            vec![WASI_EBADF]
+        }
+        "fd_prestat_dir_name" => {
+            vec![WASI_EBADF]
+        }
+        "fd_filestat_get" => {
+            vec![WASI_EBADF]
+        }
+        "fd_filestat_set_size" => {
+            vec![WASI_EBADF]
+        }
+        "fd_sync" => {
+            vec![WASI_ESUCCESS]
+        }
+        "fd_pread" => {
+            vec![WASI_EBADF]
+        }
+        "fd_readdir" => {
+            vec![WASI_EBADF]
+        }
+        "clock_time_get" => {
+            // clock_time_get(clock_id, precision_lo, precision_hi, time_ptr) -> errno
+            // Return a fake but non-zero and incrementing timestamp.
+            let time_ptr = args[3];
+            let ns = WASI_CLOCK_MONOTONIC.fetch_add(1_000_000, Ordering::Relaxed); // +1ms each call
+            mem.set_word(time_ptr, ns as u32).unwrap();
+            mem.set_word(time_ptr + 4, (ns >> 32) as u32).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "random_get" => {
+            // random_get(buf, buf_len) -> errno
+            // Fill with deterministic "random" bytes (zeros for now).
+            let buf_ptr = args[0];
+            let buf_len = args[1];
+            for i in 0..buf_len {
+                let addr = buf_ptr + i;
+                let word_addr = addr & !3;
+                let byte_offset = addr % 4;
+                let old_word = mem.get_word(word_addr).unwrap();
+                // Set byte to a simple deterministic pattern.
+                let new_byte = (i * 7 + 13) & 0xFF;
+                let mask = !(0xFFu32 << (byte_offset * 8));
+                let new_word = (old_word & mask) | (new_byte << (byte_offset * 8));
+                mem.set_word(word_addr, new_word).unwrap();
+            }
+            vec![WASI_ESUCCESS]
+        }
+        "sched_yield" => {
+            vec![WASI_ESUCCESS]
+        }
+        "proc_exit" => {
+            let exit_code = args[0];
+            eprintln!("[wasi] proc_exit({exit_code})");
+            return ExternalCallResult::Exit(exit_code);
+        }
+        "poll_oneoff" => {
+            // poll_oneoff(in_ptr, out_ptr, nsubscriptions, nevents_ptr) -> errno
+            let nevents_ptr = args[3];
+            mem.set_word(nevents_ptr, 0).unwrap();
+            vec![WASI_ESUCCESS]
+        }
+        "path_create_directory"
+        | "path_remove_directory"
+        | "path_unlink_file"
+        | "path_rename"
+        | "path_filestat_get"
+        | "path_open" => {
+            eprintln!("[wasi] path operation {fname} not supported, returning ENOSYS");
+            vec![WASI_ENOSYS]
+        }
+        _ => {
+            eprintln!("[wasi] UNIMPLEMENTED syscall: {fname}");
+            vec![WASI_ENOSYS]
+        }
+    };
+    ExternalCallResult::Values(values)
+}
+
 struct DataInput {
     values: <Vec<u32> as IntoIterator>::IntoIter,
     /// Pre-formatted hint items: each is `[byte_len, word0, word1, ...]`.
@@ -600,8 +781,8 @@ impl ExternalFunctions for DataInput {
         function: &str,
         args: &[u32],
         mem: &mut Option<MemoryAccessor<'_>>,
-    ) -> Vec<u32> {
-        match (module, function) {
+    ) -> ExternalCallResult {
+        let values = match (module, function) {
             ("env", "read_u32") => {
                 vec![self.values.next().expect("Not enough input values")]
             }
@@ -661,13 +842,15 @@ impl ExternalFunctions for DataInput {
                 self.gojs.call(fname, sp, mem.as_mut().unwrap());
                 vec![]
             }
+            ("wasi_snapshot_preview1", fname) => return wasi_call(fname, args, mem),
             _ => {
                 panic!(
                     "External function not implemented: module: {module}, function: {function} with args: {:?}",
                     args
                 );
             }
-        }
+        };
+        ExternalCallResult::Values(values)
     }
 }
 
@@ -773,10 +956,17 @@ fn main() -> wasmparser::Result<()> {
                 DataInput::new_with_binary_inputs(inputs, binary_inputs)
             };
 
-            let mut interpreter = Interpreter::new(program, cli.exec_model, data_input, trace);
-            log::info!("Executing function: {function}");
-            let outputs = interpreter.run(&function, &args);
-            log::info!("Outputs: {:?}", outputs);
+            let (mut interpreter, start_exit) =
+                Interpreter::new(program, cli.exec_model, data_input, trace);
+            if let Some(code) = start_exit {
+                log::info!("Start function exited with code: {code}");
+            } else {
+                log::info!("Executing function: {function}");
+                match interpreter.run(&function, &args) {
+                    RunResult::Ok(outputs) => log::info!("Outputs: {:?}", outputs),
+                    RunResult::Exit(code) => log::info!("Program exited with code: {code}"),
+                }
+            }
 
             Ok(())
         }
@@ -852,14 +1042,17 @@ mod tests {
 
         for (exec_model, program) in pipelines {
             println!("Testing execution model: {exec_model:?}");
-            let mut interpreter = Interpreter::new(
+            let (mut interpreter, start_exit) = Interpreter::new(
                 program,
                 exec_model,
                 DataInput::new(data_inputs.clone()),
                 false,
             );
-            let got_output = interpreter.run(main_function, func_inputs);
-            assert_eq!(got_output, outputs);
+            assert!(start_exit.is_none(), "Unexpected start function exit");
+            match interpreter.run(main_function, func_inputs) {
+                RunResult::Ok(got_output) => assert_eq!(got_output, outputs),
+                RunResult::Exit(code) => panic!("Unexpected exit with code {code}"),
+            }
         }
     }
 
@@ -991,6 +1184,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_keeper_wasi() {
+        // Go keeper compiled with GOOS=wasip1 GOARCH=wasm -tags "womir".
+        // Reads the hoodi block payload via the hint stream (__hint_input / __hint_buffer),
+        // verifies the block, and exits with proc_exit(0).
+        // Compile command:
+        //   GOOS=wasip1 GOARCH=wasm go build -gcflags=all=-d=softfloat -tags "womir" -o keeper_wasi.wasm
+        let base = format!("{}/sample-programs", env!("CARGO_MANIFEST_DIR"));
+        let wasm_file =
+            std::fs::read(format!("{base}/keeper_wasi.wasm")).expect("failed to read wasm file");
+        let binary_inputs: Vec<Vec<u8>> = vec![
+            std::fs::read(format!("{base}/keeper/hoodi_payload.bin"))
+                .expect("failed to read binary input"),
+        ];
+
+        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+        let program = program
+            .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+            .unwrap();
+
+        let (mut interpreter, _) = Interpreter::new(
+            program,
+            ExecutionModel::InfiniteRegisters,
+            DataInput::new_with_binary_inputs(vec![], binary_inputs),
+            false,
+        );
+        match interpreter.run("_start", &[]) {
+            RunResult::Exit(0) => {} // expected: proc_exit(0)
+            RunResult::Exit(code) => panic!("Expected proc_exit(0) but got proc_exit({code})"),
+            RunResult::Ok(_) => {} // no proc_exit was called, that's also fine
+        }
+    }
+
     /// Like `test_interpreter_from_sample_programs` but feeds binary files as hint stream inputs.
     fn test_interpreter_with_binary_inputs(
         wasm_path: &str,
@@ -1013,14 +1239,17 @@ mod tests {
             .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
             .unwrap();
 
-        let mut interpreter = Interpreter::new(
+        let (mut interpreter, start_exit) = Interpreter::new(
             program,
             ExecutionModel::InfiniteRegisters,
             DataInput::new_with_binary_inputs(vec![], binary_inputs),
             false,
         );
-        let got_output = interpreter.run(main_function, func_inputs);
-        assert_eq!(got_output, outputs);
+        assert!(start_exit.is_none(), "Unexpected start function exit");
+        match interpreter.run(main_function, func_inputs) {
+            RunResult::Ok(got_output) => assert_eq!(got_output, outputs),
+            RunResult::Exit(code) => panic!("Unexpected exit with code {code}"),
+        }
     }
 
     #[test]
@@ -1209,7 +1438,7 @@ mod tests {
             function: &str,
             args: &[u32],
             _mem: &mut Option<MemoryAccessor<'_>>,
-        ) -> Vec<u32> {
+        ) -> ExternalCallResult {
             /* From https://github.com/WebAssembly/spec/tree/main/interpreter#spectest-host-module
             (func (export "print"))
             (func (export "print_i32") (param i32))
@@ -1244,7 +1473,7 @@ mod tests {
                     args
                 ),
             }
-            Vec::new()
+            ExternalCallResult::Values(Vec::new())
         }
     }
 
@@ -1277,7 +1506,7 @@ mod tests {
 
                     for (program, exec_model) in pipelines {
                         println!("  Execution model: {:?}", exec_model);
-                        let mut interpreter =
+                        let (mut interpreter, _) =
                             Interpreter::new(program, exec_model, SpectestExternalFunctions, false);
 
                         asserts
@@ -1291,9 +1520,15 @@ mod tests {
                             })
                             .for_each(|assert_case| {
                                 println!("Assert test case: {assert_case:#?}");
-                                let got_output =
-                                    interpreter.run(&assert_case.function_name, &assert_case.args);
-                                assert_eq!(got_output, assert_case.expected);
+                                match interpreter.run(&assert_case.function_name, &assert_case.args)
+                                {
+                                    RunResult::Ok(got_output) => {
+                                        assert_eq!(got_output, assert_case.expected);
+                                    }
+                                    RunResult::Exit(code) => {
+                                        panic!("Unexpected exit with code {code}");
+                                    }
+                                }
                             });
                     }
                 }
