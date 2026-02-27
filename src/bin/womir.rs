@@ -739,7 +739,7 @@ mod tests {
                         (
                             program
                                 .clone()
-                                .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+                                .default_process_all_functions::<RWMStages<GenericIrSetting>>()
                                 .unwrap(),
                             ExecutionModel::InfiniteRegisters,
                         ),

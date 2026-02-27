@@ -7,7 +7,6 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
-    iter::Peekable,
     vec,
 };
 
@@ -538,10 +537,9 @@ fn remove_block_node_io(
                 // Any input set for removal must be propagated to the inner blocks.
                 let mut sub_input_to_remove = Vec::new();
                 let mut input_changed = false;
-                let mut inputs_to_remove = inputs_to_remove.iter().cloned().peekable();
-                for (_, input_idx) in block_inputs(&node.inputs) {
-                    if is_in_sorted_iter(&mut inputs_to_remove, &input_idx) {
-                        sub_input_to_remove.push(input_idx);
+                for (sub_input_idx, parent_input_idx) in block_inputs(&node.inputs) {
+                    if inputs_to_remove.binary_search(&parent_input_idx).is_ok() {
+                        sub_input_to_remove.push(sub_input_idx as u32);
                         input_changed = true;
                     }
                 }
@@ -668,18 +666,4 @@ fn block_inputs<'a>(
             None
         }
     })
-}
-
-/// Checks if a value is in a sorted iterator, consuming the iterator up to the value.
-fn is_in_sorted_iter<T: Ord>(iter: &mut Peekable<impl Iterator<Item = T>>, value: &T) -> bool {
-    while let Some(item) = iter.peek() {
-        if item > value {
-            break;
-        }
-        let item = iter.next().unwrap();
-        if item == *value {
-            return true;
-        }
-    }
-    false
 }
