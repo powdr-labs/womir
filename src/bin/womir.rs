@@ -486,7 +486,7 @@ mod tests {
         let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
 
         let program = program
-            .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+            .default_process_all_functions::<RWMStages<GenericIrSetting>>()
             .unwrap();
 
         let mut interpreter = Interpreter::new(
@@ -739,13 +739,13 @@ mod tests {
                         (
                             program
                                 .clone()
-                                .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+                                .default_process_all_functions::<RWMStages<GenericIrSetting>>()
                                 .unwrap(),
                             ExecutionModel::InfiniteRegisters,
                         ),
                         (
                             program
-                                .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
+                                .default_process_all_functions::<WomStages<GenericIrSetting>>()
                                 .unwrap(),
                             ExecutionModel::WriteOnceRegisters,
                         ),
