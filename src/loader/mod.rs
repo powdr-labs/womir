@@ -550,7 +550,7 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
             }
             Self::RedirectionDag(mut dag) => {
                 // Optimization pass: remove unecessary inputs and outputs of blocks.
-                dag::prune_block_io::prune_block_io(&mut dag);
+                dag::prune_block_io::prune_block_io(func_idx, &mut dag);
                 Self::CleanBlockIODag(dag)
             }
             Self::CleanBlockIODag(mut dag) => {
