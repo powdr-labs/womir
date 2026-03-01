@@ -43,10 +43,6 @@ pub fn calculate_input_redirection<'a>(
         was_ever_broken_to: false,
     };
 
-    if func_idx == 681 {
-        println!("DESNOBRO!");
-    }
-
     let cs = &mut VecDeque::from(vec![entry]);
     let (mut nodes, mut at_fixed_point) = process_block(func_idx, dag.nodes, cs);
     while !at_fixed_point {
@@ -300,10 +296,6 @@ where
     } else {
         panic!()
     };
-
-    if func_idx == 681 && node.inputs.len() == 8 {
-        println!("DESNOBRO BLOCK!");
-    }
 
     let num_outputs = if let BlockKind::Loop = kind {
         // The outputs of a loop block are its own inputs

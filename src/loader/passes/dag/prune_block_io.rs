@@ -5,8 +5,8 @@
 //! dedup/collapse.
 
 use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
+    cell::Cell,
+    collections::{HashMap, VecDeque},
     fmt::Debug,
     vec,
 };
@@ -25,23 +25,27 @@ use crate::{
     utils::{offset_map::OffsetMap, remove_indices},
 };
 
+thread_local! {
+    pub static DEBUG_COUNTER: Cell<usize> = const { Cell::new(0) };
+}
+
 pub fn prune_block_io(func_idx: u32, dag: &mut RedirDag<'_>) {
+    DEBUG_COUNTER.set(0);
     // If outputs have been removed, we might have created new opportunities for
     // input removals, so we need to repeat until we reach a fixed point.
     while process_block(func_idx, dag, &mut VecDeque::new()) {}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum InputUsage {
     /// This is the most useless input, always safe to remove.
     Unused,
     /// Can be removed if it is not used in any other way.
     /// Used to detect useless circular redirections in loop.
     RedirectedTo {
-        /// The maximum depth this input is redirected to.
-        max_depth: u32,
-        /// The set of output slots this input is redirected to.
-        slots: HashSet<u32>,
+        /// The set of outputs slots this input is redirected to,
+        /// for each depth level.
+        slots_per_depth: VecDeque<Vec<u32>>,
     },
     /// This input is useful, and cannot be removed.
     Used,
@@ -50,64 +54,65 @@ enum InputUsage {
 impl InputUsage {
     fn depth_down(self) -> Self {
         match self {
-            InputUsage::Used | InputUsage::RedirectedTo { max_depth: 0, .. } => InputUsage::Used,
-            InputUsage::RedirectedTo { max_depth, slots } => InputUsage::RedirectedTo {
-                max_depth: max_depth - 1,
-                slots,
-            },
+            InputUsage::Used => InputUsage::Used,
+            InputUsage::RedirectedTo {
+                mut slots_per_depth,
+            } => {
+                slots_per_depth.pop_front();
+                if slots_per_depth.is_empty() {
+                    InputUsage::Used
+                } else {
+                    InputUsage::RedirectedTo { slots_per_depth }
+                }
+            }
             InputUsage::Unused => InputUsage::Unused,
         }
     }
 
     fn combine(&mut self, other: InputUsage) {
-        match (&mut *self, &other) {
+        match (&mut *self, other) {
             (InputUsage::Used, _) | (_, InputUsage::Used) => {
                 *self = InputUsage::Used;
             }
             (
                 InputUsage::RedirectedTo {
-                    max_depth: d_self,
-                    slots: s_self,
+                    slots_per_depth: self_slots,
                 },
                 InputUsage::RedirectedTo {
-                    max_depth: d_other,
-                    slots: s_other,
+                    slots_per_depth: other_slots,
                 },
-            ) => match (*d_self).cmp(d_other) {
-                Ordering::Less => {
-                    *self = other;
+            ) => {
+                for (self_depth, other_depth) in self_slots.iter_mut().zip(other_slots) {
+                    self_depth.extend(other_depth);
                 }
-                Ordering::Equal => {
-                    s_self.extend(s_other);
-                }
-                Ordering::Greater => (),
-            },
+            }
             (InputUsage::Unused, InputUsage::Unused)
             | (InputUsage::RedirectedTo { .. }, InputUsage::Unused) => (),
-            (InputUsage::Unused, InputUsage::RedirectedTo { .. }) => {
+            (InputUsage::Unused, other @ InputUsage::RedirectedTo { .. }) => {
                 *self = other;
             }
         }
     }
 
     fn combine_with_redirection(&mut self, depth: u32, slot: u32) {
-        if let InputUsage::Used = self {
-            return;
-        }
-
-        if let InputUsage::RedirectedTo { max_depth, slots } = self {
-            if *max_depth > depth {
-                return;
-            } else if *max_depth == depth {
-                slots.insert(slot);
-                return;
+        let slots_per_depth = match self {
+            InputUsage::Used => return,
+            InputUsage::Unused => {
+                *self = InputUsage::RedirectedTo {
+                    slots_per_depth: VecDeque::new(),
+                };
+                let InputUsage::RedirectedTo { slots_per_depth } = self else {
+                    unreachable!()
+                };
+                slots_per_depth
             }
-        }
-
-        *self = InputUsage::RedirectedTo {
-            max_depth: depth,
-            slots: HashSet::from([slot]),
+            InputUsage::RedirectedTo { slots_per_depth } => slots_per_depth,
         };
+
+        if slots_per_depth.len() <= depth as usize {
+            slots_per_depth.resize_with(depth as usize + 1, Vec::new);
+        }
+        slots_per_depth[depth as usize].push(slot);
     }
 }
 
@@ -135,7 +140,7 @@ fn process_block(func_idx: u32, dag: &mut RedirDag, cs: &mut VecDeque<ControlSta
                 // We use its information to initialize the input usage information for this block.
                 cs[0]
                     .input_usage
-                    .resize(node.output_types.len(), InputUsage::Unused);
+                    .resize_with(node.output_types.len(), || InputUsage::Unused);
             }
             (Operation::WASMOp(Op::Br { relative_depth }), false) => {
                 handle_break_target(cs, &node.inputs, *relative_depth);
@@ -172,7 +177,7 @@ fn process_block(func_idx: u32, dag: &mut RedirDag, cs: &mut VecDeque<ControlSta
                 }
             }
             (Operation::Block { .. }, is_func_body) => {
-                let removals =
+                let mut removals =
                     handle_block_node(func_idx, node_idx, node, cs, &mut origin_substitutions);
 
                 output_removed |= removals.output_removed;
@@ -181,16 +186,15 @@ fn process_block(func_idx: u32, dag: &mut RedirDag, cs: &mut VecDeque<ControlSta
                 if !is_func_body {
                     // Input usage was calculated based on the original block inputs,
                     // so we need to adjust it based on the removals we have done.
-                    let mut sub_input_usage = removals.entry.input_usage;
                     remove_indices(
-                        &mut sub_input_usage,
+                        &mut removals.inputs_usage,
                         removals.removed_inputs.iter().map(|r| *r as usize),
                         |_, _| {},
                     );
 
                     let input_usage = &mut cs[0].input_usage;
                     for (origin, sub_usage) in
-                        node.inputs.iter().zip_eq(sub_input_usage.into_iter())
+                        node.inputs.iter().zip_eq(removals.inputs_usage.into_iter())
                     {
                         if let NodeInput::Reference(ValueOrigin {
                             node: 0,
@@ -246,7 +250,7 @@ struct BlockRemovals {
     output_removed: bool,
 
     /// The resulting entry after processing the block.
-    entry: ControlStackEntry,
+    inputs_usage: Vec<InputUsage>,
 }
 
 fn handle_block_node(
@@ -261,6 +265,12 @@ fn handle_block_node(
     } else {
         panic!()
     };
+
+    let orig_debug_counter = DEBUG_COUNTER.get();
+    DEBUG_COUNTER.set(orig_debug_counter + 1);
+    if func_idx == 681 && orig_debug_counter == 1 {
+        println!("STOP!");
+    }
 
     // Call the processing recursively
     cs.push_front(ControlStackEntry {
@@ -299,19 +309,23 @@ fn handle_block_node(
         }
     }
 
+    if func_idx == 681 && orig_debug_counter == 2 {
+        println!("Input usage: {:?}", sub_entry.input_usage);
+    }
+
     // Complete the input_usage: to be redirected, it is not enough that an input is
     // only used in outputs: it also requires that those outputs are only written with that
     // input.
     for (input_idx, usage) in sub_entry.input_usage.iter_mut().enumerate() {
-        if let InputUsage::RedirectedTo {
-            max_depth: 0,
-            slots,
-        } = usage
-            && !slots.iter().all(|slot| {
-                redirections[*slot as usize] == Redirection::FromInput(input_idx as u32)
-            })
-        {
-            *usage = InputUsage::Used;
+        if let InputUsage::RedirectedTo { slots_per_depth } = usage {
+            let this_slots = &mut slots_per_depth[0];
+            this_slots.sort_unstable();
+            this_slots.dedup();
+            if this_slots.iter().any(|slot| {
+                redirections[*slot as usize] != Redirection::FromInput(input_idx as u32)
+            }) {
+                *usage = InputUsage::Used;
+            }
         }
     }
 
@@ -330,7 +344,9 @@ fn handle_block_node(
         let removal_status = match usage {
             // This input is not used at all in the sub-block, so it can be removed from the block inputs.
             InputUsage::Unused => CanRemoveInput::Yes,
-            InputUsage::RedirectedTo { max_depth: 0, .. } => {
+            InputUsage::RedirectedTo { slots_per_depth } if slots_per_depth.len() <= 1 => {
+                // This not used as redirection to outside this block, so maybe it can be removed.
+                assert_eq!(slots_per_depth.len(), 1);
                 match kind {
                     // The input is redirected as-is to some output that we already marked for removal,
                     // so we can remove this input as well.
@@ -358,14 +374,13 @@ fn handle_block_node(
         let mut reverse_edges: Vec<Vec<u32>> = vec![vec![]; can_remove_input.len()];
         for (source, status) in can_remove_input.iter().enumerate() {
             if *status == CanRemoveInput::Unknown {
-                let InputUsage::RedirectedTo {
-                    max_depth: 0,
-                    slots,
-                } = &sub_entry.input_usage[source]
+                let InputUsage::RedirectedTo { slots_per_depth } = &sub_entry.input_usage[source]
                 else {
                     unreachable!()
                 };
-                for &target in slots {
+                assert_eq!(slots_per_depth.len(), 1);
+                assert!(!slots_per_depth[0].is_empty());
+                for &target in &slots_per_depth[0] {
                     reverse_edges[target as usize].push(source as u32);
                 }
             }
@@ -406,18 +421,21 @@ fn handle_block_node(
             }
         }
     }
-
-    println!("==============================================");
-    println!(
-        "func_idx: {}, cs: {}, node idx: {}",
-        func_idx,
-        cs.len(),
-        node_idx
-    );
-    println!("can_remove_input: {:?}", can_remove_input);
-    println!("input_usage: {:?}", sub_entry.input_usage);
-    println!("reidrections: {:?}", redirections);
-
+    /*
+        println!("==============================================");
+        println!(
+            "func_idx: {}, cs: {}, node idx: {}",
+            func_idx,
+            cs.len(),
+            node_idx,
+        );
+        println!("can_remove_input: {:?}", can_remove_input);
+        println!("input_usage: {:?}", sub_entry.input_usage);
+        println!("reidrections: {:?}", redirections);
+    */
+    if func_idx == 681 {
+        println!("DC: {orig_debug_counter}");
+    }
     let inputs_to_remove = can_remove_input
         .into_iter()
         .enumerate()
@@ -445,19 +463,18 @@ fn handle_block_node(
     BlockRemovals {
         removed_inputs: inputs_to_remove,
         output_removed,
-        entry: sub_entry,
+        inputs_usage: sub_entry.input_usage,
     }
 }
 
 fn apply_substitutions(
-    node_inputs: &mut Vec<NodeInput>,
+    node_inputs: &mut [NodeInput],
     input_substitutions: &HashMap<ValueOrigin, Option<ValueOrigin>>,
 ) {
     for (input_idx, input) in node_inputs.iter_mut().enumerate() {
         if let NodeInput::Reference(origin) = input
             && let Some(subst) = input_substitutions.get(origin)
         {
-            println!("### idx: {input_idx}");
             *origin = subst.unwrap_or_else(|| {
                 panic!("Input {input_idx} was removed but is still needed: {origin:?}")
             });
@@ -490,22 +507,22 @@ fn remove_block_node_io(
     // Walk the DAG and apply the substitutions and removals.
     let mut origin_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
     for (node_idx, node) in sub_dag.nodes.iter_mut().enumerate() {
-        println!(
+        /*println!(
             "{:width$}NODE IDX {node_idx}",
             "",
             width = br_inputs_to_remove.len() * 4,
-        );
+        );*/
         match &mut node.operation {
             Operation::Inputs => {
-                println!("{:width$}Inputs", "", width = br_inputs_to_remove.len() * 4);
+                //println!("{:width$}Inputs", "", width = br_inputs_to_remove.len() * 4);
                 // This is the first node of the sub-block, which lists the block inputs.
                 // We start the removal from here.
-                println!(
+                /*println!(
                     "{:width$}subs orig: {:?}",
                     "",
                     origin_substitutions,
                     width = br_inputs_to_remove.len() * 4
-                );
+                );*/
                 remove_indices(
                     &mut node.output_types,
                     inputs_to_remove.iter().map(|&r| r as usize),
@@ -522,14 +539,14 @@ fn remove_block_node_io(
                         );
                     },
                 );
-                println!(
+                /*println!(
                     "{:width$}subs changed: {:?}",
                     "",
                     origin_substitutions,
                     width = br_inputs_to_remove.len() * 4
-                );
+                );*/
             }
-            Operation::Block { kind, .. } => {
+            Operation::Block { kind, sub_dag } => {
                 // Any input set for removal must be propagated to the inner blocks.
                 let mut sub_input_to_remove = Vec::new();
                 let mut input_changed = false;
@@ -543,13 +560,19 @@ fn remove_block_node_io(
                     }
                 }
 
-                println!(
+                /*println!(
                     "{:width$}Block {kind:?} (parent input redir: {:?}, inputs removed: {:?})",
                     "",
                     parent_redir_map,
                     sub_input_to_remove,
                     width = br_inputs_to_remove.len() * 4
                 );
+                println!(
+                    "{:width$}Block {kind:?} redirections: {:?}",
+                    "",
+                    sub_dag.block_data,
+                    width = br_inputs_to_remove.len() * 4
+                );*/
 
                 // If there is anything to remove in the inner block, we need to apply the removals recursively.
                 if input_changed || !br_inputs_to_remove.is_empty() {
@@ -567,22 +590,22 @@ fn remove_block_node_io(
                     );
                     br_inputs_to_remove.pop_front();
 
-                    println!(
+                    /*println!(
                         "{:width$}subs changed: {:?}",
                         "",
                         origin_substitutions,
                         width = br_inputs_to_remove.len() * 4
-                    );
+                    );*/
                 }
             }
             Operation::WASMOp(Op::Br { relative_depth }) => {
-                println!(
+                /*println!(
                     "{:width$}Br depth: {}, br inputs to remove: {:?}",
                     "",
                     relative_depth,
                     br_inputs_to_remove.get(*relative_depth as usize),
                     width = br_inputs_to_remove.len() * 4
-                );
+                );*/
                 rm_plain_br_inputs(
                     &mut node.inputs,
                     *relative_depth,
@@ -592,12 +615,12 @@ fn remove_block_node_io(
             }
             Operation::WASMOp(Op::BrIf { relative_depth })
             | Operation::BrIfZero { relative_depth } => {
-                println!(
+                /*println!(
                     "{:width$}BrIf|BrIfZero depth: {}",
                     "",
                     relative_depth,
                     width = br_inputs_to_remove.len() * 4
-                );
+                );*/
                 // Temporarily take of the selector because it is not part of the break inputs
                 let selector = node.inputs.pop().unwrap();
                 rm_plain_br_inputs(
@@ -610,11 +633,11 @@ fn remove_block_node_io(
                 node.inputs.push(selector);
             }
             Operation::BrTable { targets } => {
-                println!(
+                /*println!(
                     "{:width$}BrTable",
                     "",
                     width = br_inputs_to_remove.len() * 4
-                );
+                );*/
                 // BrTable is more complicated, because we need to update
                 // the input permutation inside each of the targets.
 
@@ -666,22 +689,22 @@ fn remove_block_node_io(
                 node.inputs.push(selector);
             }
             _ => {
-                println!(
+                /*println!(
                     "{:width$}(other)",
                     "",
                     width = br_inputs_to_remove.len() * 4
-                );
+                );*/
                 // Nothing special to do for other nodes.
             }
         }
 
-        println!(
+        /*println!(
             "{:width$}NODE_IDX again: {}, inputs: {:?}",
             "",
             node_idx,
             node.inputs,
             width = br_inputs_to_remove.len() * 4
-        );
+        );*/
 
         // Apply the substitutions for this node inputs.
         apply_substitutions(&mut node.inputs, &origin_substitutions);
@@ -763,7 +786,7 @@ fn remove_break_inputs<T: Debug>(
 ) {
     if let Some(br_ins_to_remove) = br_ins_to_remove.get_mut(relative_depth as usize) {
         if let Some(br_ins_to_remove) = br_ins_to_remove {
-            println!("-> set to remove: {:?}", br_ins_to_remove);
+            //println!("-> set to remove: {:?}", br_ins_to_remove);
             // If we have specifyed what break inputs to remove, apply them.
             remove_indices(
                 node_inputs,
@@ -773,7 +796,7 @@ fn remove_break_inputs<T: Debug>(
         } else {
             // The break inputs to remove are not yet known. We need to calculate them
             // from the removed block inputs.
-            println!("-> inputs original: {:?}", node_inputs);
+            //println!("-> inputs original: {:?}", node_inputs);
             let mut slot_idx = 0..;
             let mut to_remove = Vec::new();
             node_inputs.retain(|origin| {
@@ -790,7 +813,7 @@ fn remove_break_inputs<T: Debug>(
                     true
                 }
             });
-            println!("-> calculated to remove: {:?}", to_remove);
+            //println!("-> calculated to remove: {:?}", to_remove);
             *br_ins_to_remove = Some(to_remove);
         }
     }
