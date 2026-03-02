@@ -884,6 +884,7 @@ impl AddAssign for Statistics {
         self.constants_collapsed += other.constants_collapsed;
         self.constants_deduplicated += other.constants_deduplicated;
         self.dangling_nodes_removed += other.dangling_nodes_removed;
+        self.loop_inputs_removed += other.loop_inputs_removed;
         self.block_outputs_removed += other.block_outputs_removed;
         self.useless_jumps_removed += other.useless_jumps_removed;
     }
