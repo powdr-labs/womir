@@ -11,10 +11,13 @@ use std::{
 };
 use wasmparser::{Operator as Op, ValType};
 
-use crate::loader::{BlockKind, LabelGenerator};
+use crate::loader::{
+    BlockKind, LabelGenerator,
+    passes::{calc_input_redirection::Redirection, dag::GenericDag},
+};
 
 pub use super::dag::NodeInput;
-use super::dag::{self, Dag, ValueOrigin};
+use super::dag::{self, ValueOrigin};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BreakTarget {
@@ -75,18 +78,19 @@ pub struct GenericNode<'a, T> {
     pub output_types: Vec<ValType>,
 }
 
-pub type Node<'a> = GenericNode<'a, ()>;
-
 #[derive(Debug, Clone)]
 pub struct GenericBlocklessDag<'a, T> {
     pub nodes: Vec<GenericNode<'a, T>>,
     pub block_data: T,
 }
 
-pub type BlocklessDag<'a> = GenericBlocklessDag<'a, ()>;
+pub type BlocklessDag<'a> = GenericBlocklessDag<'a, Vec<Redirection>>;
+pub type Node<'a> = GenericNode<'a, Vec<Redirection>>;
 
-impl<'a> BlocklessDag<'a> {
-    pub fn new(dag: Dag<'a>, label_generator: &AtomicU32) -> Self {
+impl<'a, T> GenericBlocklessDag<'a, T> {
+    /// The block_data will only be preserved for blocks that are not merged into the parent block.
+    /// I.e. top-level blocks and loops. For other blocks, the block_data is discarded.
+    pub fn from_dag(dag: GenericDag<'a, T>, label_generator: &AtomicU32) -> Self {
         let mut new_nodes = Vec::new();
 
         let mut ctrl_stack = VecDeque::from([BlockStack {
@@ -103,9 +107,9 @@ impl<'a> BlocklessDag<'a> {
             None,
         );
 
-        BlocklessDag {
+        GenericBlocklessDag {
             nodes: new_nodes,
-            block_data: (),
+            block_data: dag.block_data,
         }
     }
 }
@@ -117,10 +121,10 @@ struct BlockStack {
     frame_level: u32,
 }
 
-fn process_nodes<'a>(
-    orig_nodes: Vec<dag::Node<'a>>,
+fn process_nodes<'a, T>(
+    orig_nodes: Vec<dag::GenericNode<'a, T>>,
     label_generator: &AtomicU32,
-    new_nodes: &mut Vec<Node<'a>>,
+    new_nodes: &mut Vec<GenericNode<'a, T>>,
     ctrl_stack: &mut VecDeque<BlockStack>,
     break_targets: &mut HashSet<BreakTarget>,
     input_mapping: Option<Vec<ValueOrigin>>,
@@ -239,9 +243,9 @@ fn process_nodes<'a>(
                         .collect_vec();
 
                     Operation::Loop {
-                        sub_dag: BlocklessDag {
+                        sub_dag: GenericBlocklessDag {
                             nodes: loop_nodes,
-                            block_data: (),
+                            block_data: sub_dag.block_data,
                         },
                         break_targets: loop_break_targets,
                     }
@@ -304,7 +308,7 @@ fn process_nodes<'a>(
             );
         }
 
-        new_nodes.push(Node {
+        new_nodes.push(GenericNode {
             operation,
             inputs,
             output_types: node.output_types,

@@ -8,8 +8,9 @@ use itertools::Itertools;
 use wasmparser::Operator as Op;
 
 use crate::loader::{
-    blockless_dag::{BlocklessDag, BreakTarget, NodeInput, Operation, TargetType},
+    blockless_dag::{BreakTarget, NodeInput, Operation, TargetType},
     dag::ValueOrigin,
+    passes::blockless_dag::BlocklessDag,
     wom::settings::Settings,
 };
 
