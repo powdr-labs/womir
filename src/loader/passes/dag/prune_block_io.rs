@@ -3,6 +3,8 @@
 //! code, but they can also be introduced by the `locals_data_flow` pass, which is
 //! conservative in its analysis of local usage, or can be orphans from const
 //! dedup/collapse.
+//!
+//! Each pass seems to be quadratic in the number of total (nested included) nodes.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -29,14 +31,13 @@ use crate::{
 /// Returns the number of loop inputs removed (normal blocks I/O removal
 /// is not tracked, because they do not directly contribute to final
 /// cost, they just indirectly contribute to loop input count).
-pub fn prune_block_io(func_idx: u32, dag: &mut RedirDag<'_>) -> usize {
+pub fn prune_block_io(dag: &mut RedirDag<'_>) -> usize {
     let mut total_loop_inputs_removed = 0;
 
     // If outputs have been removed, we might have created new opportunities for
     // input removals, so we need to repeat until we reach a fixed point.
     loop {
-        let (output_removed, loop_inputs_removed) =
-            process_block(func_idx, dag, &mut VecDeque::new());
+        let (output_removed, loop_inputs_removed) = process_block(dag, &mut VecDeque::new());
         total_loop_inputs_removed += loop_inputs_removed;
         if !output_removed {
             break;
@@ -54,7 +55,9 @@ enum InputUsage {
     /// Used to detect useless circular redirections in loop.
     RedirectedTo {
         /// The set of outputs slots this input is redirected to,
-        /// for each depth level.
+        /// for each depth level. Duplicates slots are possible
+        /// while being built, but they are sorted and deduped
+        /// before being used.
         slots_per_depth: VecDeque<Vec<u32>>,
     },
     /// This input is useful, and cannot be removed.
@@ -98,7 +101,7 @@ impl InputUsage {
                 };
 
                 for (self_depth, mut other_depth) in self_slots.iter_mut().zip(other_slots) {
-                    // This swap ensures the smaller vec will be extended into the bigger vec, which is more efficient.
+                    // This swap ensures the smaller vec will be extended into the bigger vec.
                     if other_depth.len() > self_depth.len() {
                         std::mem::swap(self_depth, &mut other_depth);
                     }
@@ -139,11 +142,7 @@ struct ControlStackEntry {
     input_usage: Vec<InputUsage>,
 }
 
-fn process_block(
-    func_idx: u32,
-    dag: &mut RedirDag,
-    cs: &mut VecDeque<ControlStackEntry>,
-) -> (bool, usize) {
+fn process_block(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (bool, usize) {
     // Some output slots might be removed from the block outputs in case they are redundant.
     // We track such cases in this map, and also where the users of those outputs should point
     // to instead.
@@ -201,8 +200,7 @@ fn process_block(
                 }
             }
             (Operation::Block { .. }, is_func_body) => {
-                let mut removals =
-                    handle_block_node(func_idx, node_idx, node, cs, &mut origin_substitutions);
+                let mut removals = handle_block_node(node_idx, node, cs, &mut origin_substitutions);
 
                 loop_inputs_removed += removals.loop_inputs_removed;
 
@@ -283,15 +281,12 @@ struct BlockRemovals {
 }
 
 fn handle_block_node(
-    func_idx: u32,
     node_idx: usize,
     node: &mut RedirNode,
     cs: &mut VecDeque<ControlStackEntry>,
     origin_substitutions: &mut HashMap<ValueOrigin, Option<ValueOrigin>>,
 ) -> BlockRemovals {
-    let (sub_dag, kind) = if let Operation::Block { sub_dag, kind } = &mut node.operation {
-        (sub_dag, kind)
-    } else {
+    let Operation::Block { sub_dag, kind } = &mut node.operation else {
         panic!()
     };
 
@@ -301,7 +296,7 @@ fn handle_block_node(
         // Let the block initialize the input usage for its inputs...
         input_usage: Vec::new(),
     });
-    let (mut output_removed, mut loop_inputs_removed) = process_block(func_idx, sub_dag, cs);
+    let (mut output_removed, mut loop_inputs_removed) = process_block(sub_dag, cs);
     let mut sub_entry = cs.pop_front().unwrap();
     assert_eq!(sub_entry.input_usage.len(), node.inputs.len());
 
@@ -495,9 +490,7 @@ fn remove_block_node_io(
     inputs_to_remove: &[u32],
     br_inputs_to_remove: &mut VecDeque<Option<Vec<u32>>>,
 ) -> (bool, usize) {
-    let (sub_dag, kind) = if let Operation::Block { sub_dag, kind } = &mut block_node.operation {
-        (sub_dag, kind)
-    } else {
+    let Operation::Block { sub_dag, kind } = &mut block_node.operation else {
         panic!()
     };
 
@@ -541,36 +534,31 @@ fn remove_block_node_io(
             Operation::Block { .. } => {
                 // Any input set for removal must be propagated to the inner blocks.
                 let mut sub_input_to_remove = Vec::new();
-                let mut input_changed = false;
 
                 let mut parent_redir_map = vec![None; node.inputs.len()];
                 for (sub_input_idx, parent_input_idx) in block_inputs(&node.inputs) {
                     parent_redir_map[sub_input_idx] = Some(parent_input_idx);
                     if inputs_to_remove.binary_search(&parent_input_idx).is_ok() {
                         sub_input_to_remove.push(sub_input_idx as u32);
-                        input_changed = true;
                     }
                 }
 
-                // If there is anything to remove in the inner block, we need to apply the removals recursively.
-                if input_changed || !br_inputs_to_remove.is_empty() {
-                    // TODO: if we knew to what blocks the inner blocks can break to,
-                    // we could avoid recursing into blocks that are not affected by
-                    // the output removals.
+                // TODO: if we knew to what blocks the inner blocks can break to,
+                // we could avoid recursing into blocks that are not affected by
+                // the output removals.
 
-                    br_inputs_to_remove.push_front(None);
-                    let (sub_output_removed, sub_loop_inputs_removed) = remove_block_node_io(
-                        node_idx,
-                        &mut origin_substitutions,
-                        node,
-                        &sub_input_to_remove,
-                        br_inputs_to_remove,
-                    );
-                    br_inputs_to_remove.pop_front();
+                br_inputs_to_remove.push_front(None);
+                let (sub_output_removed, sub_loop_inputs_removed) = remove_block_node_io(
+                    node_idx,
+                    &mut origin_substitutions,
+                    node,
+                    &sub_input_to_remove,
+                    br_inputs_to_remove,
+                );
+                br_inputs_to_remove.pop_front();
 
-                    output_removed |= sub_output_removed;
-                    loop_inputs_removed += sub_loop_inputs_removed;
-                }
+                output_removed |= sub_output_removed;
+                loop_inputs_removed += sub_loop_inputs_removed;
             }
             Operation::WASMOp(Op::Br { relative_depth }) => {
                 rm_plain_br_inputs(
