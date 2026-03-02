@@ -1,4 +1,3 @@
-pub mod offset_map;
 pub mod range_consolidation;
 pub mod rev_vec_filler;
 pub mod tree;
@@ -79,4 +78,30 @@ pub fn remove_indices<T>(
         vec.set_len(dest);
     }
     assert!(to_remove.next().is_none());
+}
+
+/// Given a sorted list of removed indices, compute how many removals
+/// occurred at or before `index`.
+///
+/// This is used to adjust indices after elements have been removed from
+/// an ordered list. Subtract the result from `index` to get the new
+/// (shifted) index: `new_index = index - sorted_removals_offset(removals, &index)`.
+///
+/// # Example
+///
+/// Suppose a list `[A, B, C, D, E]` (indices 0..5) and elements at indices
+/// 1 and 3 are removed, yielding `[A, C, E]`:
+///
+/// ```text
+/// let removals = vec![1u32, 3];
+///
+/// sorted_removals_offset(&removals, &0) == 0  // A stays at 0
+/// sorted_removals_offset(&removals, &2) == 1  // C moves from 2 to 1
+/// sorted_removals_offset(&removals, &4) == 2  // E moves from 4 to 2
+/// ```
+pub fn sorted_removals_offset<T: Ord>(removals: &[T], index: &T) -> usize {
+    match removals.binary_search(index) {
+        Ok(idx) => idx + 1,
+        Err(idx) => idx,
+    }
 }

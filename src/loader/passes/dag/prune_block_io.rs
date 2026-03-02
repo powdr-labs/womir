@@ -23,7 +23,7 @@ use crate::{
             dag::{BrTableTarget, NodeInput, Operation, ValueOrigin},
         },
     },
-    utils::{offset_map::OffsetMap, remove_indices},
+    utils::{remove_indices, sorted_removals_offset},
 };
 
 /// Prunes block inputs and outputs that are not actually used.
@@ -610,13 +610,13 @@ fn remove_block_node_io(
 
                 // Now we do the removal on the node inputs.
                 let mut idx = 0..;
-                let mut offset_map = OffsetMap::new();
+                let mut removed_indices: Vec<u32> = Vec::new();
                 node.inputs.retain(|_| {
                     let idx = idx.next().unwrap();
                     if slot_still_used[idx] {
                         true
                     } else {
-                        offset_map.append(idx as u32);
+                        removed_indices.push(idx as u32);
                         false
                     }
                 });
@@ -624,8 +624,7 @@ fn remove_block_node_io(
                 // Apply the map for all the target input permutations.
                 for t in targets {
                     for perm in &mut t.input_permutation {
-                        let offset = offset_map.get(perm);
-                        *perm -= offset;
+                        *perm -= sorted_removals_offset(&removed_indices, perm) as u32;
                     }
                 }
 
@@ -677,16 +676,22 @@ fn remove_block_node_io(
     }
 
     // Update node redirections.
+    let redirections = &mut sub_dag.block_data;
     let redirs_to_remove = match kind {
         BlockKind::Loop => inputs_to_remove,
         BlockKind::Block => br_inputs_to_remove[0].as_ref().map_or(&[][..], |v| &v[..]),
     };
-    let redirections = &mut sub_dag.block_data;
     remove_indices(
         redirections,
         redirs_to_remove.iter().map(|&r| r as usize),
         |_, _| {},
     );
+    // Removing is not enough, we also need to update the indices in the remaining redirections.
+    for redir in redirections.iter_mut() {
+        if let Redirection::FromInput(input_idx) = redir {
+            *input_idx -= sorted_removals_offset(redirs_to_remove, input_idx) as u32;
+        }
+    }
 
     (output_removed, loop_inputs_removed)
 }
