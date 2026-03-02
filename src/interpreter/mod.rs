@@ -1636,7 +1636,7 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         let dst = t.get_reg_relative_u32(inputs[0].clone());
                         let src = t.get_reg_relative_u32(inputs[1].clone());
                         let size = t.get_reg_relative_u32(inputs[2].clone());
-                        let mut remaining = size % 4;
+                        let remaining = size % 4;
 
                         let mut memory = t.i.get_mem();
                         // Load the entire thing into memory, this is the easiest way to
@@ -1647,41 +1647,42 @@ impl<'a, E: ExternalFunctions> Interpreter<'a, E> {
                         if remaining > 0 {
                             let last_word = data.pop().unwrap();
                             // Zero the bytes that were not to be copied.
-                            let mut mask = !(!0 << (remaining * 8));
-                            let mut last_word = last_word & mask;
+                            let mask = !(!0u32 << (remaining * 8));
+                            let last_word = last_word & mask;
 
-                            // We now need to write the remaining bytes in either 1 or 2
-                            // words, depending on the alignment of the destination.
-                            let dst_byte_addr = dst + size - remaining - 1;
-                            let mut dst_word_addr = dst_byte_addr & !0x3; // align to 4 bytes
-                            // Does it fit completely in the last word?
-                            let mut space_in_word = 4 - (dst_byte_addr % 4);
-                            if space_in_word < remaining {
-                                // Doesn't fit, write the second to last word.
-                                remaining -= space_in_word;
-                                let rshift = remaining * 8;
-                                let old_value =
-                                    memory.get_word(dst_word_addr).expect("Out of bounds read");
-                                let new_value =
-                                    (old_value & !(mask >> rshift)) | (last_word >> rshift);
-                                memory
-                                    .set_word(dst_word_addr, new_value)
-                                    .expect("Out of bounds write");
+                            // Destination byte address where remaining bytes start.
+                            let dst_start = dst + size - remaining;
+                            let byte_offset = dst_start % 4;
+                            let dst_word_addr = dst_start & !0x3;
 
-                                mask >>= space_in_word * 8;
-                                last_word &= mask;
-                                dst_word_addr += 4;
-                                space_in_word = 4;
-                            }
+                            // How many remaining bytes fit in the first destination word?
+                            let first_chunk = remaining.min(4 - byte_offset);
 
-                            // Write the last word.
-                            let lshift = (space_in_word - remaining) * 8;
+                            // Write first chunk at the correct byte offset within the word.
+                            let lshift = byte_offset * 8;
+                            let chunk_mask = !(!0u32 << (first_chunk * 8));
                             let old_value =
                                 memory.get_word(dst_word_addr).expect("Out of bounds read");
-                            let new_value = (old_value & !(mask << lshift)) | (last_word << lshift);
+                            let new_value = (old_value & !(chunk_mask << lshift))
+                                | ((last_word & chunk_mask) << lshift);
                             memory
                                 .set_word(dst_word_addr, new_value)
                                 .expect("Out of bounds write");
+
+                            if first_chunk < remaining {
+                                // Remaining bytes spill into the next word.
+                                let second_chunk = remaining - first_chunk;
+                                let shifted_data = last_word >> (first_chunk * 8);
+                                let chunk_mask2 = !(!0u32 << (second_chunk * 8));
+                                let old_value2 = memory
+                                    .get_word(dst_word_addr + 4)
+                                    .expect("Out of bounds read");
+                                let new_value2 =
+                                    (old_value2 & !chunk_mask2) | (shifted_data & chunk_mask2);
+                                memory
+                                    .set_word(dst_word_addr + 4, new_value2)
+                                    .expect("Out of bounds write");
+                            }
                         }
                         memory
                             .write_contiguous(dst, &data)
