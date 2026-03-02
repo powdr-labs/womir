@@ -485,7 +485,7 @@ fn apply_substitutions(
 
 fn remove_block_node_io(
     parent_node_idx: usize,
-    parend_origin_substitutions: &mut HashMap<ValueOrigin, Option<ValueOrigin>>,
+    parent_origin_substitutions: &mut HashMap<ValueOrigin, Option<ValueOrigin>>,
     block_node: &mut RedirNode,
     inputs_to_remove: &[u32],
     br_inputs_to_remove: &mut VecDeque<Option<Vec<u32>>>,
@@ -660,7 +660,7 @@ fn remove_block_node_io(
             |old_idx, new_idx| {
                 if let Some(new_idx) = new_idx {
                     // This output was shifted, needs to be mapped to the new index.
-                    parend_origin_substitutions.insert(
+                    parent_origin_substitutions.insert(
                         ValueOrigin {
                             node: parent_node_idx,
                             output_idx: old_idx as u32,
