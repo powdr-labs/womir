@@ -24,10 +24,26 @@ use crate::{
     utils::{offset_map::OffsetMap, remove_indices},
 };
 
-pub fn prune_block_io(func_idx: u32, dag: &mut RedirDag<'_>) {
+/// Prunes block inputs and outputs that are not actually used.
+///
+/// Returns the number of loop inputs removed (normal blocks I/O removal
+/// is not tracked, because they do not directly contribute to final
+/// cost, they just indirectly contribute to loop input count).
+pub fn prune_block_io(func_idx: u32, dag: &mut RedirDag<'_>) -> usize {
+    let mut total_loop_inputs_removed = 0;
+
     // If outputs have been removed, we might have created new opportunities for
     // input removals, so we need to repeat until we reach a fixed point.
-    while process_block(func_idx, dag, &mut VecDeque::new()) {}
+    loop {
+        let (output_removed, loop_inputs_removed) =
+            process_block(func_idx, dag, &mut VecDeque::new());
+        total_loop_inputs_removed += loop_inputs_removed;
+        if !output_removed {
+            break;
+        }
+    }
+
+    total_loop_inputs_removed
 }
 
 #[derive(Debug)]
@@ -123,12 +139,17 @@ struct ControlStackEntry {
     input_usage: Vec<InputUsage>,
 }
 
-fn process_block(func_idx: u32, dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> bool {
+fn process_block(
+    func_idx: u32,
+    dag: &mut RedirDag,
+    cs: &mut VecDeque<ControlStackEntry>,
+) -> (bool, usize) {
     // Some output slots might be removed from the block outputs in case they are redundant.
     // We track such cases in this map, and also where the users of those outputs should point
     // to instead.
     let mut output_removed = false;
     let mut origin_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
+    let mut loop_inputs_removed = 0;
     for node_idx in 0..dag.nodes.len() {
         let node = &mut dag.nodes[node_idx];
         apply_substitutions(&mut node.inputs, &origin_substitutions);
@@ -183,6 +204,8 @@ fn process_block(func_idx: u32, dag: &mut RedirDag, cs: &mut VecDeque<ControlSta
                 let mut removals =
                     handle_block_node(func_idx, node_idx, node, cs, &mut origin_substitutions);
 
+                loop_inputs_removed += removals.loop_inputs_removed;
+
                 output_removed |= removals.output_removed;
 
                 // Update this block input usage based on the sub-block input usage and the removals we have done.
@@ -223,7 +246,7 @@ fn process_block(func_idx: u32, dag: &mut RedirDag, cs: &mut VecDeque<ControlSta
     }
     // TODO: mark and remove unused sub-blocks outputs...
 
-    output_removed
+    (output_removed, loop_inputs_removed)
 }
 
 fn handle_break_target<'a>(
@@ -248,6 +271,9 @@ fn handle_break_target<'a>(
 struct BlockRemovals {
     /// List of the indices of inputs removed from the block.
     removed_inputs: Vec<u32>,
+
+    /// Number of loop inputs removed, including indirectly removed ones.
+    loop_inputs_removed: usize,
 
     /// Was any output removed?
     output_removed: bool,
@@ -428,9 +454,10 @@ fn handle_block_node(
     let output_removed = !outputs_to_remove.is_empty();
 
     // Perform the actual removals in the sub-block.
+    let mut loop_inputs_removed = 0;
     if !inputs_to_remove.is_empty() || output_removed {
         let br_inputs_to_remove = (BlockKind::Block == *kind).then_some(outputs_to_remove);
-        remove_block_node_io(
+        loop_inputs_removed = remove_block_node_io(
             node_idx,
             origin_substitutions,
             node,
@@ -441,6 +468,7 @@ fn handle_block_node(
 
     BlockRemovals {
         removed_inputs: inputs_to_remove,
+        loop_inputs_removed,
         output_removed,
         inputs_usage: sub_entry.input_usage,
     }
@@ -467,12 +495,14 @@ fn remove_block_node_io(
     block_node: &mut RedirNode,
     inputs_to_remove: &[u32],
     br_inputs_to_remove: &mut VecDeque<Option<Vec<u32>>>,
-) {
+) -> usize {
     let (sub_dag, kind) = if let Operation::Block { sub_dag, kind } = &mut block_node.operation {
         (sub_dag, kind)
     } else {
         panic!()
     };
+
+    let mut loop_inputs_removed = 0;
 
     // For a loop, the block inputs are also its break targets, so we need to mark the corresponding outputs as removed as well.
     if let BlockKind::Loop = kind {
@@ -481,6 +511,7 @@ fn remove_block_node_io(
         // I couldn't avoid cloning here. I tried making `br_inputs_to_remove: &mut VecDeque<&[u32]>`,
         // but there is no lifetime that allows it to hold external references plus local references.
         *br_inputs = Some(inputs_to_remove.to_vec());
+        loop_inputs_removed += inputs_to_remove.len();
     }
 
     // Walk the DAG and apply the substitutions and removals.
@@ -528,7 +559,7 @@ fn remove_block_node_io(
                     // the output removals.
 
                     br_inputs_to_remove.push_front(None);
-                    remove_block_node_io(
+                    loop_inputs_removed += remove_block_node_io(
                         node_idx,
                         &mut origin_substitutions,
                         node,
@@ -664,6 +695,8 @@ fn remove_block_node_io(
         redirs_to_remove.iter().map(|&r| r as usize),
         |_, _| {},
     );
+
+    loop_inputs_removed
 }
 
 fn rm_plain_br_inputs(

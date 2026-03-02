@@ -550,7 +550,10 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
             }
             Self::RedirectionDag(mut dag) => {
                 // Optimization pass: remove unecessary inputs and outputs of blocks.
-                dag::prune_block_io::prune_block_io(func_idx, &mut dag);
+                let loop_inputs_removed = dag::prune_block_io::prune_block_io(func_idx, &mut dag);
+                if let Some(stats) = stats {
+                    stats.loop_inputs_removed += loop_inputs_removed;
+                }
                 Self::CleanBlockIODag(dag)
             }
             Self::CleanBlockIODag(mut dag) => {
@@ -867,6 +870,8 @@ pub struct Statistics {
     pub constants_deduplicated: usize,
     /// Number of dangling nodes removed from the DAG.
     pub dangling_nodes_removed: usize,
+    /// Number of loop inputs removed from the DAG.
+    pub loop_inputs_removed: usize,
     /// Number of block outputs removed from the DAG.
     pub block_outputs_removed: usize,
     /// Number of useless jumps removed from flattened assembly.
@@ -888,11 +893,12 @@ impl Display for Statistics {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
-            "Optimization statistics:\n - {} register copies saved\n - {} constants collapsed\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed\n - {} useless jumps removed",
+            "Optimization statistics:\n - {} register copies saved\n - {} constants collapsed\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} loop inputs removed\n - {} block outputs removed\n - {} useless jumps removed",
             self.register_copies_saved,
             self.constants_collapsed,
             self.constants_deduplicated,
             self.dangling_nodes_removed,
+            self.loop_inputs_removed,
             self.block_outputs_removed,
             self.useless_jumps_removed
         )
