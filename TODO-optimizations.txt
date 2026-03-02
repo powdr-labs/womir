@@ -16,7 +16,7 @@ Unlikely to be useful optimizations:
   In such cases, it is worth to make these breaks indirect, by creating
   blocks surrounding the loop just to forward the breaks. The passthrough
   values will be handled by the outside blocks and breaks, avoiding them
-  to be copied into the loop (the information wether each input fits this
+  to be copied into the loop (the information whether each input fits this
   criteria should already be available inside prune_block_io).
 
 - [register_allocation]: the register allocation is not perfectly optimal,
