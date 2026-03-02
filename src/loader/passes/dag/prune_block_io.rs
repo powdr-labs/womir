@@ -301,7 +301,7 @@ fn handle_block_node(
         // Let the block initialize the input usage for its inputs...
         input_usage: Vec::new(),
     });
-    process_block(func_idx, sub_dag, cs);
+    let (mut output_removed, mut loop_inputs_removed) = process_block(func_idx, sub_dag, cs);
     let mut sub_entry = cs.pop_front().unwrap();
     assert_eq!(sub_entry.input_usage.len(), node.inputs.len());
 
@@ -451,19 +451,18 @@ fn handle_block_node(
         })
         .collect_vec();
 
-    let output_removed = !outputs_to_remove.is_empty();
-
     // Perform the actual removals in the sub-block.
-    let mut loop_inputs_removed = 0;
     if !inputs_to_remove.is_empty() || output_removed {
         let br_inputs_to_remove = (BlockKind::Block == *kind).then_some(outputs_to_remove);
-        loop_inputs_removed = remove_block_node_io(
+        let (sub_output_removed, sub_loop_inputs_removed) = remove_block_node_io(
             node_idx,
             origin_substitutions,
             node,
             &inputs_to_remove,
             &mut VecDeque::from(vec![br_inputs_to_remove]),
         );
+        output_removed |= sub_output_removed;
+        loop_inputs_removed += sub_loop_inputs_removed;
     }
 
     BlockRemovals {
@@ -495,7 +494,7 @@ fn remove_block_node_io(
     block_node: &mut RedirNode,
     inputs_to_remove: &[u32],
     br_inputs_to_remove: &mut VecDeque<Option<Vec<u32>>>,
-) -> usize {
+) -> (bool, usize) {
     let (sub_dag, kind) = if let Operation::Block { sub_dag, kind } = &mut block_node.operation {
         (sub_dag, kind)
     } else {
@@ -503,6 +502,7 @@ fn remove_block_node_io(
     };
 
     let mut loop_inputs_removed = 0;
+    let mut output_removed = false;
 
     // For a loop, the block inputs are also its break targets, so we need to mark the corresponding outputs as removed as well.
     if let BlockKind::Loop = kind {
@@ -559,7 +559,7 @@ fn remove_block_node_io(
                     // the output removals.
 
                     br_inputs_to_remove.push_front(None);
-                    loop_inputs_removed += remove_block_node_io(
+                    let (sub_output_removed, sub_loop_inputs_removed) = remove_block_node_io(
                         node_idx,
                         &mut origin_substitutions,
                         node,
@@ -567,6 +567,9 @@ fn remove_block_node_io(
                         br_inputs_to_remove,
                     );
                     br_inputs_to_remove.pop_front();
+
+                    output_removed |= sub_output_removed;
+                    loop_inputs_removed += sub_loop_inputs_removed;
                 }
             }
             Operation::WASMOp(Op::Br { relative_depth }) => {
@@ -658,14 +661,15 @@ fn remove_block_node_io(
     );
 
     // Update parent node outputs.
-    if kind == &BlockKind::Block {
+    if kind == &BlockKind::Block
+        // If this block is never broken to, br_inputs_to_remove[0] will be None.
+        && let Some(outputs_to_remove) = &br_inputs_to_remove[0]
+    {
+        output_removed |= !outputs_to_remove.is_empty();
+
         remove_indices(
             &mut block_node.output_types,
-            br_inputs_to_remove[0]
-                .as_ref()
-                .map_or(&[][..], |v| &v[..])
-                .iter()
-                .map(|r| *r as usize),
+            outputs_to_remove.iter().map(|r| *r as usize),
             |old_idx, new_idx| {
                 if let Some(new_idx) = new_idx {
                     // This output was shifted, needs to be mapped to the new index.
@@ -696,7 +700,7 @@ fn remove_block_node_io(
         |_, _| {},
     );
 
-    loop_inputs_removed
+    (output_removed, loop_inputs_removed)
 }
 
 fn rm_plain_br_inputs(
