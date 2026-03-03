@@ -65,20 +65,34 @@ enum InputUsage {
 }
 
 impl InputUsage {
+    /// Takes the input usage information from a sub-block,
+    /// and adjusts it to be used in the parent block.
     fn depth_down(self) -> Self {
         match self {
-            InputUsage::Used => InputUsage::Used,
+            InputUsage::Used => {
+                // If an input is used in the sub-block, it is also used in the parent block.
+                InputUsage::Used
+            }
             InputUsage::RedirectedTo {
                 mut slots_per_depth,
             } => {
+                // Pop the level 0, corresponding to the sub-block itself, so that the new
+                // level 0 corresponds to the parent block, as the parent is not interested
+                // in the redirections internal to the sub-block.
                 slots_per_depth.pop_front();
                 if slots_per_depth.is_empty() {
+                    // There is no redirection left after the ones internal to the sub-block,
+                    // so this input is just used in the perspective of the parent block.
                     InputUsage::Used
                 } else {
+                    // Remains a redirection, but now for the perspective of the parent block.
                     InputUsage::RedirectedTo { slots_per_depth }
                 }
             }
-            InputUsage::Unused => InputUsage::Unused,
+            InputUsage::Unused => {
+                // If an input is unused in the sub-block, it is also unused in the parent block.
+                InputUsage::Unused
+            }
         }
     }
 
