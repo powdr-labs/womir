@@ -482,8 +482,6 @@ pub enum CommonStages<'a> {
     RedirectionDag(RedirDag<'a>),
     /// The DAG after removing unecessary inputs and outputs of blocks.
     CleanBlockIODag(RedirDag<'a>),
-    /// The DAG after removing dangling nodes that do not contribute to the output.
-    DanglingOptDag(RedirDag<'a>),
     /// The blockless DAG representation of the function, where block nodes are expanded
     /// into the parent block and labels are introduced. Loops are still kept as blocks.
     BlocklessDag(BlocklessDag<'a>),
@@ -550,32 +548,15 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
             }
             Self::RedirectionDag(mut dag) => {
                 // Optimization pass: remove unecessary inputs and outputs of blocks.
-                let loop_inputs_removed = dag::prune_block_io::prune_block_io(&mut dag);
+                let stats_result = dag::prune_block_io::prune_block_io(&mut dag);
                 if let Some(stats) = stats {
-                    stats.loop_inputs_removed += loop_inputs_removed;
+                    stats.dangling_nodes_removed += stats_result.removed_nodes;
+                    stats.block_outputs_removed += stats_result.removed_block_outputs;
+                    stats.loop_inputs_removed += stats_result.removed_loop_inputs;
                 }
                 Self::CleanBlockIODag(dag)
             }
-            Self::CleanBlockIODag(mut dag) => {
-                // Optimization passes: remove pure nodes that does not contribute to the output.
-                let mut removed_nodes = 0;
-                let mut removed_block_outputs = 0;
-                loop {
-                    // Each pass may enable more removals in the next pass, so it must be executed in a loop.
-                    let pass_stats = dag::dangling_removal::clean_dangling_outputs(&mut dag);
-                    if pass_stats.removed_nodes == 0 && pass_stats.removed_block_outputs == 0 {
-                        break;
-                    }
-                    removed_nodes += pass_stats.removed_nodes;
-                    removed_block_outputs += pass_stats.removed_block_outputs;
-                }
-                if let Some(stats) = stats {
-                    stats.dangling_nodes_removed += removed_nodes;
-                    stats.block_outputs_removed += removed_block_outputs;
-                }
-                Self::DanglingOptDag(dag)
-            }
-            Self::DanglingOptDag(dag) => {
+            Self::CleanBlockIODag(dag) => {
                 // Convert the DAG to a blockless DAG representation.
                 let blockless_dag = BlocklessDag::from_dag(dag, label_gen);
                 Self::BlocklessDag(blockless_dag)

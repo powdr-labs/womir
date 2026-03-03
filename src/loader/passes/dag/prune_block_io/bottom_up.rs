@@ -1,3 +1,8 @@
+//! This sub-pass traverses the DAG bottom-up to detect outputs that are not used,
+//! and removes the nodes that produce them, if they don't have side effects, entering
+//! blocks recursively. Despite the name, it also removes unused block inputs when
+//! trivially not needed.
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ops::AddAssign,
@@ -19,9 +24,6 @@ use crate::{
 pub struct Statistics {
     pub removed_nodes: usize,
     pub removed_block_outputs: usize,
-    // We don't track removed block inputs because they have no visible effect
-    // on the generated code. They may, however, help remove more nodes, which
-    // is already counted in `removed_nodes`.
 }
 
 impl AddAssign for Statistics {
@@ -78,7 +80,7 @@ fn _print_nodes(indent: usize, nodes: &[Node<'_>]) {
 /// nodes that produce them, if they don't have side effects.
 ///
 /// Returns the new DAG and the number of removed nodes.
-pub fn clean_dangling_outputs(dag: &mut RedirDag) -> Statistics {
+pub fn remove_useless_outputs(dag: &mut RedirDag) -> Statistics {
     //println!("\nBefore dangling removal:");
     //_print_nodes(0, &dag.nodes);
 
@@ -115,6 +117,9 @@ fn recursive_removal(
         .enumerate()
         .rev()
         .filter_map(|(node_idx, node)| {
+            // Fix the inputs to breaks, that might have changed in the outer blocks.
+            fix_breaks(node, ctrl_stack);
+
             let (bl_stats, removed_outputs) =
                 recurse_into_block(node_idx, node, ctrl_stack, &used_outputs);
             stats += bl_stats;
@@ -176,9 +181,6 @@ fn recursive_removal(
             removed_node_indices.push(node_idx.unwrap());
             false
         } else {
-            // Fix the inputs to breaks, that might have changed.
-            fix_breaks(node, ctrl_stack);
-
             // Fix the node index for all the inputs of a node that is not being removed.
             for input in node.inputs.iter_mut() {
                 if let NodeInput::Reference(origin) = input {

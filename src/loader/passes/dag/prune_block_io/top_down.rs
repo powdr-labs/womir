@@ -1,8 +1,13 @@
-//! This pass takes a DAG and removes unnecessary inputs and outputs from
-//! blocks. These spurious inputs and outputs may come from the original Wasm
-//! code, but they can also be introduced by the `locals_data_flow` pass, which is
-//! conservative in its analysis of local usage, or can be orphans from const
-//! dedup/collapse.
+//! This sub-pass takes a DAG and removes unnecessary inputs from blocks and loops
+//! (and whatever outputs necessary to make it consistent).
+//!
+//! It works by searching the usage of each block input, and comparing it with
+//! the redirections of the block's target from break (the output in a plain block,
+//! or the inputs, in a loop), to determine if the input is actually used.
+//!
+//! It also bypasses outputs that are just copies of inputs, allowing the outer
+//! blocks to directly use the original input value. (TODO: make this a subpass
+//! of its own).
 //!
 //! Each pass seems to be quadratic in the number of total (nested included) nodes.
 
@@ -26,25 +31,16 @@ use crate::{
     utils::{remove_indices, sorted_removals_offset},
 };
 
-/// Prunes block inputs and outputs that are not actually used.
-///
-/// Returns the number of loop inputs removed (normal blocks I/O removal
-/// is not tracked, because they do not directly contribute to final
-/// cost, they just indirectly contribute to loop input count).
-pub fn prune_block_io(dag: &mut RedirDag<'_>) -> usize {
-    let mut total_loop_inputs_removed = 0;
+#[derive(Default)]
+pub struct RemoveOutputsResult {
+    pub removed_loop_inputs: usize,
+    pub removed_block_outputs: usize,
+}
 
-    // If outputs have been removed, we might have created new opportunities for
-    // input removals, so we need to repeat until we reach a fixed point.
-    loop {
-        let (output_removed, loop_inputs_removed) = process_dag(dag, &mut VecDeque::new());
-        total_loop_inputs_removed += loop_inputs_removed;
-        if !output_removed {
-            break;
-        }
-    }
-
-    total_loop_inputs_removed
+pub fn remove_useless_inputs(dag: &mut RedirDag) -> RemoveOutputsResult {
+    let mut result = RemoveOutputsResult::default();
+    process_dag(dag, &mut VecDeque::new(), &mut result);
+    result
 }
 
 #[derive(Debug)]
@@ -156,13 +152,16 @@ struct ControlStackEntry {
     input_usage: Vec<InputUsage>,
 }
 
-fn process_dag(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (bool, usize) {
+fn process_dag(
+    dag: &mut RedirDag,
+    cs: &mut VecDeque<ControlStackEntry>,
+    stats: &mut RemoveOutputsResult,
+) -> bool {
     // Some output slots might be removed from the block outputs in case they are redundant.
     // We track such cases in this map, and also where the users of those outputs should point
     // to instead.
     let mut output_removed = false;
     let mut origin_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
-    let mut loop_inputs_removed = 0;
 
     for (node_idx, node) in dag.nodes.iter_mut().enumerate() {
         apply_substitutions(&mut node.inputs, &origin_substitutions);
@@ -215,9 +214,8 @@ fn process_dag(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (boo
                 }
             }
             (Operation::Block { .. }, is_func_body) => {
-                let mut removals = handle_block_node(node_idx, node, cs, &mut origin_substitutions);
-
-                loop_inputs_removed += removals.loop_inputs_removed;
+                let mut removals =
+                    handle_block_node(node_idx, node, cs, &mut origin_substitutions, stats);
 
                 output_removed |= removals.output_removed;
 
@@ -258,7 +256,7 @@ fn process_dag(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (boo
         }
     }
 
-    (output_removed, loop_inputs_removed)
+    output_removed
 }
 
 fn handle_break_target<'a>(
@@ -284,9 +282,6 @@ struct BlockRemovals {
     /// List of the indices of inputs removed from the block.
     removed_inputs: Vec<u32>,
 
-    /// Number of loop inputs removed, including indirectly removed ones.
-    loop_inputs_removed: usize,
-
     /// Was any output removed?
     output_removed: bool,
 
@@ -299,6 +294,7 @@ fn handle_block_node(
     node: &mut RedirNode,
     cs: &mut VecDeque<ControlStackEntry>,
     origin_substitutions: &mut HashMap<ValueOrigin, Option<ValueOrigin>>,
+    stats: &mut RemoveOutputsResult,
 ) -> BlockRemovals {
     let Operation::Block { sub_dag, kind } = &mut node.operation else {
         panic!()
@@ -309,7 +305,7 @@ fn handle_block_node(
         // Let the block initialize the input usage for its inputs...
         input_usage: Vec::new(),
     });
-    let (mut output_removed, mut loop_inputs_removed) = process_dag(sub_dag, cs);
+    let mut output_removed = process_dag(sub_dag, cs, stats);
     let mut sub_entry = cs.pop_front().unwrap();
     assert_eq!(sub_entry.input_usage.len(), node.inputs.len());
 
@@ -460,20 +456,18 @@ fn handle_block_node(
     // Perform the actual removals in the sub-block.
     if !inputs_to_remove.is_empty() || output_removed {
         let br_inputs_to_remove = (BlockKind::Block == *kind).then_some(outputs_to_remove);
-        let (sub_output_removed, sub_loop_inputs_removed) = remove_block_node_io(
+        output_removed |= remove_block_node_io(
             node_idx,
             origin_substitutions,
             node,
             &inputs_to_remove,
             &mut VecDeque::from(vec![br_inputs_to_remove]),
+            stats,
         );
-        output_removed |= sub_output_removed;
-        loop_inputs_removed += sub_loop_inputs_removed;
     }
 
     BlockRemovals {
         removed_inputs: inputs_to_remove,
-        loop_inputs_removed,
         output_removed,
         inputs_usage: sub_entry.input_usage,
     }
@@ -494,18 +488,19 @@ fn apply_substitutions(
     }
 }
 
+/// Returns whether any output was removed.
 fn remove_block_node_io(
     parent_node_idx: usize,
     parent_origin_substitutions: &mut HashMap<ValueOrigin, Option<ValueOrigin>>,
     block_node: &mut RedirNode,
     inputs_to_remove: &[u32],
     br_inputs_to_remove: &mut VecDeque<Option<Vec<u32>>>,
-) -> (bool, usize) {
+    stats: &mut RemoveOutputsResult,
+) -> bool {
     let Operation::Block { sub_dag, kind } = &mut block_node.operation else {
         panic!()
     };
 
-    let mut loop_inputs_removed = 0;
     let mut output_removed = false;
 
     // For a loop, the block inputs are also its break targets, so we need to mark the corresponding outputs as removed as well.
@@ -515,7 +510,7 @@ fn remove_block_node_io(
         // I couldn't avoid cloning here. I tried making `br_inputs_to_remove: &mut VecDeque<&[u32]>`,
         // but there is no lifetime that allows it to hold external references plus local references.
         *br_inputs = Some(inputs_to_remove.to_vec());
-        loop_inputs_removed += inputs_to_remove.len();
+        stats.removed_loop_inputs += inputs_to_remove.len();
     }
 
     // Walk the DAG and apply the substitutions and removals.
@@ -559,17 +554,15 @@ fn remove_block_node_io(
                 // the output removals.
 
                 br_inputs_to_remove.push_front(None);
-                let (sub_output_removed, sub_loop_inputs_removed) = remove_block_node_io(
+                output_removed |= remove_block_node_io(
                     node_idx,
                     &mut origin_substitutions,
                     node,
                     &sub_input_to_remove,
                     br_inputs_to_remove,
+                    stats,
                 );
                 br_inputs_to_remove.pop_front();
-
-                output_removed |= sub_output_removed;
-                loop_inputs_removed += sub_loop_inputs_removed;
             }
             Operation::WASMOp(Op::Br { relative_depth }) => {
                 rm_plain_br_inputs(
@@ -663,6 +656,7 @@ fn remove_block_node_io(
         // If this block is never broken to, br_inputs_to_remove[0] will be None.
         && let Some(outputs_to_remove) = &br_inputs_to_remove[0]
     {
+        stats.removed_block_outputs += outputs_to_remove.len();
         output_removed |= !outputs_to_remove.is_empty();
 
         remove_indices(
@@ -704,7 +698,7 @@ fn remove_block_node_io(
         }
     }
 
-    (output_removed, loop_inputs_removed)
+    output_removed
 }
 
 fn rm_plain_br_inputs(
