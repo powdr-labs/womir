@@ -115,11 +115,11 @@ fn recursive_removal(
         .enumerate()
         .rev()
         .filter_map(|(node_idx, node)| {
-            let (bl_stats, outputs_offset) =
+            let (bl_stats, removed_outputs) =
                 recurse_into_block(node_idx, node, ctrl_stack, &used_outputs);
             stats += bl_stats;
-            if !outputs_offset.is_empty() {
-                nodes_outputs_offsets.insert(node_idx, outputs_offset);
+            if !removed_outputs.is_empty() {
+                nodes_outputs_offsets.insert(node_idx, removed_outputs);
             }
 
             let to_be_removed = !may_have_side_effect(node)
@@ -151,19 +151,17 @@ fn recursive_removal(
         assert!(matches!(inputs.operation, Operation::Inputs { .. }));
 
         let mut output_idx = 0u32..;
-        let mut removed_output_indices: Vec<u32> = Vec::new();
         inputs.output_types.retain(|_| {
             let origin = ValueOrigin::new(0, output_idx.next().unwrap());
             if used_outputs.contains(&origin) {
                 true
             } else {
                 removed_inputs.push(origin.output_idx);
-                removed_output_indices.push(origin.output_idx);
                 false
             }
         });
 
-        nodes_outputs_offsets.insert(0, removed_output_indices);
+        nodes_outputs_offsets.insert(0, removed_inputs.clone());
     }
 
     // The second pass happens top down, and actually removes the nodes.
@@ -209,55 +207,54 @@ fn recurse_into_block(
     ctrl_stack: &mut VecDeque<StackElement>,
     used_outputs: &HashSet<ValueOrigin>,
 ) -> (Statistics, Vec<u32>) {
-    if let Operation::Block { kind, sub_dag } = &mut node.operation {
-        // We need to figure out which outputs of the block are not used, and remove them.
-        let sorted_removed_outputs = (0..node.output_types.len() as u32)
-            .filter(|output_idx| !used_outputs.contains(&ValueOrigin::new(node_idx, *output_idx)))
-            .collect_vec();
+    let Operation::Block { kind, sub_dag } = &mut node.operation else {
+        return (Statistics::default(), Vec::new());
+    };
 
-        // It is too complicated to mess with loops inputs, so we keep them as is.
-        // TODO: handle loop inputs properly. Probably useless if the WASM is already optimized.
-        let remove_inputs = match kind {
-            BlockKind::Loop => false,
-            BlockKind::Block => true,
-        };
+    // We need to figure out which outputs of the block are not used, and remove them.
+    let sorted_removed_outputs = (0..node.output_types.len() as u32)
+        .filter(|output_idx| !used_outputs.contains(&ValueOrigin::new(node_idx, *output_idx)))
+        .collect_vec();
 
-        ctrl_stack.push_front(StackElement {
-            sorted_removed_outputs,
-        });
-        let (removed_inputs, mut stats) =
-            recursive_removal(&mut sub_dag.nodes, ctrl_stack, remove_inputs);
-        let stack_elem = ctrl_stack.pop_front().unwrap();
+    // It is too complicated to mess with loops inputs, so we keep them as is.
+    let remove_inputs = match kind {
+        BlockKind::Loop => false,
+        BlockKind::Block => true,
+    };
 
-        remove_indices_from_vec(&mut node.inputs, &removed_inputs);
-        remove_indices_from_vec(&mut node.output_types, &stack_elem.sorted_removed_outputs);
+    ctrl_stack.push_front(StackElement {
+        sorted_removed_outputs,
+    });
+    let (removed_inputs, mut stats) =
+        recursive_removal(&mut sub_dag.nodes, ctrl_stack, remove_inputs);
+    let stack_elem = ctrl_stack.pop_front().unwrap();
 
-        // Updates the redirections for the block outputs.
-        match kind {
-            BlockKind::Block => {
-                let redirections = &mut sub_dag.block_data;
+    remove_indices_from_vec(&mut node.inputs, &removed_inputs);
+    remove_indices_from_vec(&mut node.output_types, &stack_elem.sorted_removed_outputs);
 
-                // Remove the redirections for the removed outputs.
-                remove_indices_from_vec(redirections, &stack_elem.sorted_removed_outputs);
+    // Updates the redirections for the block outputs.
+    match kind {
+        BlockKind::Block => {
+            let redirections = &mut sub_dag.block_data;
 
-                // Adjust the redirections for removed inputs.
-                for redir in redirections.iter_mut() {
-                    if let Redirection::FromInput(input_idx) = redir {
-                        *redir = Redirection::FromInput(
-                            *input_idx - sorted_removals_offset(&removed_inputs, input_idx) as u32,
-                        );
-                    }
+            // Remove the redirections for the removed outputs.
+            remove_indices_from_vec(redirections, &stack_elem.sorted_removed_outputs);
+
+            // Adjust the redirections for removed inputs.
+            for redir in redirections.iter_mut() {
+                if let Redirection::FromInput(input_idx) = redir {
+                    *redir = Redirection::FromInput(
+                        *input_idx - sorted_removals_offset(&removed_inputs, input_idx) as u32,
+                    );
                 }
             }
-            BlockKind::Loop => assert!(removed_inputs.is_empty()),
         }
-
-        stats.removed_block_outputs += stack_elem.sorted_removed_outputs.len();
-
-        (stats, stack_elem.sorted_removed_outputs)
-    } else {
-        (Statistics::default(), Vec::new())
+        BlockKind::Loop => assert!(removed_inputs.is_empty()),
     }
+
+    stats.removed_block_outputs += stack_elem.sorted_removed_outputs.len();
+
+    (stats, stack_elem.sorted_removed_outputs)
 }
 
 /// Fix breaks to blocks that had their outputs removed.
