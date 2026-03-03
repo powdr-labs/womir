@@ -37,7 +37,7 @@ pub fn prune_block_io(dag: &mut RedirDag<'_>) -> usize {
     // If outputs have been removed, we might have created new opportunities for
     // input removals, so we need to repeat until we reach a fixed point.
     loop {
-        let (output_removed, loop_inputs_removed) = process_block(dag, &mut VecDeque::new());
+        let (output_removed, loop_inputs_removed) = process_dag(dag, &mut VecDeque::new());
         total_loop_inputs_removed += loop_inputs_removed;
         if !output_removed {
             break;
@@ -156,7 +156,7 @@ struct ControlStackEntry {
     input_usage: Vec<InputUsage>,
 }
 
-fn process_block(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (bool, usize) {
+fn process_dag(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (bool, usize) {
     // Some output slots might be removed from the block outputs in case they are redundant.
     // We track such cases in this map, and also where the users of those outputs should point
     // to instead.
@@ -306,11 +306,10 @@ fn handle_block_node(
 
     // Call the processing recursively
     cs.push_front(ControlStackEntry {
-        //input_map,
         // Let the block initialize the input usage for its inputs...
         input_usage: Vec::new(),
     });
-    let (mut output_removed, mut loop_inputs_removed) = process_block(sub_dag, cs);
+    let (mut output_removed, mut loop_inputs_removed) = process_dag(sub_dag, cs);
     let mut sub_entry = cs.pop_front().unwrap();
     assert_eq!(sub_entry.input_usage.len(), node.inputs.len());
 
@@ -739,7 +738,7 @@ fn remove_break_inputs<T: Debug>(
 ) {
     if let Some(br_ins_to_remove) = br_ins_to_remove.get_mut(relative_depth as usize) {
         if let Some(br_ins_to_remove) = br_ins_to_remove {
-            // If we have specifyed what break inputs to remove, apply them.
+            // If we have specified what break inputs to remove, apply them.
             remove_indices(
                 node_inputs,
                 br_ins_to_remove.iter().map(|x| *x as usize),
