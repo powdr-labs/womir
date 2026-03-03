@@ -907,6 +907,7 @@ mod tests {
             sub_dag.nodes[0].output_types.is_empty(),
             "Inputs node should have no outputs"
         );
+        assert!(sub_dag.block_data.is_empty(), "block_data should remain empty");
     }
 
     /// A plain-block output that is always equal to an input (FromInput) is
@@ -947,6 +948,7 @@ mod tests {
             sub_dag.nodes[1].inputs.is_empty(),
             "br inside block should have no inputs"
         );
+        assert!(sub_dag.block_data.is_empty(), "block_data should be trimmed to empty");
         // Consumer (function return) should now reference the function input directly.
         assert_ref(&dag.nodes[2].inputs[0], 0, 0);
     }
@@ -987,11 +989,18 @@ mod tests {
         prune_block_io(&mut dag);
 
         assert_eq!(dag.nodes[1].inputs.len(), 1, "only X should remain as block input");
+        assert_ref(&dag.nodes[1].inputs[0], 0, 0); // X is still function input 0
         assert_eq!(
             dag.nodes[1].output_types.len(),
             1,
             "only computed output should remain"
         );
+        let Operation::Block { ref sub_dag, .. } = dag.nodes[1].operation else {
+            panic!()
+        };
+        // One NotRedirected entry should remain in block_data (slot 0 = eqz(X)).
+        assert_eq!(sub_dag.block_data.len(), 1);
+        assert_eq!(sub_dag.block_data[0], Redirection::NotRedirected);
         // Consumer of output 0 (computed): still references block output 0.
         assert_ref(&dag.nodes[2].inputs[0], 1, 0);
         // Consumer of output 1 (forwarded Y): redirected to function input 1.
@@ -1072,6 +1081,8 @@ mod tests {
 
         assert_eq!(loop_inputs_removed, 0, "no loop inputs should be removed");
         assert_eq!(dag.nodes[1].inputs.len(), 2, "loop should still have 2 inputs");
+        assert_ref(&dag.nodes[1].inputs[0], 0, 0); // A
+        assert_ref(&dag.nodes[1].inputs[1], 0, 1); // B
         let Operation::Block { ref sub_dag, .. } = dag.nodes[1].operation else {
             panic!()
         };
@@ -1080,6 +1091,7 @@ mod tests {
             2,
             "both Inputs outputs should remain"
         );
+        assert_eq!(sub_dag.block_data.len(), 2, "loop block_data should be unchanged");
     }
 
     /// When an inner block's only input is passed straight through as its output
@@ -1205,6 +1217,20 @@ mod tests {
         assert!(dag.nodes[2].inputs.is_empty(), "B2 should have no inputs");
         assert!(dag.nodes[2].output_types.is_empty(), "B2 should have no outputs");
 
+        // Inner sub-dags should be fully cleaned too.
+        let Operation::Block { sub_dag: ref b1_sub, .. } = dag.nodes[1].operation else {
+            panic!()
+        };
+        assert!(b1_sub.nodes[0].output_types.is_empty());
+        assert!(b1_sub.nodes[1].inputs.is_empty());
+        assert!(b1_sub.block_data.is_empty());
+        let Operation::Block { sub_dag: ref b2_sub, .. } = dag.nodes[2].operation else {
+            panic!()
+        };
+        assert!(b2_sub.nodes[0].output_types.is_empty());
+        assert!(b2_sub.nodes[1].inputs.is_empty());
+        assert!(b2_sub.block_data.is_empty());
+
         // Function return should now reference the original function input directly.
         assert_eq!(dag.nodes[3].inputs.len(), 1);
         assert_ref(&dag.nodes[3].inputs[0], 0, 0);
@@ -1294,5 +1320,190 @@ mod tests {
         };
         assert_eq!(targets[0].input_permutation, vec![0u32, 1u32]); // was [0,2], C now at index 1
         assert_eq!(targets[1].input_permutation, vec![1u32, 0u32]); // was [2,0], C now at index 1
+    }
+
+    /// A BrIf whose break input is removed must keep its selector (condition) intact
+    /// as the sole remaining input, at the last position.
+    ///
+    /// The BrIf node has the form: [...break_inputs, selector] (selector is last).
+    /// When the block output the break targets is shortcircuited (FromInput), the
+    /// break input feeding it is removed. The selector must survive the removal
+    /// unchanged and remain the last (and here, only) input.
+    #[test]
+    fn test_br_if_selector_preserved_when_break_input_pruned() {
+        // Block: inputs A (0) and B (1); one output = A = FromInput(0).
+        // BrIf: break input = A (slot 0), selector = B (last input).
+        //   → A is removable (only forwarded to the shortcircuited output).
+        //   → B is Used (it is the selector, treated as a normal node input).
+        let sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32, ValType::I32]), // Node 0: A, B
+                GenericNode {
+                    operation: Operation::WASMOp(Op::BrIf { relative_depth: 0 }),
+                    inputs: vec![input_ref(0, 0), input_ref(0, 1)], // [break=A, selector=B]
+                    output_types: vec![],
+                },
+            ],
+            vec![Redirection::FromInput(0)], // output 0 = A
+        );
+        let mut dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32, ValType::I32]), // Node 0: A, B
+                block_node(
+                    vec![input_ref(0, 0), input_ref(0, 1)],
+                    vec![ValType::I32],
+                    sub_dag,
+                    BlockKind::Block,
+                ),
+                br_node(0, vec![input_ref(1, 0)]), // function return = block output 0
+            ],
+            vec![Redirection::NotRedirected],
+        );
+
+        prune_block_io(&mut dag);
+
+        // Block: A removed, only B remains as input; output removed.
+        assert_eq!(dag.nodes[1].inputs.len(), 1, "only B should remain");
+        assert_ref(&dag.nodes[1].inputs[0], 0, 1); // B
+        assert!(dag.nodes[1].output_types.is_empty(), "output removed");
+
+        let Operation::Block { ref sub_dag, .. } = dag.nodes[1].operation else {
+            panic!()
+        };
+        assert!(sub_dag.block_data.is_empty());
+
+        // BrIf: break input A removed; selector B survives as the sole input.
+        // After B shifts from index 1 to index 0 in the Inputs node, B is r(0,0).
+        assert_eq!(sub_dag.nodes[1].inputs.len(), 1, "only the selector should remain");
+        assert_ref(&sub_dag.nodes[1].inputs[0], 0, 0); // B (shifted from r(0,1) to r(0,0))
+
+        // Consumer of the removed output is redirected to function input A.
+        assert_ref(&dag.nodes[2].inputs[0], 0, 0); // A
+    }
+
+    /// A break at relative_depth > 0 that targets an outer block's output slot lives
+    /// inside a nested block. When the outer block's output is shortcircuited, the
+    /// break input in the *inner* block is removed by the correct VecDeque depth
+    /// entry in `br_inputs_to_remove`.
+    #[test]
+    fn test_nested_relative_depth_break_removal() {
+        // Outer block: one input A, one output = A = FromInput(0).
+        // Inside outer block: an inner block whose only content is a Br at depth=1
+        // (targeting the outer block) that passes A as the single output value.
+        // After pruning: output shortcircuited, A removed, Br at depth=1 emptied.
+        let inner_sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32]),    // Node 0: A (inner block's input)
+                br_node(1, vec![input_ref(0, 0)]), // Node 1: Br depth=1, passes A to outer output slot 0
+            ],
+            vec![], // inner block has no outputs of its own
+        );
+        let outer_sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32]), // Node 0: A
+                block_node(                      // Node 1: inner block
+                    vec![input_ref(0, 0)],        // passes A in
+                    vec![],
+                    inner_sub_dag,
+                    BlockKind::Block,
+                ),
+            ],
+            vec![Redirection::FromInput(0)], // outer block's output 0 = always A
+        );
+        let mut dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32]),          // Node 0: function input A
+                block_node(vec![input_ref(0, 0)], vec![ValType::I32], outer_sub_dag, BlockKind::Block),
+                br_node(0, vec![input_ref(1, 0)]),         // Node 2: function return = outer block output 0
+            ],
+            vec![Redirection::NotRedirected],
+        );
+
+        prune_block_io(&mut dag);
+
+        // Outer block fully cleaned.
+        assert!(dag.nodes[1].inputs.is_empty());
+        assert!(dag.nodes[1].output_types.is_empty());
+
+        let Operation::Block { ref sub_dag, .. } = dag.nodes[1].operation else {
+            panic!()
+        };
+        assert!(sub_dag.nodes[0].output_types.is_empty()); // Inputs node: A removed
+        assert!(sub_dag.nodes[1].inputs.is_empty());       // inner block: no inputs
+        assert!(sub_dag.nodes[1].output_types.is_empty()); // inner block: no outputs
+
+        // Inner block's Br at depth=1 should have had its input removed.
+        let Operation::Block { sub_dag: ref inner_sub, .. } = sub_dag.nodes[1].operation else {
+            panic!()
+        };
+        assert!(inner_sub.nodes[0].output_types.is_empty()); // inner Inputs node: A removed
+        assert!(inner_sub.nodes[1].inputs.is_empty(), "Br at depth=1 should have no inputs");
+
+        // Function return redirected to A directly.
+        assert_ref(&dag.nodes[2].inputs[0], 0, 0);
+    }
+
+    /// In a loop with three inputs where two form a dead cycle and the third is
+    /// genuinely used, only the dead-cycle inputs are removed. BFS from the used
+    /// input does not propagate into the independent cycle.
+    #[test]
+    fn test_loop_partial_cycle_prunes_only_disconnected_component() {
+        // Loop inputs: A (0), B (1), C (2).
+        // Back-edge: slot 0 ← B (FromInput(1)), slot 1 ← A (FromInput(0)),
+        //            slot 2 ← C (FromInput(2)).
+        // A and B swap each other each iteration and are never used → removable.
+        // C is consumed by i32.eqz → Not removable; BFS from C does not reach A or B.
+        let sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32, ValType::I32, ValType::I32]),
+                wasm_op_node(Op::I32Eqz, vec![input_ref(0, 2)], vec![ValType::I32]), // uses C
+                // back-edge: [B, A, C] — slot 0←B, slot 1←A, slot 2←C
+                br_node(0, vec![input_ref(0, 1), input_ref(0, 0), input_ref(0, 2)]),
+            ],
+            vec![
+                Redirection::FromInput(1), // slot 0 ← B
+                Redirection::FromInput(0), // slot 1 ← A
+                Redirection::FromInput(2), // slot 2 ← C
+            ],
+        );
+        let mut dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32, ValType::I32, ValType::I32]),
+                block_node(
+                    vec![input_ref(0, 0), input_ref(0, 1), input_ref(0, 2)],
+                    vec![],
+                    sub_dag,
+                    BlockKind::Loop,
+                ),
+            ],
+            vec![],
+        );
+
+        let loop_inputs_removed = prune_block_io(&mut dag);
+
+        assert_eq!(loop_inputs_removed, 2, "A and B should be removed");
+
+        // Loop node: only C remains as input.
+        assert_eq!(dag.nodes[1].inputs.len(), 1);
+        assert_ref(&dag.nodes[1].inputs[0], 0, 2); // C (still references function input 2)
+
+        let Operation::Block { ref sub_dag, .. } = dag.nodes[1].operation else {
+            panic!()
+        };
+
+        // Inputs node: only C's slot remains.
+        assert_eq!(sub_dag.nodes[0].output_types.len(), 1);
+
+        // WASMOp: still references C, now shifted to index 0.
+        assert_eq!(sub_dag.nodes[1].inputs.len(), 1);
+        assert_ref(&sub_dag.nodes[1].inputs[0], 0, 0); // C shifted to r(0,0)
+
+        // Back-edge: only C remains, shifted to r(0,0).
+        assert_eq!(sub_dag.nodes[2].inputs.len(), 1);
+        assert_ref(&sub_dag.nodes[2].inputs[0], 0, 0); // C shifted
+
+        // block_data: only C's entry remains, re-indexed to FromInput(0).
+        assert_eq!(sub_dag.block_data.len(), 1);
+        assert_eq!(sub_dag.block_data[0], Redirection::FromInput(0));
     }
 }
