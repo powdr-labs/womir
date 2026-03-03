@@ -163,8 +163,8 @@ fn process_dag(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (boo
     let mut output_removed = false;
     let mut origin_substitutions: HashMap<ValueOrigin, Option<ValueOrigin>> = HashMap::new();
     let mut loop_inputs_removed = 0;
-    for node_idx in 0..dag.nodes.len() {
-        let node = &mut dag.nodes[node_idx];
+
+    for (node_idx, node) in dag.nodes.iter_mut().enumerate() {
         apply_substitutions(&mut node.inputs, &origin_substitutions);
 
         // In the function body, we can't change the inputs and outputs of the function,
@@ -175,6 +175,7 @@ fn process_dag(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (boo
             (Operation::Inputs, false) => {
                 // This is the first node of a block, which lists the block inputs.
                 // We use its information to initialize the input usage information for this block.
+                assert_eq!(node_idx, 0);
                 cs[0]
                     .input_usage
                     .resize_with(node.output_types.len(), || InputUsage::Unused);
@@ -256,7 +257,6 @@ fn process_dag(dag: &mut RedirDag, cs: &mut VecDeque<ControlStackEntry>) -> (boo
             }
         }
     }
-    // TODO: mark and remove unused sub-blocks outputs...
 
     (output_removed, loop_inputs_removed)
 }
@@ -316,8 +316,6 @@ fn handle_block_node(
     let redirections = &mut sub_dag.block_data;
 
     // Calculate what outputs can be removed
-    // TODO: make the initial set of removals come from the previous pass, because we
-    // can only detect if an output was actually used after processing the block.
     let mut outputs_to_remove = Vec::new();
     if let BlockKind::Block = kind {
         // If sub-block is a plain block, we can remove its output slots that were redirected as-is from its inputs.
