@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 pub mod range_consolidation;
 pub mod rev_vec_filler;
 pub mod tree;
@@ -36,45 +38,41 @@ pub fn remove_indices<T>(
         vec.set_len(0);
     }
 
-    {
-        let buf = &mut vec.spare_capacity_mut()[..len];
+    let buf = &mut vec.spare_capacity_mut()[..len];
 
-        // Poor man's borrow checker: prevents vec name from being used in this scope
-        #[allow(unused_variables)]
-        let vec = ();
+    // Drop the first element to remove.
+    unsafe {
+        buf[dest].assume_init_drop();
+    }
+    callback(dest, None);
 
-        // Drop the first element to remove.
-        unsafe {
-            buf[dest].assume_init_drop();
-        }
-        callback(dest, None);
-
-        let mut src = dest + 1;
-        while src < len {
-            let next_to_remove = to_remove.peek();
-            // Sanity check that the indices are sorted and have no duplicates.
-            if let Some(&next_to_remove) = next_to_remove
-                && next_to_remove < src
-            {
-                panic!("sorted_indices must be sorted ascending with no duplicates");
-            } else if next_to_remove == Some(&src) {
-                // This source index is also to be removed: drop it.
-                unsafe {
-                    buf[src].assume_init_drop();
-                }
-                callback(src, None);
-                to_remove.next();
-            } else {
-                buf[dest].write(unsafe { buf[src].assume_init_read() });
-                callback(src, Some(dest));
-                dest += 1;
+    let mut src = dest + 1;
+    while src < len {
+        let next_to_remove = to_remove.peek();
+        // Sanity check that the indices are sorted and have no duplicates.
+        if let Some(&next_to_remove) = next_to_remove
+            && next_to_remove < src
+        {
+            panic!("sorted_indices must be sorted ascending with no duplicates");
+        } else if next_to_remove == Some(&src) {
+            // This source index is to be removed: drop it.
+            unsafe {
+                buf[src].assume_init_drop();
             }
-            src += 1;
+            callback(src, None);
+            to_remove.next();
+        } else {
+            // This source index is not to be removed: move it to the destination.
+            buf[dest] = std::mem::replace(&mut buf[src], MaybeUninit::uninit());
+            callback(src, Some(dest));
+            dest += 1;
         }
+        src += 1;
     }
 
+    // All the elements from `dest` have already been dropped or moved,
+    // so we can just set the length to `dest`.
     unsafe {
-        // All the elements from `dest` have already been dropped or moved.
         vec.set_len(dest);
     }
     assert!(to_remove.next().is_none());
