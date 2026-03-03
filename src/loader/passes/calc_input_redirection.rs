@@ -44,9 +44,9 @@ pub fn calculate_input_redirection<'a>(
     };
 
     let cs = &mut VecDeque::from(vec![entry]);
-    let (mut nodes, mut at_fixed_point) = process_block(dag.nodes, cs);
+    let (mut nodes, mut at_fixed_point) = process_block(func_idx, dag.nodes, cs);
     while !at_fixed_point {
-        let result = process_block(nodes, cs);
+        let result = process_block(func_idx, nodes, cs);
         nodes = result.0;
         at_fixed_point = result.1;
     }
@@ -126,6 +126,7 @@ struct ControlStackEntry {
 }
 
 fn process_block<'a, T>(
+    func_idx: u32,
     nodes: Vec<GenericNode<'a, T>>,
     cs: &mut VecDeque<ControlStackEntry>,
 ) -> (Vec<RedirNode<'a>>, bool)
@@ -165,7 +166,7 @@ where
                     block_returns,
                     at_fixed_point,
                     node,
-                } = handle_sub_block(node, cs);
+                } = handle_sub_block(func_idx, node, cs);
 
                 fixed_point &= at_fixed_point;
 
@@ -282,6 +283,7 @@ struct SubBlockResult<'a> {
 }
 
 fn handle_sub_block<'a, T>(
+    func_idx: u32,
     mut node: GenericNode<'a, T>,
     cs: &mut VecDeque<ControlStackEntry>,
 ) -> SubBlockResult<'a>
@@ -338,7 +340,7 @@ where
         redirections,
         was_ever_broken_to: false,
     });
-    let (sub_nodes, at_fixed_point) = process_block(sub_nodes, cs);
+    let (sub_nodes, at_fixed_point) = process_block(func_idx, sub_nodes, cs);
     let mut sub_entry = cs.pop_front().unwrap();
 
     // Detect dead code.

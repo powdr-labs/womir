@@ -4,8 +4,9 @@
 //! can be used inside blocks, they act as alternative ways to pass
 //! values into and out of blocks.
 //!
-//! This module makes explicit what locals are used either as inputs
-//! or outputs to blocks.
+//! The algorithm is a conservative as it might mark more locals as
+//! inputs and outputs than strictly necessary, which should be corrected
+//! by later passes.
 
 use std::collections::{BTreeSet, VecDeque};
 

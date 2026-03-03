@@ -6,10 +6,13 @@ use std::{
 use itertools::Itertools;
 use wasmparser::Operator as Op;
 
-use crate::loader::{
-    BlockKind,
-    dag::{Node, NodeInput, Operation, ValueOrigin},
-    passes::calc_input_redirection::{RedirDag, RedirNode, Redirection},
+use crate::{
+    loader::{
+        BlockKind,
+        dag::{Node, NodeInput, Operation, ValueOrigin},
+        passes::calc_input_redirection::{RedirDag, RedirNode, Redirection},
+    },
+    utils::{remove_indices, sorted_removals_offset},
 };
 
 #[derive(Default, Debug)]
@@ -30,50 +33,6 @@ impl AddAssign for Statistics {
 
 struct StackElement {
     sorted_removed_outputs: Vec<u32>,
-}
-
-struct OffsetMap<K: Ord, V: PartialEq + Eq> {
-    default: V,
-    counter: V,
-    /// Holds the (index, value), sorted by index for binary search.
-    map: Vec<(K, V)>,
-}
-
-impl<K: Ord + PartialEq + Eq, V: Copy + PartialEq + Eq + AddAssign<V> + From<u8>> OffsetMap<K, V> {
-    fn new(default: V) -> Self {
-        Self {
-            default,
-            counter: default,
-            map: Vec::new(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-
-    fn append(&mut self, index: K) {
-        if let Some((k, _)) = self.map.last() {
-            // The keys must be in ascending order.
-            assert!(index >= *k);
-        }
-
-        self.counter += 1.into();
-        self.map.push((index, self.counter));
-    }
-
-    fn get(&self, index: &K) -> &V {
-        match self.map.binary_search_by(|(i, _)| i.cmp(index)) {
-            Ok(idx) => &self.map[idx].1,
-            Err(idx) => {
-                if idx == 0 {
-                    &self.default
-                } else {
-                    &self.map[idx - 1].1
-                }
-            }
-        }
-    }
 }
 
 fn _print_nodes(indent: usize, nodes: &[Node<'_>]) {
@@ -173,8 +132,9 @@ fn recursive_removal(
                 for input in node.inputs.iter() {
                     if let NodeInput::Reference(origin) = input {
                         used_outputs.insert(*origin);
+                    } else {
+                        // Constants don't reference other nodes, so we ignore them
                     }
-                    // Constants don't reference other nodes, so we ignore them
                 }
                 None
             } else {
@@ -191,23 +151,23 @@ fn recursive_removal(
         assert!(matches!(inputs.operation, Operation::Inputs { .. }));
 
         let mut output_idx = 0u32..;
-        let mut offset_map = OffsetMap::new(0);
+        let mut removed_output_indices: Vec<u32> = Vec::new();
         inputs.output_types.retain(|_| {
             let origin = ValueOrigin::new(0, output_idx.next().unwrap());
             if used_outputs.contains(&origin) {
                 true
             } else {
                 removed_inputs.push(origin.output_idx);
-                offset_map.append(origin.output_idx);
+                removed_output_indices.push(origin.output_idx);
                 false
             }
         });
 
-        nodes_outputs_offsets.insert(0, offset_map);
+        nodes_outputs_offsets.insert(0, removed_output_indices);
     }
 
     // The second pass happens top down, and actually removes the nodes.
-    let mut offset_map = OffsetMap::new(0);
+    let mut removed_node_indices: Vec<usize> = Vec::new();
     let mut to_be_removed = to_be_removed.into_iter().rev().peekable();
     let mut node_idx = 0usize..;
     nodes.retain_mut(|node| {
@@ -215,7 +175,7 @@ fn recursive_removal(
         if to_be_removed.peek() == node_idx.as_ref() {
             // Remove the node if it is in the to-be-removed list.
             to_be_removed.next();
-            offset_map.append(node_idx.unwrap());
+            removed_node_indices.push(node_idx.unwrap());
             false
         } else {
             // Fix the inputs to breaks, that might have changed.
@@ -225,13 +185,15 @@ fn recursive_removal(
             for input in node.inputs.iter_mut() {
                 if let NodeInput::Reference(origin) = input {
                     // If this refers to a node whose output has been removed, we need to remap it.
-                    if let Some(offset_map) = nodes_outputs_offsets.get(&origin.node) {
-                        origin.output_idx -= offset_map.get(&origin.output_idx);
+                    if let Some(removed_outputs) = nodes_outputs_offsets.get(&origin.node) {
+                        origin.output_idx -=
+                            sorted_removals_offset(removed_outputs, &origin.output_idx) as u32;
                     }
 
-                    origin.node -= offset_map.get(&origin.node);
+                    origin.node -= sorted_removals_offset(&removed_node_indices, &origin.node);
+                } else {
+                    // Constants don't need remapping
                 }
-                // Constants don't need remapping
             }
             true
         }
@@ -246,7 +208,7 @@ fn recurse_into_block(
     node: &mut RedirNode,
     ctrl_stack: &mut VecDeque<StackElement>,
     used_outputs: &HashSet<ValueOrigin>,
-) -> (Statistics, OffsetMap<u32, u32>) {
+) -> (Statistics, Vec<u32>) {
     if let Operation::Block { kind, sub_dag } = &mut node.operation {
         // We need to figure out which outputs of the block are not used, and remove them.
         let sorted_removed_outputs = (0..node.output_types.len() as u32)
@@ -278,14 +240,12 @@ fn recurse_into_block(
                 // Remove the redirections for the removed outputs.
                 remove_indices_from_vec(redirections, &stack_elem.sorted_removed_outputs);
 
-                // Build an offset map for the removed inputs, so we can adjust the redirections accordingly.
-                let mut in_offset_map = OffsetMap::new(0);
-                for removed in removed_inputs {
-                    in_offset_map.append(removed);
-                }
+                // Adjust the redirections for removed inputs.
                 for redir in redirections.iter_mut() {
                     if let Redirection::FromInput(input_idx) = redir {
-                        *redir = Redirection::FromInput(*input_idx - in_offset_map.get(input_idx));
+                        *redir = Redirection::FromInput(
+                            *input_idx - sorted_removals_offset(&removed_inputs, input_idx) as u32,
+                        );
                     }
                 }
             }
@@ -294,14 +254,9 @@ fn recurse_into_block(
 
         stats.removed_block_outputs += stack_elem.sorted_removed_outputs.len();
 
-        let mut offset_map = OffsetMap::new(0);
-        for removed in stack_elem.sorted_removed_outputs {
-            offset_map.append(removed);
-        }
-
-        (stats, offset_map)
+        (stats, stack_elem.sorted_removed_outputs)
     } else {
-        (Statistics::default(), OffsetMap::new(0))
+        (Statistics::default(), Vec::new())
     }
 }
 
@@ -333,7 +288,7 @@ fn fix_breaks(node: &mut RedirNode, ctrl_stack: &mut VecDeque<StackElement>) {
             }
 
             // Remove the inputs that are not used in any target.
-            let mut offset_map = OffsetMap::new(0);
+            let mut removed_input_indices: Vec<u32> = Vec::new();
             let mut is_input_still_used = (0u32..).zip(is_input_still_used);
             node.inputs.retain(|_| {
                 let (input_idx, is_used) = is_input_still_used.next().unwrap();
@@ -342,16 +297,17 @@ fn fix_breaks(node: &mut RedirNode, ctrl_stack: &mut VecDeque<StackElement>) {
                     true
                 } else {
                     // If the input is not used, remove it.
-                    offset_map.append(input_idx);
+                    removed_input_indices.push(input_idx);
                     false
                 }
             });
 
             // Fix the input indices in the targets' input permutations.
-            if !offset_map.is_empty() {
+            if !removed_input_indices.is_empty() {
                 for target in targets.iter_mut() {
                     for input_idx in target.input_permutation.iter_mut() {
-                        *input_idx -= offset_map.get(input_idx);
+                        *input_idx -=
+                            sorted_removals_offset(&removed_input_indices, input_idx) as u32;
                     }
                 }
             }
@@ -361,27 +317,7 @@ fn fix_breaks(node: &mut RedirNode, ctrl_stack: &mut VecDeque<StackElement>) {
 }
 
 fn remove_indices_from_vec<T>(vec: &mut Vec<T>, sorted_ids: &[u32]) {
-    let mut sorted_ids = sorted_ids.iter().cloned().peekable();
-
-    // We start the removal from the first index to be removed,
-    // cutting the iteration short.
-    let Some(initial_idx) = sorted_ids.next() else {
-        return;
-    };
-
-    let mut dest = initial_idx as usize;
-    for src in dest + 1..vec.len() {
-        if sorted_ids.peek() == Some(&(src as u32)) {
-            // If the current index is in the list of indices to be removed, skip it.
-            sorted_ids.next();
-        } else {
-            // Otherwise, swap the value to the destination index.
-            vec.swap(dest, src);
-            dest += 1;
-        }
-    }
-    // All the unused elements are at the end of the vector.
-    vec.truncate(dest);
+    remove_indices(vec, sorted_ids.iter().map(|x| *x as usize), |_, _| {});
 }
 
 /// Checks if a node has side effects

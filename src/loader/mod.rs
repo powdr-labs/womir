@@ -476,9 +476,12 @@ pub enum CommonStages<'a> {
     ConstCollapsedDag(Dag<'a>),
     /// The DAG after deduplicating constant definitions.
     ConstDedupDag(Dag<'a>),
+
     /// The DAG with information, on each block, of which inputs are redirected unchanged
     /// to the outputs.
     RedirectionDag(RedirDag<'a>),
+    /// The DAG after removing unecessary inputs and outputs of blocks.
+    CleanBlockIODag(RedirDag<'a>),
     /// The DAG after removing dangling nodes that do not contribute to the output.
     DanglingOptDag(RedirDag<'a>),
     /// The blockless DAG representation of the function, where block nodes are expanded
@@ -539,13 +542,21 @@ impl<'a, S: Settings> FunctionProcessingStage<'a, S> for CommonStages<'a> {
                 Self::ConstDedupDag(dag)
             }
             Self::ConstDedupDag(dag) => {
-                // Optimization pass: calculate what block inputs are redirected unchanged
+                // Pre-optimization pass: calculate what block inputs are redirected unchanged
                 // to the outputs.
                 let dag: RedirDag =
                     calc_input_redirection::calculate_input_redirection(dag, ctx, func_idx);
                 Self::RedirectionDag(dag)
             }
             Self::RedirectionDag(mut dag) => {
+                // Optimization pass: remove unecessary inputs and outputs of blocks.
+                let loop_inputs_removed = dag::prune_block_io::prune_block_io(&mut dag);
+                if let Some(stats) = stats {
+                    stats.loop_inputs_removed += loop_inputs_removed;
+                }
+                Self::CleanBlockIODag(dag)
+            }
+            Self::CleanBlockIODag(mut dag) => {
                 // Optimization passes: remove pure nodes that does not contribute to the output.
                 let mut removed_nodes = 0;
                 let mut removed_block_outputs = 0;
@@ -859,6 +870,8 @@ pub struct Statistics {
     pub constants_deduplicated: usize,
     /// Number of dangling nodes removed from the DAG.
     pub dangling_nodes_removed: usize,
+    /// Number of loop inputs removed from the DAG.
+    pub loop_inputs_removed: usize,
     /// Number of block outputs removed from the DAG.
     pub block_outputs_removed: usize,
     /// Number of useless jumps removed from flattened assembly.
@@ -871,6 +884,7 @@ impl AddAssign for Statistics {
         self.constants_collapsed += other.constants_collapsed;
         self.constants_deduplicated += other.constants_deduplicated;
         self.dangling_nodes_removed += other.dangling_nodes_removed;
+        self.loop_inputs_removed += other.loop_inputs_removed;
         self.block_outputs_removed += other.block_outputs_removed;
         self.useless_jumps_removed += other.useless_jumps_removed;
     }
@@ -880,11 +894,12 @@ impl Display for Statistics {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(
             f,
-            "Optimization statistics:\n - {} register copies saved\n - {} constants collapsed\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} block outputs removed\n - {} useless jumps removed",
+            "Optimization statistics:\n - {} register copies saved\n - {} constants collapsed\n - {} constants deduplicated\n - {} dangling nodes removed\n - {} loop inputs removed\n - {} block outputs removed\n - {} useless jumps removed",
             self.register_copies_saved,
             self.constants_collapsed,
             self.constants_deduplicated,
             self.dangling_nodes_removed,
+            self.loop_inputs_removed,
             self.block_outputs_removed,
             self.useless_jumps_removed
         )
@@ -1605,7 +1620,7 @@ pub enum Instruction<'a> {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockKind {
     Block,
     Loop,
