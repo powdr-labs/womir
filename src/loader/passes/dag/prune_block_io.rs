@@ -797,8 +797,6 @@ mod tests {
     };
     use wasmparser::{Operator as Op, ValType};
 
-    // ── Helpers ────────────────────────────────────────────────────────────────
-
     fn input_ref(node: usize, output_idx: u32) -> NodeInput {
         NodeInput::Reference(ValueOrigin::new(node, output_idx))
     }
@@ -875,8 +873,6 @@ mod tests {
             output_types: vec![],
         }
     }
-
-    // ── Tests ──────────────────────────────────────────────────────────────────
 
     /// An input that is never referenced inside a plain block is removed.
     #[test]
