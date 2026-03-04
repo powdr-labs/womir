@@ -844,10 +844,21 @@ mod tests {
         inputs: Vec<NodeInput>,
         output_types: Vec<ValType>,
         sub_dag: RedirDag<'a>,
-        kind: BlockKind,
     ) -> RedirNode<'a> {
         GenericNode {
-            operation: Operation::Block { kind, sub_dag },
+            operation: Operation::Block { kind: BlockKind::Block, sub_dag },
+            inputs,
+            output_types,
+        }
+    }
+
+    fn loop_node<'a>(
+        inputs: Vec<NodeInput>,
+        output_types: Vec<ValType>,
+        sub_dag: RedirDag<'a>,
+    ) -> RedirNode<'a> {
+        GenericNode {
+            operation: Operation::Block { kind: BlockKind::Loop, sub_dag },
             inputs,
             output_types,
         }
@@ -886,7 +897,7 @@ mod tests {
         let mut dag = redir_dag(
             vec![
                 inputs_node(vec![ValType::I32]),
-                block_node(vec![input_ref(0, 0)], vec![], sub_dag, BlockKind::Block),
+                block_node(vec![input_ref(0, 0)], vec![], sub_dag),
                 br_node(0, vec![]),
             ],
             vec![],
@@ -923,7 +934,7 @@ mod tests {
         let mut dag = redir_dag(
             vec![
                 inputs_node(vec![ValType::I32]),
-                block_node(vec![input_ref(0, 0)], vec![ValType::I32], sub_dag, BlockKind::Block),
+                block_node(vec![input_ref(0, 0)], vec![ValType::I32], sub_dag),
                 br_node(0, vec![input_ref(1, 0)]), // function return: consumes block output 0
             ],
             vec![Redirection::NotRedirected],
@@ -975,7 +986,6 @@ mod tests {
                     vec![input_ref(0, 0), input_ref(0, 1)],
                     vec![ValType::I32, ValType::I32],
                     sub_dag,
-                    BlockKind::Block,
                 ),
                 br_node(0, vec![input_ref(1, 0), input_ref(1, 1)]), // function return: both block outputs
             ],
@@ -1024,7 +1034,7 @@ mod tests {
         let mut dag = redir_dag(
             vec![
                 inputs_node(vec![ValType::I32, ValType::I32]),
-                block_node(vec![input_ref(0, 0), input_ref(0, 1)], vec![], sub_dag, BlockKind::Loop),
+                loop_node(vec![input_ref(0, 0), input_ref(0, 1)], vec![], sub_dag),
             ],
             vec![],
         );
@@ -1068,7 +1078,7 @@ mod tests {
         let mut dag = redir_dag(
             vec![
                 inputs_node(vec![ValType::I32, ValType::I32]),
-                block_node(vec![input_ref(0, 0), input_ref(0, 1)], vec![], sub_dag, BlockKind::Loop),
+                loop_node(vec![input_ref(0, 0), input_ref(0, 1)], vec![], sub_dag),
             ],
             vec![],
         );
@@ -1118,7 +1128,6 @@ mod tests {
                     vec![input_ref(0, 1)],          // input: B
                     vec![ValType::I32],     // output: one i32 (will be removed)
                     inner_sub_dag,
-                    BlockKind::Block,
                 ),
                 br_node(0, vec![input_ref(1, 0)]), // Node 3: break with eqz(A) as outer block's output
             ],
@@ -1131,7 +1140,6 @@ mod tests {
                     vec![input_ref(0, 0), input_ref(0, 1)], // pass A and B into outer block
                     vec![ValType::I32],      // outer block produces one i32
                     outer_sub_dag,
-                    BlockKind::Block,
                 ),
                 br_node(0, vec![input_ref(1, 0)]), // Node 2: function return = outer block output 0
             ],
@@ -1196,8 +1204,8 @@ mod tests {
         let mut dag = redir_dag(
             vec![
                 inputs_node(vec![ValType::I32]),          // Node 0: function input A
-                block_node(vec![input_ref(0, 0)], vec![ValType::I32], b1_sub_dag, BlockKind::Block), // Node 1: B1
-                block_node(vec![input_ref(1, 0)], vec![ValType::I32], b2_sub_dag, BlockKind::Block), // Node 2: B2
+                block_node(vec![input_ref(0, 0)], vec![ValType::I32], b1_sub_dag), // Node 1: B1
+                block_node(vec![input_ref(1, 0)], vec![ValType::I32], b2_sub_dag), // Node 2: B2
                 br_node(0, vec![input_ref(2, 0)]),                // Node 3: function return = B2 output 0
             ],
             vec![Redirection::NotRedirected],
@@ -1270,7 +1278,6 @@ mod tests {
                     vec![input_ref(0, 0), input_ref(0, 1), input_ref(0, 2)],
                     vec![ValType::I32, ValType::I32, ValType::I32],
                     sub_dag,
-                    BlockKind::Block,
                 ),
                 br_node(0, vec![input_ref(1, 0), input_ref(1, 1), input_ref(1, 2)]), // function return: all 3 block outputs
             ],
@@ -1349,7 +1356,6 @@ mod tests {
                     vec![input_ref(0, 0), input_ref(0, 1)],
                     vec![ValType::I32],
                     sub_dag,
-                    BlockKind::Block,
                 ),
                 br_node(0, vec![input_ref(1, 0)]), // function return = block output 0
             ],
@@ -1401,7 +1407,6 @@ mod tests {
                     vec![input_ref(0, 0)],        // passes A in
                     vec![],
                     inner_sub_dag,
-                    BlockKind::Block,
                 ),
             ],
             vec![Redirection::FromInput(0)], // outer block's output 0 = always A
@@ -1409,7 +1414,7 @@ mod tests {
         let mut dag = redir_dag(
             vec![
                 inputs_node(vec![ValType::I32]),          // Node 0: function input A
-                block_node(vec![input_ref(0, 0)], vec![ValType::I32], outer_sub_dag, BlockKind::Block),
+                block_node(vec![input_ref(0, 0)], vec![ValType::I32], outer_sub_dag),
                 br_node(0, vec![input_ref(1, 0)]),         // Node 2: function return = outer block output 0
             ],
             vec![Redirection::NotRedirected],
@@ -1465,11 +1470,10 @@ mod tests {
         let mut dag = redir_dag(
             vec![
                 inputs_node(vec![ValType::I32, ValType::I32, ValType::I32]),
-                block_node(
+                loop_node(
                     vec![input_ref(0, 0), input_ref(0, 1), input_ref(0, 2)],
                     vec![],
                     sub_dag,
-                    BlockKind::Loop,
                 ),
             ],
             vec![],
