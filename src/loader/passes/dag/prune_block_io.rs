@@ -1039,10 +1039,6 @@ mod tests {
 
     /// Loop inputs that only pass values around in a cycle — never used by any
     /// computation and never escaping to the outer scope — are all removed.
-    ///
-    /// The sub_dag block_data for a loop is indexed by back-edge slot:
-    ///   redirections[i] = FromInput(j)  means slot i of the back-edge always
-    ///   receives loop input j.
     #[test]
     fn test_loop_dead_cycle_all_removed() {
         // Loop inputs: A (index 0), B (index 1).
@@ -1087,9 +1083,8 @@ mod tests {
         );
     }
 
-    /// When at least one loop input is genuinely used in a computation, the BFS
-    /// propagates that constraint backwards through the cycle and prevents every
-    /// input from being removed.
+    /// When at least one loop input is genuinely used in a computation, no inputs
+    /// in the cycle are removed.
     #[test]
     fn test_loop_cycle_with_used_input_nothing_removed() {
         // Same swapping loop as above, but input A (index 0) is also consumed
@@ -1137,8 +1132,7 @@ mod tests {
 
     /// When an inner block's only input is passed straight through as its output
     /// (FromInput), the inner block's I/O is removed. This makes the outer block's
-    /// corresponding input entirely unused, so it is also removed — all in a single
-    /// outer-loop iteration via cross-level usage propagation.
+    /// corresponding input entirely unused, so it is also removed.
     #[test]
     fn test_nested_block_input_propagated_removal() {
         // Outer block: inputs A (index 0) and B (index 1).
@@ -1242,10 +1236,9 @@ mod tests {
     }
 
     /// Two sequential plain blocks, B1 and B2, each forwarding their sole input as
-    /// their sole output (FromInput). B2's input is B1's output. The inline
-    /// substitution mechanism applies B1's output removal before B2 is even
-    /// analysed, so B2 is cleaned in the same outer-loop iteration. The function
-    /// return ends up pointing straight at the original function input.
+    /// their sole output (FromInput). B2's input is B1's output. Both are fully
+    /// cleaned and the function return ends up pointing straight at the original
+    /// function input.
     #[test]
     fn test_chained_output_substitution() {
         // B1: input=A (function input 0), output=FromInput(0)=A.
@@ -1416,13 +1409,7 @@ mod tests {
         assert_eq!(targets[1].input_permutation, vec![1u32, 0u32]); // was [2,0], C now at index 1
     }
 
-    /// A BrIf whose break input is removed must keep its selector (condition) intact
-    /// as the sole remaining input, at the last position.
-    ///
-    /// The BrIf node has the form: [...break_inputs, selector] (selector is last).
-    /// When the block output the break targets is shortcircuited (FromInput), the
-    /// break input feeding it is removed. The selector must survive the removal
-    /// unchanged and remain the last (and here, only) input.
+    /// When a BrIf's break input is removed, its selector (condition) is preserved.
     #[test]
     fn test_br_if_selector_preserved_when_break_input_pruned() {
         // Block: inputs A (0) and B (1); one output = A = FromInput(0).
@@ -1478,10 +1465,9 @@ mod tests {
         assert_ref(&dag.nodes[2].inputs[0], 0, 0); // A
     }
 
-    /// A break at relative_depth > 0 that targets an outer block's output slot lives
-    /// inside a nested block. When the outer block's output is shortcircuited, the
-    /// break input in the *inner* block is removed by the correct VecDeque depth
-    /// entry in `br_inputs_to_remove`.
+    /// When an inner block breaks to an outer block (depth > 0) and the outer block's
+    /// output is shortcircuited, the corresponding break input inside the inner block
+    /// is correctly removed.
     #[test]
     fn test_nested_relative_depth_break_removal() {
         // Outer block: one input A, one output = A = FromInput(0).
@@ -1547,9 +1533,8 @@ mod tests {
         assert_ref(&dag.nodes[2].inputs[0], 0, 0);
     }
 
-    /// In a loop with three inputs where two form a dead cycle and the third is
-    /// genuinely used, only the dead-cycle inputs are removed. BFS from the used
-    /// input does not propagate into the independent cycle.
+    /// In a loop where some inputs form a dead cycle and others are genuinely used,
+    /// only the dead-cycle inputs are removed.
     #[test]
     fn test_loop_partial_cycle_prunes_only_disconnected_component() {
         // Loop inputs: A (0), B (1), C (2).
