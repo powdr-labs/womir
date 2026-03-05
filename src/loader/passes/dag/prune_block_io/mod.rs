@@ -960,13 +960,17 @@ mod tests {
         // which cross-redirects to B on the back-edge.
         assert_eq!(dag.nodes[1].inputs.len(), 1, "block input should remain");
         assert_ref(&dag.nodes[1].inputs[0], 0, 0);
-        assert_eq!(
-            dag.nodes[1].output_types.len(),
-            1,
-            "block output should remain"
+
+        // The block output (FromInput(0)) IS correctly shortcircuited — it is
+        // provably always equal to X, regardless of the cross-redirect inside
+        // the loop.
+        assert!(
+            dag.nodes[1].output_types.is_empty(),
+            "block output should be shortcircuited"
         );
-        // Function return should still reference the block output.
-        assert_ref(&dag.nodes[2].inputs[0], 1, 0);
+
+        // Function return redirected to function input X directly.
+        assert_ref(&dag.nodes[2].inputs[0], 0, 0);
     }
 
     /// Same setup as test_loop_cross_input_redirection_prevents_block_shortcircuit,

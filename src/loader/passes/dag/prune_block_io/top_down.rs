@@ -189,7 +189,7 @@ fn process_dag(
             ) => {
                 let (condition, break_inputs) = node.inputs.split_last().unwrap();
                 // Handle the condition as a normal node input:
-                if let Some((_, input_idx)) = block_inputs([condition]).next() {
+                if let Some((_, input_idx)) = inputs_from_block_inputs([condition]).next() {
                     cs[0].input_usage[input_idx as usize] = InputUsage::Used;
                 }
 
@@ -198,7 +198,7 @@ fn process_dag(
             (Operation::BrTable { targets }, false) => {
                 let (condition, break_inputs) = node.inputs.split_last().unwrap();
                 // Handle the condition as a normal node input:
-                if let Some((_, input_idx)) = block_inputs([condition]).next() {
+                if let Some((_, input_idx)) = inputs_from_block_inputs([condition]).next() {
                     cs[0].input_usage[input_idx as usize] = InputUsage::Used;
                 }
 
@@ -245,7 +245,7 @@ fn process_dag(
             }
             (_, false) => {
                 // This is a normal node that might use some block inputs
-                for (_, input_idx) in block_inputs(&node.inputs) {
+                for (_, input_idx) in inputs_from_block_inputs(&node.inputs) {
                     // This block input is being used in some way...
                     cs[0].input_usage[input_idx as usize] = InputUsage::Used;
                 }
@@ -335,8 +335,10 @@ fn handle_block_node(
     }
 
     // Complete the input_usage: to be redirected, it is not enough that an input is
-    // only used in outputs: it also requires that those outputs are only written with that
-    // input.
+    // only used in break targets, it is also required that those targets are only
+    // written with that input. Otherwise, this input is being used as an alternative
+    // between different values, which makes the value of the target output unpredictable
+    // at this static analysis.
     for (input_idx, usage) in sub_entry.input_usage.iter_mut().enumerate() {
         if let InputUsage::RedirectedTo { slots_per_depth } = usage {
             let this_slots = &mut slots_per_depth[0];
@@ -441,6 +443,26 @@ fn handle_block_node(
                 *status = CanRemoveInput::Yes;
             }
         }
+
+        // For inputs that survived (No) and are still RedirectedTo, check if they
+        // cross-redirect to a slot with a different entry value. In a loop, entering
+        // the loop is also a kind of break into it, so input A writing to slot B is
+        // only a pure redirection if both received the same value on loop entry.
+        // If they differ, slot B can have either value (the entry value or A's value
+        // from the back-edge), which makes A meaningfully used — not a simple passthrough.
+        // We mark such inputs as Used so that depth_down() correctly reports them to
+        // the outer block, preventing incorrect removal.
+        for (input_idx, status) in can_remove_input.iter().enumerate() {
+            if *status == CanRemoveInput::No
+                && let InputUsage::RedirectedTo { slots_per_depth } =
+                    &sub_entry.input_usage[input_idx]
+                && slots_per_depth[0]
+                    .iter()
+                    .any(|slot| node.inputs[*slot as usize] != node.inputs[input_idx])
+            {
+                sub_entry.input_usage[input_idx] = InputUsage::Used;
+            }
+        }
     }
 
     let inputs_to_remove = can_remove_input
@@ -454,8 +476,9 @@ fn handle_block_node(
         .collect_vec();
 
     // Perform the actual removals in the sub-block.
-    if !inputs_to_remove.is_empty() || output_removed {
+    if !inputs_to_remove.is_empty() || output_removed || !outputs_to_remove.is_empty() {
         let br_inputs_to_remove = (BlockKind::Block == *kind).then_some(outputs_to_remove);
+
         output_removed |= remove_block_node_io(
             node_idx,
             origin_substitutions,
@@ -482,7 +505,7 @@ fn apply_substitutions(
             && let Some(subst) = input_substitutions.get(origin)
         {
             *origin = subst.unwrap_or_else(|| {
-                panic!("Input {input_idx} was removed but is still needed: {origin:?}")
+                panic!("Input to slot {input_idx} was removed but is still needed: {origin:?}")
             });
         }
     }
@@ -541,11 +564,9 @@ fn remove_block_node_io(
                 // Any input set for removal must be propagated to the inner blocks.
                 let mut sub_input_to_remove = Vec::new();
 
-                let mut parent_redir_map = vec![None; node.inputs.len()];
-                for (sub_input_idx, parent_input_idx) in block_inputs(&node.inputs) {
-                    parent_redir_map[sub_input_idx] = Some(parent_input_idx);
-                    if inputs_to_remove.binary_search(&parent_input_idx).is_ok() {
-                        sub_input_to_remove.push(sub_input_idx as u32);
+                for (node_input_idx, block_input_idx) in inputs_from_block_inputs(&node.inputs) {
+                    if inputs_to_remove.binary_search(&block_input_idx).is_ok() {
+                        sub_input_to_remove.push(node_input_idx as u32);
                     }
                 }
 
@@ -761,7 +782,7 @@ fn remove_break_inputs<T: Debug>(
 }
 
 /// Filters inputs that are block inputs, and returns their indices.
-fn block_inputs<'a>(
+fn inputs_from_block_inputs<'a>(
     inputs: impl IntoIterator<Item = &'a NodeInput>,
 ) -> impl Iterator<Item = (usize, u32)> {
     inputs.into_iter().enumerate().filter_map(|(idx, input)| {

@@ -92,7 +92,7 @@ impl TryFrom<&Op<'_>> for WasmValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeInput {
     Reference(ValueOrigin),
     Constant(WasmValue),
