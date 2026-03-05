@@ -899,4 +899,184 @@ mod tests {
         assert_eq!(sub_dag.block_data.len(), 1);
         assert_eq!(sub_dag.block_data[0], Redirection::FromInput(0));
     }
+
+    /// When a block passes its input to a loop as input A, and the loop's
+    /// back-edge redirects A to both itself (slot 0) AND to a different
+    /// input B (slot 1), removing the block input would be incorrect because
+    /// the other loop input B depends on A after the first iteration.
+    #[test]
+    fn test_loop_cross_input_redirection_prevents_block_shortcircuit() {
+        // Outer block: input X, output = X = FromInput(0).
+        // Inside: GlobalGet gives initial B, then Loop(A=X, B=GlobalGet_result).
+        // Loop back-edge: slot 0 ← A, slot 1 ← A (cross-redirection: A feeds B!).
+        // GlobalSet(B) makes B used; BrIf breaks to block with A, using B as selector.
+        let loop_sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32, ValType::I32]), // Node 0: A(0), B(1)
+                wasm_op_node(
+                    Op::GlobalSet { global_index: 0 },
+                    vec![input_ref(0, 1)],
+                    vec![],
+                ), // Node 1: GlobalSet(B) — side-effectful
+                GenericNode {
+                    operation: Operation::WASMOp(Op::BrIf { relative_depth: 1 }),
+                    inputs: vec![input_ref(0, 0), input_ref(0, 1)], // break_value=A, selector=B
+                    output_types: vec![],
+                }, // Node 2: BrIf breaks to outer block
+                br_node(0, vec![input_ref(0, 0), input_ref(0, 0)]), // Node 3: back-edge: slot 0←A, slot 1←A
+            ],
+            vec![Redirection::FromInput(0), Redirection::FromInput(0)], // A→A, B←A (cross-redirect)
+        );
+
+        let outer_sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32]), // Node 0: X
+                wasm_op_node(
+                    Op::GlobalGet { global_index: 0 },
+                    vec![],
+                    vec![ValType::I32],
+                ), // Node 1: initial value for B
+                loop_node(
+                    vec![input_ref(0, 0), input_ref(1, 0)], // A=X, B=GlobalGet
+                    vec![],
+                    loop_sub_dag,
+                ), // Node 2: the loop
+            ],
+            vec![Redirection::FromInput(0)], // block output = X
+        );
+
+        let mut dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32]), // Node 0: function input X
+                block_node(vec![input_ref(0, 0)], vec![ValType::I32], outer_sub_dag), // Node 1: outer block
+                br_node(0, vec![input_ref(1, 0)]), // Node 2: function return = block output 0
+            ],
+            vec![Redirection::NotRedirected],
+        );
+
+        prune_block_io(&mut dag);
+
+        // The block input should NOT be removed, because it feeds loop input A
+        // which cross-redirects to B on the back-edge.
+        assert_eq!(dag.nodes[1].inputs.len(), 1, "block input should remain");
+        assert_ref(&dag.nodes[1].inputs[0], 0, 0);
+        assert_eq!(
+            dag.nodes[1].output_types.len(),
+            1,
+            "block output should remain"
+        );
+        // Function return should still reference the block output.
+        assert_ref(&dag.nodes[2].inputs[0], 1, 0);
+    }
+
+    /// Same setup as test_loop_cross_input_redirection_prevents_block_shortcircuit,
+    /// but the loop back-edge redirects B to itself (instead of A→B cross-redirect).
+    /// In this case, A forms a dead self-loop cycle and the block input can be
+    /// safely removed along with the block output (shortcircuited).
+    #[test]
+    fn test_loop_self_redirection_allows_block_shortcircuit() {
+        // Same as above but back-edge: slot 0 ← A, slot 1 ← B (self-redirects only).
+        let loop_sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32, ValType::I32]), // Node 0: A(0), B(1)
+                wasm_op_node(
+                    Op::GlobalSet { global_index: 0 },
+                    vec![input_ref(0, 1)],
+                    vec![],
+                ), // Node 1: GlobalSet(B) — side-effectful
+                GenericNode {
+                    operation: Operation::WASMOp(Op::BrIf { relative_depth: 1 }),
+                    inputs: vec![input_ref(0, 0), input_ref(0, 1)], // break_value=A, selector=B
+                    output_types: vec![],
+                }, // Node 2: BrIf breaks to outer block
+                br_node(0, vec![input_ref(0, 0), input_ref(0, 1)]), // Node 3: back-edge: slot 0←A, slot 1←B
+            ],
+            vec![Redirection::FromInput(0), Redirection::FromInput(1)], // A←A, B←B (self-redirects)
+        );
+
+        let outer_sub_dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32]), // Node 0: X
+                wasm_op_node(
+                    Op::GlobalGet { global_index: 0 },
+                    vec![],
+                    vec![ValType::I32],
+                ), // Node 1: initial value for B
+                loop_node(
+                    vec![input_ref(0, 0), input_ref(1, 0)], // A=X, B=GlobalGet
+                    vec![],
+                    loop_sub_dag,
+                ), // Node 2: the loop
+            ],
+            vec![Redirection::FromInput(0)], // block output = X
+        );
+
+        let mut dag = redir_dag(
+            vec![
+                inputs_node(vec![ValType::I32]), // Node 0: function input X
+                block_node(vec![input_ref(0, 0)], vec![ValType::I32], outer_sub_dag), // Node 1: outer block
+                br_node(0, vec![input_ref(1, 0)]), // Node 2: function return = block output 0
+            ],
+            vec![Redirection::NotRedirected],
+        );
+
+        prune_block_io(&mut dag);
+
+        // Block input and output correctly shortcircuited.
+        assert!(
+            dag.nodes[1].inputs.is_empty(),
+            "block input should be removed"
+        );
+        assert!(
+            dag.nodes[1].output_types.is_empty(),
+            "block output should be removed"
+        );
+        // Function return redirected to function input X.
+        assert_ref(&dag.nodes[2].inputs[0], 0, 0);
+
+        let Operation::Block {
+            sub_dag: ref outer_sub,
+            ..
+        } = dag.nodes[1].operation
+        else {
+            panic!()
+        };
+        // Block's Inputs node: X removed.
+        assert!(outer_sub.nodes[0].output_types.is_empty());
+
+        // Loop: only B remains (from GlobalGet).
+        assert_eq!(
+            outer_sub.nodes[2].inputs.len(),
+            1,
+            "only B should remain as loop input"
+        );
+        assert_ref(&outer_sub.nodes[2].inputs[0], 1, 0); // GlobalGet output
+
+        let Operation::Block {
+            sub_dag: ref loop_sub,
+            ..
+        } = outer_sub.nodes[2].operation
+        else {
+            panic!()
+        };
+
+        // Loop Inputs: only B at slot 0.
+        assert_eq!(loop_sub.nodes[0].output_types.len(), 1);
+
+        // GlobalSet: uses B (now at slot 0).
+        assert_eq!(loop_sub.nodes[1].inputs.len(), 1);
+        assert_ref(&loop_sub.nodes[1].inputs[0], 0, 0);
+
+        // BrIf: only selector (B) remains (break input was removed with the output).
+        assert_eq!(loop_sub.nodes[2].inputs.len(), 1);
+        assert_ref(&loop_sub.nodes[2].inputs[0], 0, 0);
+
+        // Back-edge: only B (now at slot 0).
+        assert_eq!(loop_sub.nodes[3].inputs.len(), 1);
+        assert_ref(&loop_sub.nodes[3].inputs[0], 0, 0);
+
+        // Loop block_data: only B's self-redirection remains.
+        assert_eq!(loop_sub.block_data.len(), 1);
+        assert_eq!(loop_sub.block_data[0], Redirection::FromInput(0));
+    }
 }
