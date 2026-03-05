@@ -12,7 +12,7 @@
 //! Each pass seems to be quadratic in the number of total (nested included) nodes.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
     vec,
 };
@@ -51,9 +51,7 @@ enum InputUsage {
     /// Used to detect useless circular redirections in loop.
     RedirectedTo {
         /// The set of outputs slots this input is redirected to,
-        /// for each depth level. Duplicates slots are possible
-        /// while being built, but they are sorted and deduped
-        /// before being used.
+        /// for each depth level.
         slots_per_depth: VecDeque<Vec<u32>>,
     },
     /// This input is useful, and cannot be removed.
@@ -92,36 +90,46 @@ impl InputUsage {
         }
     }
 
-    fn combine(&mut self, other: InputUsage) {
+    /// Combines two input usages, moving towards the most restrictive.
+    /// Returns whether `self` was actually modified.
+    fn combine(&mut self, other: &InputUsage) -> bool {
         match (&mut *self, other) {
-            (InputUsage::Used, _) | (_, InputUsage::Used) => {
+            (InputUsage::Used, _) => false,
+            (_, InputUsage::Used) => {
                 *self = InputUsage::Used;
+                true
             }
             (
                 InputUsage::RedirectedTo {
                     slots_per_depth: self_slots,
                 },
                 InputUsage::RedirectedTo {
-                    slots_per_depth: mut other_slots,
+                    slots_per_depth: other_slots,
                 },
             ) => {
+                let mut changed = false;
                 // Ensures all depth levels in both will be merged.
                 if other_slots.len() > self_slots.len() {
-                    std::mem::swap(self_slots, &mut other_slots);
-                };
-
-                for (self_depth, mut other_depth) in self_slots.iter_mut().zip(other_slots) {
-                    // This swap ensures the smaller vec will be extended into the bigger vec.
-                    if other_depth.len() > self_depth.len() {
-                        std::mem::swap(self_depth, &mut other_depth);
-                    }
-                    self_depth.extend(other_depth);
+                    self_slots.resize_with(other_slots.len(), Vec::new);
+                    changed = true;
                 }
+
+                for (self_depth, other_depth) in self_slots.iter_mut().zip(other_slots.iter()) {
+                    let old_len = self_depth.len();
+                    self_depth.extend_from_slice(other_depth);
+                    self_depth.sort_unstable();
+                    self_depth.dedup();
+                    changed |= self_depth.len() != old_len;
+                }
+                changed
             }
             (InputUsage::Unused, InputUsage::Unused)
-            | (InputUsage::RedirectedTo { .. }, InputUsage::Unused) => (),
-            (InputUsage::Unused, other @ InputUsage::RedirectedTo { .. }) => {
-                *self = other;
+            | (InputUsage::RedirectedTo { .. }, InputUsage::Unused) => false,
+            (InputUsage::Unused, InputUsage::RedirectedTo { slots_per_depth }) => {
+                *self = InputUsage::RedirectedTo {
+                    slots_per_depth: slots_per_depth.clone(),
+                };
+                true
             }
         }
     }
@@ -238,7 +246,8 @@ fn process_dag(
                             output_idx,
                         }) = origin
                         {
-                            input_usage[*output_idx as usize].combine(sub_usage.depth_down());
+                            let downed = sub_usage.depth_down();
+                            input_usage[*output_idx as usize].combine(&downed);
                         }
                     }
                 }
@@ -334,144 +343,89 @@ fn handle_block_node(
         }
     }
 
-    // Complete the input_usage: to be redirected, it is not enough that an input is
-    // only used in break targets, it is also required that those targets are only
-    // written with that input. Otherwise, this input is being used as an alternative
-    // between different values, which makes the value of the target output unpredictable
-    // at this static analysis.
-    for (input_idx, usage) in sub_entry.input_usage.iter_mut().enumerate() {
-        if let InputUsage::RedirectedTo { slots_per_depth } = usage {
-            let this_slots = &mut slots_per_depth[0];
-            this_slots.sort_unstable();
-            this_slots.dedup();
-            if this_slots.iter().any(|slot| {
-                redirections[*slot as usize] != Redirection::FromInput(input_idx as u32)
-            }) {
-                *usage = InputUsage::Used;
-            }
-        }
-    }
-
-    /// Tells what inputs can be removed.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum CanRemoveInput {
-        Yes,
-        No,
-        Unknown,
-    }
-
-    // Calculate what inputs can be removed.
-    let mut can_remove_input = vec![CanRemoveInput::Unknown; node.inputs.len()];
-    for (input_idx, usage) in sub_entry.input_usage.iter().enumerate() {
-        let input_idx = input_idx as u32;
-        let removal_status = match usage {
-            // This input is not used at all in the sub-block, so it can be removed from the block inputs.
-            InputUsage::Unused => CanRemoveInput::Yes,
-            InputUsage::RedirectedTo { slots_per_depth } if slots_per_depth.len() <= 1 => {
-                // This not used as redirection to outside this block, so maybe it can be removed.
-                assert_eq!(slots_per_depth.len(), 1);
-                match kind {
-                    // The input is redirected as-is to some output that we already marked for removal,
-                    // so we can remove this input as well.
-                    BlockKind::Block => CanRemoveInput::Yes,
-                    // The loop case is handled below, because it is more complex.
-                    BlockKind::Loop => CanRemoveInput::Unknown,
-                }
-            }
-            // This input is used in some way, or redirected to some outer block, so it cannot be removed.
-            _ => CanRemoveInput::No,
-        };
-        can_remove_input[input_idx as usize] = removal_status;
-    }
-
-    if let BlockKind::Loop = kind {
-        // Resolve Unknown inputs in a loop by propagating CanRemoveInput::No backwards.
-        //
-        // Each Unknown input is only used as a redirection to other loop
-        // inputs (its slots). If any of those targets is No, then this
-        // input is also No. We propagate by building reverse edges
-        // (target → source) and BFS-ing from all No inputs.
-        // Whatever remains Unknown afterwards is safely removable (Yes).
-
-        // Build reverse edges map: target input slot → list of source input slots that are redirected to it.
-        let mut reverse_edges: Vec<Vec<u32>> = vec![vec![]; can_remove_input.len()];
-        for (source, status) in can_remove_input.iter().enumerate() {
-            if *status == CanRemoveInput::Unknown {
-                let InputUsage::RedirectedTo { slots_per_depth } = &sub_entry.input_usage[source]
-                else {
-                    unreachable!()
-                };
-                assert_eq!(slots_per_depth.len(), 1);
-                assert!(!slots_per_depth[0].is_empty());
-                for &target in &slots_per_depth[0] {
-                    reverse_edges[target as usize].push(source as u32);
-                }
-            }
-        }
-
-        // Seed the worklist with all No inputs.
-        let mut worklist = can_remove_input
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| **s == CanRemoveInput::No)
-            .map(|(i, _)| i as u32)
-            .collect_vec();
-
-        // Propagate No backwards through the reverse edges.
-        while let Some(target) = worklist.pop() {
-            for &source in &reverse_edges[target as usize] {
-                match can_remove_input[source as usize] {
-                    CanRemoveInput::Unknown => {
-                        can_remove_input[source as usize] = CanRemoveInput::No;
-                        worklist.push(source);
-                    }
-                    CanRemoveInput::Yes => {
-                        // This should not happen: an input to be removed can't feed into an input that must be kept.
-                        unreachable!()
-                    }
-                    CanRemoveInput::No => {
-                        // Already marked as No, nothing to do.
+    // Resolve input usage: determine which inputs are truly used vs. removable.
+    // For blocks, verify that each output slot is exclusively written by one input.
+    // For loops, propagate Used backward through the depth-0 redirection graph.
+    match kind {
+        BlockKind::Block => {
+            // To be redirected, it is not enough that an input is only used in break
+            // targets; those targets must also be exclusively written with that input.
+            // Otherwise, the target output's value is unpredictable at this static analysis.
+            for (input_idx, usage) in sub_entry.input_usage.iter_mut().enumerate() {
+                if let InputUsage::RedirectedTo { slots_per_depth } = usage {
+                    slots_per_depth[0].sort_unstable();
+                    slots_per_depth[0].dedup();
+                    if slots_per_depth[0].iter().any(|slot| {
+                        redirections[*slot as usize] != Redirection::FromInput(input_idx as u32)
+                    }) {
+                        *usage = InputUsage::Used;
                     }
                 }
             }
         }
+        BlockKind::Loop => {
+            // For loops, depth-0 slots are back-edge targets (i.e. loop inputs for
+            // the next iteration). We resolve each input's true nature by combining
+            // every depth-0 target's full InputUsage back into the source. This
+            // propagates Used, outer redirections, and new depth-0 targets
+            // transitively through the back-edge graph in a fixed-point loop.
+            // Whatever remains RedirectedTo with depth-0 only is a dead cycle.
+            let mut depth0_targets = Vec::new();
+            loop {
+                let mut changed = false;
+                for source_idx in 0..sub_entry.input_usage.len() {
+                    // Process any input that has depth-0 slots (back-edge targets).
+                    match &sub_entry.input_usage[source_idx] {
+                        InputUsage::RedirectedTo { slots_per_depth }
+                            if !slots_per_depth[0].is_empty() =>
+                        {
+                            depth0_targets.clear();
+                            depth0_targets.extend_from_slice(&slots_per_depth[0]);
+                        }
+                        _ => continue,
+                    };
 
-        // Everything still Unknown is part of a cycle that never
-        // reaches a useful input, so it can be removed.
-        for status in &mut can_remove_input {
-            if *status == CanRemoveInput::Unknown {
-                *status = CanRemoveInput::Yes;
-            }
-        }
+                    // Temporarily take the source out to allow borrowing targets
+                    // from the same slice (self-references combine with Unused,
+                    // which is a no-op).
+                    let mut source_usage = std::mem::replace(
+                        &mut sub_entry.input_usage[source_idx],
+                        InputUsage::Unused,
+                    );
 
-        // For inputs that survived (No) and are still RedirectedTo, check if they
-        // cross-redirect to a slot with a different entry value. In a loop, entering
-        // the loop is also a kind of break into it, so input A writing to slot B is
-        // only a pure redirection if both received the same value on loop entry.
-        // If they differ, slot B can have either value (the entry value or A's value
-        // from the back-edge), which makes A meaningfully used — not a simple passthrough.
-        // We mark such inputs as Used so that depth_down() correctly reports them to
-        // the outer block, preventing incorrect removal.
-        for (input_idx, status) in can_remove_input.iter().enumerate() {
-            if *status == CanRemoveInput::No
-                && let InputUsage::RedirectedTo { slots_per_depth } =
-                    &sub_entry.input_usage[input_idx]
-                && slots_per_depth[0]
-                    .iter()
-                    .any(|slot| node.inputs[*slot as usize] != node.inputs[input_idx])
-            {
-                sub_entry.input_usage[input_idx] = InputUsage::Used;
+                    for &target in &depth0_targets {
+                        if target as usize != source_idx {
+                            // Combine the target's usage into the source.
+                            changed |=
+                                source_usage.combine(&sub_entry.input_usage[target as usize]);
+                        }
+                    }
+
+                    sub_entry.input_usage[source_idx] = source_usage;
+                }
+                if !changed {
+                    break;
+                }
             }
         }
     }
 
-    let inputs_to_remove = can_remove_input
-        .into_iter()
+    // Calculate what inputs can be removed — same logic for both block kinds.
+    // After the resolution above, InputUsage directly determines removability:
+    // - Unused: always removable
+    // - RedirectedTo with depth-0 only: removable (passthrough for Block, dead cycle for Loop)
+    // - Used or RedirectedTo with outer redirections: not removable
+    let inputs_to_remove = sub_entry
+        .input_usage
+        .iter()
         .enumerate()
-        .filter_map(|(idx, s)| match s {
-            CanRemoveInput::Yes => Some(idx as u32),
-            CanRemoveInput::No => None,
-            CanRemoveInput::Unknown => panic!(),
+        .filter_map(|(idx, usage)| match usage {
+            InputUsage::Unused => Some(idx as u32),
+            InputUsage::RedirectedTo { slots_per_depth } if slots_per_depth.len() <= 1 => {
+                assert_eq!(slots_per_depth.len(), 1);
+                Some(idx as u32)
+            }
+            _ => None,
         })
         .collect_vec();
 
