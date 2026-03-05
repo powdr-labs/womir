@@ -12,7 +12,7 @@
 //! Each pass seems to be quadratic in the number of total (nested included) nodes.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     vec,
 };
@@ -52,7 +52,7 @@ enum InputUsage {
     RedirectedTo {
         /// The set of outputs slots this input is redirected to,
         /// for each depth level.
-        slots_per_depth: VecDeque<Vec<u32>>,
+        slots_per_depth: VecDeque<BTreeSet<u32>>,
     },
     /// This input is useful, and cannot be removed.
     Used,
@@ -110,15 +110,13 @@ impl InputUsage {
                 let mut changed = false;
                 // Ensures all depth levels in both will be merged.
                 if other_slots.len() > self_slots.len() {
-                    self_slots.resize_with(other_slots.len(), Vec::new);
+                    self_slots.resize_with(other_slots.len(), BTreeSet::new);
                     changed = true;
                 }
 
                 for (self_depth, other_depth) in self_slots.iter_mut().zip(other_slots.iter()) {
                     let old_len = self_depth.len();
-                    self_depth.extend_from_slice(other_depth);
-                    self_depth.sort_unstable();
-                    self_depth.dedup();
+                    self_depth.extend(other_depth);
                     changed |= self_depth.len() != old_len;
                 }
                 changed
@@ -150,9 +148,9 @@ impl InputUsage {
         };
 
         if slots_per_depth.len() <= depth as usize {
-            slots_per_depth.resize_with(depth as usize + 1, Vec::new);
+            slots_per_depth.resize_with(depth as usize + 1, BTreeSet::new);
         }
-        slots_per_depth[depth as usize].push(slot);
+        slots_per_depth[depth as usize].insert(slot);
     }
 }
 
@@ -352,14 +350,12 @@ fn handle_block_node(
             // targets; those targets must also be exclusively written with that input.
             // Otherwise, the target output's value is unpredictable at this static analysis.
             for (input_idx, usage) in sub_entry.input_usage.iter_mut().enumerate() {
-                if let InputUsage::RedirectedTo { slots_per_depth } = usage {
-                    slots_per_depth[0].sort_unstable();
-                    slots_per_depth[0].dedup();
-                    if slots_per_depth[0].iter().any(|slot| {
+                if let InputUsage::RedirectedTo { slots_per_depth } = usage
+                    && slots_per_depth[0].iter().any(|slot| {
                         redirections[*slot as usize] != Redirection::FromInput(input_idx as u32)
-                    }) {
-                        *usage = InputUsage::Used;
-                    }
+                    })
+                {
+                    *usage = InputUsage::Used;
                 }
             }
         }
@@ -380,7 +376,7 @@ fn handle_block_node(
                             if !slots_per_depth[0].is_empty() =>
                         {
                             depth0_targets.clear();
-                            depth0_targets.extend_from_slice(&slots_per_depth[0]);
+                            depth0_targets.extend(slots_per_depth[0].iter().copied());
                         }
                         _ => continue,
                     };
