@@ -291,9 +291,12 @@ fn process_node<'a, 'b, S: Settings<'a>>(
 
             // For robustness, the jump table has two indirections:
             // - jump_offset $selector
+            // - choice_0:
             // - jump jump_to_target_0
+            // - choice_1:
             // - jump jump_to_target_1
             // - ...
+            // - choice_n:
             // - jump jump_to_target_n
             // - jump_to_target_0:
             // - <actual instructions to jump to target 0>
@@ -318,18 +321,25 @@ fn process_node<'a, 'b, S: Settings<'a>>(
 
             let jump_instructions = jump_instructions
                 .into_iter()
-                .filter_map(|jump_directives| match jump_directives {
-                    JumpResult::PlainJump(target) => {
-                        // This is a plain jump, just emit it directly.
-                        directives.push(s.emit_jump(target).into());
-                        None
-                    }
-                    JumpResult::Directives(jump_directives) => {
-                        // This is a complex jump, we need to create a new label
-                        // and do one indirection.
-                        let jump_label = ctx.new_label(LabelType::Local);
-                        directives.push(s.emit_jump(jump_label.clone()).into());
-                        Some((jump_label, jump_directives))
+                .filter_map(|jump_directives| {
+                    // This label is not actually refereced statically, but it marks
+                    // one possible target of the relative jump. It is useful on backends
+                    // that rely on labels to find all the possible jump targets.
+                    let marker_label = ctx.new_label(LabelType::Local);
+                    directives.push(s.emit_label(&mut ctx, marker_label).into());
+                    match jump_directives {
+                        JumpResult::PlainJump(target) => {
+                            // This is a plain jump, just emit it directly.
+                            directives.push(s.emit_jump(target).into());
+                            None
+                        }
+                        JumpResult::Directives(jump_directives) => {
+                            // This is a complex jump, we need to create a new label
+                            // and do one indirection.
+                            let jump_label = ctx.new_label(LabelType::Local);
+                            directives.push(s.emit_jump(jump_label.clone()).into());
+                            Some((jump_label, jump_directives))
+                        }
                     }
                 })
                 // Collecting here is essential, because of side effects of pushing
