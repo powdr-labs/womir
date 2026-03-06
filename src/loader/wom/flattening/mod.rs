@@ -599,7 +599,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let jump_instructions = jump_instructions
                 .into_iter()
                 .filter_map(|jump_directives| {
-                    // This label is not actually refereced statically, but it marks
+                    // This label is not actually referenced statically, but it marks
                     // one possible target of the relative jump. It is useful on backends
                     // that rely on labels to find all the possible jump targets.
                     let marker_label = ctx.new_label(LabelType::Local);
