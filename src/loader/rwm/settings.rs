@@ -13,6 +13,8 @@ use crate::{
 /// Trait controlling the behavior of the flattening process.
 pub trait Settings<'a>: loader::Settings {
     /// Emits a directive to mark a code position.
+    ///
+    /// Every jump target is market with at least one label.
     fn emit_label(&self, c: &mut Context<'a, '_>, name: String)
     -> impl Into<Tree<Self::Directive>>;
 

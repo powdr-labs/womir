@@ -89,6 +89,8 @@ pub trait Settings<'a>: loader::Settings {
     }
 
     /// Emits a directive to mark a code position, and possibly a frame size.
+    ///
+    /// Every jump target is market with at least one label.
     fn emit_label(
         &self,
         c: &mut Context<'a, '_, Self>,

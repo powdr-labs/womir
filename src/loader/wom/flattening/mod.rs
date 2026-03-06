@@ -568,9 +568,12 @@ fn translate_single_node<'a, S: Settings<'a>>(
 
             // For robustness, the jump table has two indirections:
             // - jump_offset $selector
+            // - choice_0:
             // - jump jump_to_target_0
+            // - choice_1:
             // - jump jump_to_target_1
             // - ...
+            // - choice_n:
             // - jump jump_to_target_n
             // - jump_to_target_0:
             // - <actual instructions to jump to target 0>
@@ -596,6 +599,11 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let jump_instructions = jump_instructions
                 .into_iter()
                 .filter_map(|jump_directives| {
+                    // This label is not actually referenced statically, but it marks
+                    // one possible target of the relative jump. It is useful on backends
+                    // that rely on labels to find all the possible jump targets.
+                    let marker_label = ctx.new_label(LabelType::Local);
+                    directives.push(s.emit_label(ctx, marker_label, None).into());
                     match is_single_plain_jump::<S>(jump_directives.into()) {
                         Ok(target) => {
                             directives.push(s.emit_jump(target).into());
