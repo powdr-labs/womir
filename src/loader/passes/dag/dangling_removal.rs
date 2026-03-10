@@ -322,6 +322,46 @@ fn remove_indices_from_vec<T>(vec: &mut Vec<T>, sorted_ids: &[u32]) {
 
 /// Checks if a node has side effects
 fn may_have_side_effect(node: &RedirNode) -> bool {
+    if matches!(
+        &node.operation,
+        Operation::WASMOp(
+            Op::I32DivS
+                | Op::I32DivU
+                | Op::I32RemS
+                | Op::I32RemU
+                | Op::I64DivS
+                | Op::I64DivU
+                | Op::I64RemS
+                | Op::I64RemU
+                | Op::I32TruncF32S
+                | Op::I32TruncF32U
+                | Op::I32TruncF64S
+                | Op::I32TruncF64U
+                | Op::I64TruncF32S
+                | Op::I64TruncF32U
+                | Op::I64TruncF64S
+                | Op::I64TruncF64U
+                | Op::TableGet { .. }
+                | Op::I32Load { .. }
+                | Op::I64Load { .. }
+                | Op::F32Load { .. }
+                | Op::F64Load { .. }
+                | Op::I32Load8S { .. }
+                | Op::I32Load8U { .. }
+                | Op::I32Load16S { .. }
+                | Op::I32Load16U { .. }
+                | Op::I64Load8S { .. }
+                | Op::I64Load8U { .. }
+                | Op::I64Load16S { .. }
+                | Op::I64Load16U { .. }
+                | Op::I64Load32S { .. }
+                | Op::I64Load32U { .. }
+                | Op::V128Load { .. }
+        )
+    ) {
+        return true;
+    }
+
     if let Operation::WASMOp(
         // Constants are pure.
         Op::I32Const { .. }
