@@ -121,10 +121,9 @@ fn process_node<'a, 'b, S: Settings<'a>>(
                 Tree::Empty
             }
         }
-        Operation::Label { id } => {
-            s.emit_label(&mut ctx, format_label(id, LabelType::Local))
-                .into()
-        }
+        Operation::Label { id } => s
+            .emit_label(&mut ctx, format_label(id, LabelType::Local))
+            .into(),
         Operation::Loop { sub_dag, .. } => {
             let AllocatedDag {
                 nodes: loop_nodes,
