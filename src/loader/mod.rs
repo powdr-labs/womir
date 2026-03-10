@@ -21,8 +21,8 @@ use std::{
     thread, vec,
 };
 use wasmparser::{
-    CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, LocalsReader,
-    KnownCustom, MemoryType, Name, Operator, Parser, Payload, RefType, TableInit, TypeRef,
+    CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, KnownCustom,
+    LocalsReader, MemoryType, Name, Operator, Parser, Payload, RefType, TableInit, TypeRef,
     ValType, Validator, WasmFeatures,
 };
 
