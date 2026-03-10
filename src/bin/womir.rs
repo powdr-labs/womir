@@ -436,6 +436,54 @@ mod tests {
     }
 
     #[test]
+    fn test_loop_labels_are_namespaced() {
+        let wasm_path = format!(
+            "{}/sample-programs/fib_loop.wasm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let wasm_file = std::fs::read(wasm_path).unwrap();
+        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+
+        let processed_programs = [
+            program
+                .clone()
+                .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+                .unwrap(),
+            program
+                .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
+                .unwrap(),
+        ];
+
+        for processed in processed_programs {
+            let (_, labels) = womir::interpreter::linker::link(processed.functions, 1);
+            let all_labels = labels.keys().cloned().collect::<Vec<_>>();
+
+            assert!(
+                labels.keys().any(|label| label.starts_with("__loop_")),
+                "Expected at least one loop label in {all_labels:?}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .filter(|(label, _)| label.starts_with("__loop_"))
+                    .all(|(_, value)| value.namespace.as_deref() == Some("fib")),
+                "Expected loop label namespace metadata to be 'fib' in {labels:?}"
+            );
+            assert!(
+                labels.keys().any(|label| label.starts_with("__local_")),
+                "Expected at least one local label in {all_labels:?}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .filter(|(label, _)| label.starts_with("__local_"))
+                    .all(|(_, value)| value.namespace.as_deref() == Some("fib")),
+                "Expected local label namespace metadata to be 'fib' in {labels:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_add() {
         test_interpreter_from_sample_programs(
             "add.wasm",

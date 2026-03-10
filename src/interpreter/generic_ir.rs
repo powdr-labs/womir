@@ -59,9 +59,10 @@ impl<'a> Settings for GenericIrSetting<'a> {
 
 #[allow(refining_impl_trait)]
 impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
-    fn emit_label(&self, _c: &mut RwmCtx, name: String) -> Directive<'a> {
+    fn emit_label(&self, c: &mut RwmCtx, name: String) -> Directive<'a> {
         Directive::Label {
             id: name,
+            namespace: Some(c.function_namespace().to_string()),
             frame_size: None,
         }
     }
@@ -219,9 +220,10 @@ impl<'a> WomSettings<'a> for GenericIrSetting<'a> {
         true
     }
 
-    fn emit_label(&self, _c: &mut WomCtx, name: String, frame_size: Option<u32>) -> Directive<'a> {
+    fn emit_label(&self, c: &mut WomCtx, name: String, frame_size: Option<u32>) -> Directive<'a> {
         Directive::Label {
             id: name,
+            namespace: Some(c.function_namespace().to_string()),
             frame_size,
         }
     }
@@ -491,6 +493,7 @@ type Register = u32;
 pub enum Directive<'a> {
     Label {
         id: String,
+        namespace: Option<String>,
         /// If this label is the start of a frame, this is the size of the frame in words.
         frame_size: Option<u32>,
     },
@@ -622,9 +625,15 @@ impl linker::Directive for Directive<'_> {
     }
 
     fn as_label(&self) -> Option<linker::Label<'_>> {
-        if let Directive::Label { id, frame_size } = self {
+        if let Directive::Label {
+            id,
+            namespace,
+            frame_size,
+        } = self
+        {
             Some(linker::Label {
                 id,
+                namespace: namespace.as_deref(),
                 frame_size: *frame_size,
             })
         } else {
@@ -636,7 +645,7 @@ impl linker::Directive for Directive<'_> {
 impl Display for Directive<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Directive::Label { id, frame_size } => {
+            Directive::Label { id, frame_size, .. } => {
                 write!(f, "{id}")?;
                 if let Some(size) = frame_size {
                     write!(f, " [{size}]")?;
