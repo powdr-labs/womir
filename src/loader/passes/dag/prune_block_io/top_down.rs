@@ -278,9 +278,6 @@ fn handle_break_target<'a>(
 }
 
 struct BlockRemovals {
-    /// List of the indices of inputs removed from the block.
-    removed_inputs: Vec<u32>,
-
     /// Was any output removed?
     output_removed: bool,
 
@@ -442,7 +439,6 @@ fn handle_block_node(
     );
 
     BlockRemovals {
-        removed_inputs: inputs_to_remove,
         output_removed,
         inputs_usage,
     }
