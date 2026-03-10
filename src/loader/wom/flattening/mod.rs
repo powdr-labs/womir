@@ -178,10 +178,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let mut ctx = Context {
         program: prog,
         label_gen,
-        function_namespace: prog
-            .get_exported_func(func_idx)
-            .map(str::to_string)
-            .unwrap_or_else(|| format_label(func_idx, LabelType::Function)),
+        function_namespace: prog.get_function_namespace(func_idx),
         register_gen: RegisterGenerator {
             next_available: output_start + num_allocated_regs,
             settings: PhantomData,

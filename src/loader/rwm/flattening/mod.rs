@@ -39,10 +39,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let common_ctx = CommonContext {
         prog,
         label_gen,
-        function_namespace: prog
-            .get_exported_func(func_idx)
-            .map(str::to_string)
-            .unwrap_or_else(|| format_label(func_idx, LabelType::Function)),
+        function_namespace: prog.get_function_namespace(func_idx),
     };
 
     let mut ctrl_stack = VecDeque::new();
