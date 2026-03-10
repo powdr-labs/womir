@@ -220,21 +220,13 @@ fn process_dag(
                 }
             }
             (Operation::Block { .. }, is_func_body) => {
-                let mut removals =
+                let removals =
                     handle_block_node(node_idx, node, cs, &mut origin_substitutions, stats);
 
                 output_removed |= removals.output_removed;
 
                 // Update this block input usage based on the sub-block input usage and the removals we have done.
                 if !is_func_body {
-                    // Input usage was calculated based on the original block inputs,
-                    // so we need to adjust it based on the removals we have done.
-                    remove_indices(
-                        &mut removals.inputs_usage,
-                        removals.removed_inputs.iter().map(|r| *r as usize),
-                        |_, _| {},
-                    );
-
                     let input_usage = &mut cs[0].input_usage;
                     for (origin, sub_usage) in
                         node.inputs.iter().zip_eq(removals.inputs_usage.into_iter())
@@ -439,10 +431,20 @@ fn handle_block_node(
         );
     }
 
+    // Input usage was calculated based on the original block inputs,
+    // so, before returning it, we need to adjust it based on the removals
+    // we have done.
+    let mut inputs_usage = sub_entry.input_usage;
+    remove_indices(
+        &mut inputs_usage,
+        inputs_to_remove.iter().map(|r| *r as usize),
+        |_, _| {},
+    );
+
     BlockRemovals {
         removed_inputs: inputs_to_remove,
         output_removed,
-        inputs_usage: sub_entry.input_usage,
+        inputs_usage,
     }
 }
 
