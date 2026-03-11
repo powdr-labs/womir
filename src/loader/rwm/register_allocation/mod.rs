@@ -294,9 +294,11 @@ fn recursive_block_allocation<'a, S: Settings>(
                         // the arguments.
                         let output_sizes =
                             node.output_types.iter().map(|ty| word_count_type::<S>(*ty));
-                        let mut next_arg = oa[0]
-                            .occupation_tracker
-                            .allocate_fn_call(index, output_sizes);
+                        let mut next_arg = oa[0].occupation_tracker.allocate_fn_call(
+                            index,
+                            output_sizes,
+                            &mut number_of_saved_copies,
+                        );
 
                         // Try to place the function inputs at the expected argument slots.
                         for input in inputs {
