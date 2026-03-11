@@ -359,7 +359,7 @@ impl<'a> Module<'a> {
         self.function_names.get(&func_idx).copied()
     }
 
-    fn get_function_namespace(&self, func_idx: u32) -> String {
+    fn get_function_name(&self, func_idx: u32) -> String {
         self.get_exported_func(func_idx)
             .or_else(|| self.get_named_func(func_idx))
             .map(str::to_string)

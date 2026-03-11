@@ -39,7 +39,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let common_ctx = CommonContext {
         prog,
         label_gen,
-        function_namespace: prog.get_function_namespace(func_idx),
+        function_name: prog.get_function_name(func_idx),
     };
 
     let mut ctrl_stack = VecDeque::new();
@@ -672,7 +672,7 @@ fn calculate_ra_and_fp<'a, S: Settings<'a>>(
 struct CommonContext<'a, 'b> {
     prog: &'b Module<'a>,
     label_gen: &'b AtomicU32,
-    function_namespace: String,
+    function_name: String,
 }
 
 /// A context built per node being processed, that tracks the
@@ -794,8 +794,8 @@ impl<'a, 'b> Context<'a, 'b> {
         format_label(self.common.label_gen.next(), label_type)
     }
 
-    pub fn function_namespace(&self) -> &str {
-        &self.common.function_namespace
+    pub fn function_name(&self) -> &str {
+        &self.common.function_name
     }
 
     /// Returns a reference to the module being processed.
