@@ -283,11 +283,6 @@ fn recursive_block_allocation<'a, S: Settings>(
                             fn_inputs
                         };
 
-                        // TODO: implement a simple heuristic to try to avoid having to
-                        // copy the function outputs to the slots allocated for them by
-                        // the nodes who uses them as inputs. The details are in
-                        // TODO-optimizations.txt.
-
                         // On a given node index, the one after the last used slot is the
                         // start of the called function frame. From there, two slots are
                         // reserved for return address and frame pointer, and then come
