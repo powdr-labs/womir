@@ -62,7 +62,7 @@ impl<'a> RwmSettings<'a> for GenericIrSetting<'a> {
     fn emit_label(&self, c: &mut RwmCtx, name: String) -> Directive<'a> {
         Directive::Label {
             id: name,
-            namespace: Some(c.function_name().to_string()),
+            namespace: c.function_name().map(str::to_owned),
             frame_size: None,
         }
     }
@@ -223,7 +223,7 @@ impl<'a> WomSettings<'a> for GenericIrSetting<'a> {
     fn emit_label(&self, c: &mut WomCtx, name: String, frame_size: Option<u32>) -> Directive<'a> {
         Directive::Label {
             id: name,
-            namespace: Some(c.function_name().to_string()),
+            namespace: c.function_name().map(str::to_owned),
             frame_size,
         }
     }

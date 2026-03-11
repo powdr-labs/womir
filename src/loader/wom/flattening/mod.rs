@@ -53,7 +53,7 @@ pub struct Context<'a, 'b, S: Settings<'a> + ?Sized> {
     pub program: &'b Module<'a>,
     pub register_gen: RegisterGenerator<'a, S>,
     label_gen: &'b AtomicU32,
-    function_name: String,
+    function_name: Option<String>,
 }
 
 impl<'a, S: Settings<'a> + ?Sized> Context<'a, '_, S> {
@@ -61,8 +61,8 @@ impl<'a, S: Settings<'a> + ?Sized> Context<'a, '_, S> {
         format_label(self.label_gen.next(), label_type)
     }
 
-    pub fn function_name(&self) -> &str {
-        &self.function_name
+    pub fn function_name(&self) -> Option<&str> {
+        self.function_name.as_deref()
     }
 }
 
