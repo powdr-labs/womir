@@ -19,7 +19,7 @@ enum AllocationType {
     // A normal value allocation
     Value {
         origin: ValueOrigin,
-        explicitly_requested: bool,
+        do_not_relocate: bool,
     },
 }
 
@@ -100,7 +100,7 @@ impl OccupationTracker {
         self.insert(
             AllocationType::Value {
                 origin,
-                explicitly_requested: true,
+                do_not_relocate: true,
             },
             reg_range,
             live_range,
@@ -166,7 +166,7 @@ impl OccupationTracker {
             let alloc_idx = self.insert(
                 AllocationType::Value {
                     origin,
-                    explicitly_requested: true,
+                    do_not_relocate: true,
                 },
                 hint,
                 live_range,
@@ -267,7 +267,7 @@ impl OccupationTracker {
                     && !matches!(
                         alloc.kind,
                         AllocationType::Value {
-                            explicitly_requested: true,
+                            do_not_relocate: true,
                             ..
                         }
                     )
@@ -292,7 +292,7 @@ impl OccupationTracker {
                 self.insert(
                     AllocationType::Value {
                         origin,
-                        explicitly_requested: true,
+                        do_not_relocate: true,
                     },
                     natural_range,
                     live_range,
@@ -316,6 +316,18 @@ impl OccupationTracker {
         );
 
         frame_start
+    }
+
+    pub fn mark_as_fixed(&mut self, origin: &ValueOrigin) {
+        let alloc_idx = self.origin_map[origin];
+        if let AllocationType::Value {
+            do_not_relocate, ..
+        } = &mut self.occupation.allocations[alloc_idx].kind
+        {
+            *do_not_relocate = true;
+        } else {
+            unreachable!();
+        }
     }
 
     /// Tries to place the outputs of a function call at their natural
@@ -380,7 +392,7 @@ impl OccupationTracker {
                 if let Ok(alloc_idx) = self.allocate_where_possible(
                     origin,
                     (entry.original_range.len() as u32).try_into().unwrap(),
-                    live_range,
+                    live_range.clone(),
                     existing_entries,
                 ) {
                     new_allocs[entry_idx] = Some(alloc_idx);
@@ -519,7 +531,7 @@ impl OccupationTracker {
         Ok(self.insert(
             AllocationType::Value {
                 origin,
-                explicitly_requested: false,
+                do_not_relocate: false,
             },
             alloc,
             live_range,
