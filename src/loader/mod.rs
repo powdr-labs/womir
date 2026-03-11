@@ -359,10 +359,9 @@ impl<'a> Module<'a> {
         self.function_names.get(&func_idx).copied()
     }
 
-    fn get_function_name(&self, func_idx: u32) -> Option<String> {
+    fn get_function_name(&self, func_idx: u32) -> Option<&'a str> {
         self.get_exported_func(func_idx)
             .or_else(|| self.get_named_func(func_idx))
-            .map(str::to_string)
     }
 
     /// Returns the memory segment information, allocating if needed.

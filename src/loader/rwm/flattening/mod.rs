@@ -672,7 +672,7 @@ fn calculate_ra_and_fp<'a, S: Settings<'a>>(
 struct CommonContext<'a, 'b> {
     prog: &'b Module<'a>,
     label_gen: &'b AtomicU32,
-    function_name: Option<String>,
+    function_name: Option<&'a str>,
 }
 
 /// A context built per node being processed, that tracks the
@@ -795,7 +795,7 @@ impl<'a, 'b> Context<'a, 'b> {
     }
 
     pub fn function_name(&self) -> Option<&str> {
-        self.common.function_name.as_deref()
+        self.common.function_name
     }
 
     /// Returns a reference to the module being processed.
