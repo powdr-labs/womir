@@ -36,7 +36,11 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     func_idx: u32,
     dag: AllocatedDag<'a>,
 ) -> FunctionAsm<S::Directive> {
-    let common_ctx = CommonContext { prog, label_gen };
+    let common_ctx = CommonContext {
+        prog,
+        label_gen,
+        function_name: prog.get_function_name(func_idx),
+    };
 
     let mut ctrl_stack = VecDeque::new();
     ctrl_stack.push_front(StackEntry {
@@ -668,6 +672,7 @@ fn calculate_ra_and_fp<'a, S: Settings<'a>>(
 struct CommonContext<'a, 'b> {
     prog: &'b Module<'a>,
     label_gen: &'b AtomicU32,
+    function_name: Option<&'a str>,
 }
 
 /// A context built per node being processed, that tracks the
@@ -787,6 +792,10 @@ impl<'a, 'b> Context<'a, 'b> {
 
     pub fn new_label(&self, label_type: LabelType) -> String {
         format_label(self.common.label_gen.next(), label_type)
+    }
+
+    pub fn function_name(&self) -> Option<&str> {
+        self.common.function_name
     }
 
     /// Returns a reference to the module being processed.

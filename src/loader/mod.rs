@@ -21,9 +21,9 @@ use std::{
     thread, vec,
 };
 use wasmparser::{
-    CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, LocalsReader,
-    MemoryType, Operator, Parser, Payload, RefType, TableInit, TypeRef, ValType, Validator,
-    WasmFeatures,
+    CompositeInnerType, ElementItems, FuncValidatorAllocations, FunctionBody, KnownCustom,
+    LocalsReader, MemoryType, Name, Operator, Parser, Payload, RefType, TableInit, TypeRef,
+    ValType, Validator, WasmFeatures,
 };
 
 use crate::loader::passes::{
@@ -294,6 +294,8 @@ pub struct Module<'a> {
     pub start_function: Option<u32>,
     /// The exported functions.
     pub exported_functions: BTreeMap<u32, &'a str>,
+    /// Names from the custom "name" section, if present.
+    function_names: BTreeMap<u32, &'a str>,
     /// The initial memory, with the values to be set at startup.
     pub initial_memory: BTreeMap<u32, MemoryEntry>,
     /// The globals, in order of definition.
@@ -351,6 +353,15 @@ impl<'a> Module<'a> {
 
     fn get_exported_func(&self, func_idx: u32) -> Option<&'a str> {
         self.exported_functions.get(&func_idx).copied()
+    }
+
+    fn get_named_func(&self, func_idx: u32) -> Option<&'a str> {
+        self.function_names.get(&func_idx).copied()
+    }
+
+    fn get_function_name(&self, func_idx: u32) -> Option<&'a str> {
+        self.get_exported_func(func_idx)
+            .or_else(|| self.get_named_func(func_idx))
     }
 
     /// Returns the memory segment information, allocating if needed.
@@ -921,6 +932,7 @@ pub fn load_wasm<'a, S: Settings>(
             imported_functions: Vec::new(),
             start_function: None,
             exported_functions: BTreeMap::new(),
+            function_names: BTreeMap::new(),
             // This is left empty for most of this function, and will be filled just before returning.
             initial_memory: BTreeMap::new(),
             globals: Vec::new(),
@@ -1498,9 +1510,20 @@ pub fn load_wasm<'a, S: Settings>(
                     }
                 }
             }
-            Payload::CustomSection(_) => {
-                // TODO: read function names and debug information
-                // There is no validation here.
+            Payload::CustomSection(custom_section) => {
+                if let KnownCustom::Name(name_section) = custom_section.as_known() {
+                    for name in name_section {
+                        if let Name::Function(name_map) = name? {
+                            for named_func in name_map {
+                                let named_func = named_func?;
+                                ctx.m
+                                    .function_names
+                                    .insert(named_func.index, named_func.name);
+                            }
+                        }
+                    }
+                }
+                // There is no validation for custom sections.
             }
             Payload::UnknownSection { id, range, .. } => {
                 // This is also a section we don't support, and is matched

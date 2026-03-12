@@ -4,6 +4,7 @@ use crate::loader::FunctionAsm;
 
 pub struct Label<'a> {
     pub id: &'a str,
+    pub namespace: Option<&'a str>,
     pub frame_size: Option<u32>,
 }
 
@@ -17,6 +18,7 @@ pub struct LabelValue {
     pub pc: u32,
     pub frame_size: Option<u32>,
     pub func_idx: Option<u32>,
+    pub namespace: Option<String>,
 }
 
 pub fn link<D: Directive>(
@@ -30,7 +32,11 @@ pub fn link<D: Directive>(
         let func_pc = flat_program.len() as u32;
         for d in fun.directives {
             match d.as_label() {
-                Some(Label { id, frame_size }) => {
+                Some(Label {
+                    id,
+                    namespace,
+                    frame_size,
+                }) => {
                     let pc = flat_program.len() as u32;
                     labels.insert(
                         id.to_string(),
@@ -38,6 +44,7 @@ pub fn link<D: Directive>(
                             pc,
                             frame_size,
                             func_idx: (pc == func_pc).then_some(fun.func_idx),
+                            namespace: namespace.map(str::to_string),
                         },
                     );
                 }
