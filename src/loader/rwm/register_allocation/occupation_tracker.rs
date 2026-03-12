@@ -337,7 +337,7 @@ impl OccupationTracker {
         call_index: usize,
         mut to_rellocate: Vec<OutputForRelocations>,
     ) -> usize {
-        // The algorithm is a bit tricky, because in some rare (hopefully)
+        // The algorithm is a bit tricky, because in some (hopefully rare)
         // ocasions, the full relocation might fail. So we must clear our
         // relocation attempt, restore the failing entry to its original state
         // (that we know to be valid), remove the offending entry from the set
