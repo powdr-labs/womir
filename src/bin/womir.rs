@@ -436,6 +436,103 @@ mod tests {
     }
 
     #[test]
+    fn test_label_namespace_uses_exports_and_name_section() {
+        let wat = r#"
+            (module
+              (func $internal_fn (param $n i32) (result i32)
+                local.get $n
+                loop (param i32) (result i32)
+                  local.get $n
+                  br_if 1
+                  local.get $n
+                  i32.const 1
+                  i32.sub
+                  local.set $n
+                  local.get $n
+                  br 0
+                end)
+              (func $main_impl (result i32)
+                i32.const 3
+                call 0)
+              (export "main" (func 1))
+            )
+        "#;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wat_path = temp_dir.path().join("names_test.wat");
+        let wasm_path = temp_dir.path().join("names_test.wasm");
+        std::fs::write(&wat_path, wat).unwrap();
+
+        let output = Command::new("wat2wasm")
+            .arg("--debug-names")
+            .arg(&wat_path)
+            .arg("-o")
+            .arg(&wasm_path)
+            .output()
+            .expect("failed to run wat2wasm");
+        assert!(
+            output.status.success(),
+            "wat2wasm failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let wasm_file = std::fs::read(&wasm_path).unwrap();
+        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+
+        let processed_programs = [
+            program
+                .clone()
+                .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
+                .unwrap(),
+            program
+                .default_par_process_all_functions::<WomStages<GenericIrSetting>>()
+                .unwrap(),
+        ];
+
+        for processed in processed_programs {
+            let (_, labels) = womir::interpreter::linker::link(processed.functions, 1);
+            let all_labels = labels.keys().cloned().collect::<Vec<_>>();
+
+            // Function 0 is internal (not exported): namespace should come from name section.
+            assert_eq!(
+                labels["__func_0"].namespace.as_deref(),
+                Some("internal_fn"),
+                "internal function namespace should come from name section"
+            );
+
+            // Function 1 is exported as "main": export name takes precedence over name section.
+            assert_eq!(
+                labels["__func_1"].namespace.as_deref(),
+                Some("main"),
+                "exported function namespace should come from export name"
+            );
+
+            assert!(
+                labels.keys().any(|label| label.starts_with("__loop_")),
+                "Expected at least one loop label in {all_labels:?}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .filter(|(label, _)| label.starts_with("__loop_"))
+                    .all(|(_, value)| value.namespace.as_deref() == Some("internal_fn")),
+                "Expected loop label namespace metadata to be 'internal_fn' in {labels:?}"
+            );
+            assert!(
+                labels.keys().any(|label| label.starts_with("__local_")),
+                "Expected at least one local label in {all_labels:?}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .filter(|(label, _)| label.starts_with("__local_"))
+                    .all(|(_, value)| value.namespace.as_deref() == Some("internal_fn")),
+                "Expected local label namespace metadata to be 'internal_fn' in {labels:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_add() {
         test_interpreter_from_sample_programs(
             "add.wasm",

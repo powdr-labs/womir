@@ -53,11 +53,16 @@ pub struct Context<'a, 'b, S: Settings<'a> + ?Sized> {
     pub program: &'b Module<'a>,
     pub register_gen: RegisterGenerator<'a, S>,
     label_gen: &'b AtomicU32,
+    function_name: Option<String>,
 }
 
 impl<'a, S: Settings<'a> + ?Sized> Context<'a, '_, S> {
     pub fn new_label(&mut self, label_type: LabelType) -> String {
         format_label(self.label_gen.next(), label_type)
+    }
+
+    pub fn function_name(&self) -> Option<&str> {
+        self.function_name.as_deref()
     }
 }
 
@@ -173,6 +178,7 @@ pub fn flatten_dag<'a, S: Settings<'a>>(
     let mut ctx = Context {
         program: prog,
         label_gen,
+        function_name: prog.get_function_name(func_idx).map(str::to_owned),
         register_gen: RegisterGenerator {
             next_available: output_start + num_allocated_regs,
             settings: PhantomData,
@@ -382,6 +388,7 @@ fn translate_single_node<'a, S: Settings<'a>>(
             let mut loop_ctx = Context {
                 program: ctx.program,
                 label_gen: ctx.label_gen,
+                function_name: ctx.function_name.clone(),
                 register_gen: loop_reg_gen,
             };
             // Emit the listing for the loop itself.

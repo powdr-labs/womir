@@ -1,13 +1,5 @@
 This files describes all the optimizations ideas we left out for now.
 
-Things that are not needed if the WASM was optimized in the first place:
-
-- [prune_block_io]: if the same value is given at diferent input slots
-  of a block, we can unify them into a single slot and remap the block
-  inputs accordingly. This is not trivial to detect in loops, but
-  something of the sorts is already implemented, when detecting if some
-  input is redirected unchanged to the next iterations.
-
 Unlikely to be useful optimizations:
 
 - [(wom)prune_block_io]: sometimes a loop needs to take inputs just to output
@@ -25,6 +17,13 @@ Unlikely to be useful optimizations:
   solver or something like that.
 
 Likely to be useful optimizations
+
+- [prune_block_io]: if the same value is given at diferent input slots
+  of a block, we can unify them into a single slot and remap the block
+  inputs accordingly. Such case seems to be a common artifact of locals
+  lifting. This is not trivial to detect in loops, but something of the
+  sorts is already implemented, when detecting if some input is redirected
+  unchanged to the next iterations.
 
 - [(wom)]: if there are more than one loop nested inside each other, and
   the inner loop falls through the outer loop, which then breaks or falls
