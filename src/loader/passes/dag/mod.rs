@@ -1,6 +1,5 @@
 pub mod const_collapse;
 pub mod const_dedup;
-pub mod dangling_removal;
 pub mod prune_block_io;
 
 use std::{
@@ -93,7 +92,7 @@ impl TryFrom<&Op<'_>> for WasmValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeInput {
     Reference(ValueOrigin),
     Constant(WasmValue),
