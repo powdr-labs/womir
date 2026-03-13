@@ -283,20 +283,17 @@ fn recursive_block_allocation<'a, S: Settings>(
                             fn_inputs
                         };
 
-                        // TODO: implement a simple heuristic to try to avoid having to
-                        // copy the function outputs to the slots allocated for them by
-                        // the nodes who uses them as inputs. The details are in
-                        // TODO-optimizations.txt.
-
                         // On a given node index, the one after the last used slot is the
                         // start of the called function frame. From there, two slots are
                         // reserved for return address and frame pointer, and then come
                         // the arguments.
                         let output_sizes =
                             node.output_types.iter().map(|ty| word_count_type::<S>(*ty));
-                        let mut next_arg = oa[0]
-                            .occupation_tracker
-                            .allocate_fn_call(index, output_sizes);
+                        let mut next_arg = oa[0].occupation_tracker.allocate_fn_call(
+                            index,
+                            output_sizes,
+                            &mut number_of_saved_copies,
+                        );
 
                         // Try to place the function inputs at the expected argument slots.
                         for input in inputs {
@@ -364,7 +361,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                         origin.node,
                         origin.output_idx,
                     );
-                    if last_usage <= index && {
+                    let alloc_fixed = if last_usage <= index && {
                         assert_eq!(
                             last_usage, index,
                             "liveness bug: last usage is before a node that uses the value"
@@ -390,6 +387,7 @@ fn recursive_block_allocation<'a, S: Settings>(
                         if hint_used {
                             number_of_saved_copies += alloc_len;
                         }
+                        hint_used
                     } else if occupation_tracker
                         .liveness()
                         .query_if_input_is_redirected(input_idx as u32)
@@ -406,7 +404,18 @@ fn recursive_block_allocation<'a, S: Settings>(
                                 output_idx: input_idx as u32,
                             },
                             allocation,
-                        )
+                        );
+                        true
+                    } else {
+                        false
+                    };
+
+                    // If this input was used to save a copy here, it can't be improved upon
+                    // without reprocessing the loop. We mark it as fixed, in case it came
+                    // from a function call, so that it won't be considered for output relocation
+                    // at the call node.
+                    if alloc_fixed {
+                        oa[0].occupation_tracker.mark_as_fixed(origin);
                     }
                 }
 

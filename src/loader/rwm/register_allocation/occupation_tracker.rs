@@ -17,17 +17,21 @@ enum AllocationType {
     BlockedRegistersAtParent,
     ExplicitlyBlocked,
     // A normal value allocation
-    Value(ValueOrigin),
+    Value {
+        origin: ValueOrigin,
+        do_not_relocate: bool,
+    },
 }
 
 #[derive(Debug)]
 struct AllocationEntry {
     kind: AllocationType,
+    reg_range: Range<u32>,
     /// Starts at the node that creates the value, ends at the last node that uses it.
     /// Since the standard Range is exclusive at the end, this works nicely to prevent
     /// overlapping when the node who consumes the value immediately produces another
     /// at the same register.
-    reg_range: Range<u32>,
+    live_range: Range<usize>,
 }
 
 /// Maps occupied registers over nodes.
@@ -93,7 +97,14 @@ impl OccupationTracker {
             assert_eq!(existing_alloc.reg_range, reg_range);
         }
 
-        self.insert(AllocationType::Value(origin), reg_range, live_range);
+        self.insert(
+            AllocationType::Value {
+                origin,
+                do_not_relocate: true,
+            },
+            reg_range,
+            live_range,
+        );
     }
 
     /// Reserve a given register range, blocking it from being used.
@@ -112,36 +123,62 @@ impl OccupationTracker {
         origin: ValueOrigin,
         hint: Range<u32>,
     ) -> (bool, Option<usize>) {
-        let live_range = self.natural_liveness(origin);
-
-        if self.origin_map.contains_key(&origin) {
-            return (false, None);
-        }
-
-        let end_of_liveness = Some(live_range.end);
-        let existing_entries = self.occupation.reg_occupation(live_range.clone());
-        (
-            if overlaps_any(existing_entries.iter(), &hint) {
-                // Cannot allocate at hint, allocate elsewhere
+        match self.try_allocate_at(origin, hint.clone()) {
+            TryAllocResult::AlreadyAllocated => (false, None),
+            TryAllocResult::AllocatedAtHint {
+                end_of_liveness, ..
+            } => (true, Some(end_of_liveness)),
+            TryAllocResult::NotAllocated {
+                live_range,
+                existing_entries,
+            } => {
+                // Could not allocate at hint, allocate elsewhere
+                let end_of_liveness = live_range.end;
                 self.allocate_where_possible(
                     origin,
                     NonZeroU32::new(hint.len() as u32).expect("size must be non-zero"),
                     live_range,
                     existing_entries,
-                );
-                false
-            } else {
-                // Can allocate at hint
-                self.insert(AllocationType::Value(origin), hint, live_range);
-                true
-            },
-            end_of_liveness,
-        )
+                )
+                .expect("overflow in allocation");
+
+                (false, Some(end_of_liveness))
+            }
+        }
+    }
+
+    fn try_allocate_at(&mut self, origin: ValueOrigin, hint: Range<u32>) -> TryAllocResult {
+        let live_range = self.natural_liveness(origin);
+
+        if self.origin_map.contains_key(&origin) {
+            return TryAllocResult::AlreadyAllocated;
+        }
+
+        let existing_entries = self.occupation.reg_occupation(live_range.clone());
+        if overlaps_any(existing_entries.iter(), &hint) {
+            TryAllocResult::NotAllocated {
+                live_range,
+                existing_entries,
+            }
+        } else {
+            // Can allocate at hint
+            let end_of_liveness = live_range.end;
+            self.insert(
+                AllocationType::Value {
+                    origin,
+                    do_not_relocate: true,
+                },
+                hint,
+                live_range,
+            );
+            TryAllocResult::AllocatedAtHint { end_of_liveness }
+        }
     }
 
     /// Allocates a value wherever there is space, if not already allocated.
     ///
-    /// Returns the end of liveness range if the value was allocated.
+    /// Returns the end of liveness range if allocation suceeded.
+    /// Returns none if it was already allocated.
     pub fn try_allocate(&mut self, origin: ValueOrigin, size: NonZeroU32) -> Option<usize> {
         let live_range = self.natural_liveness(origin);
         let end_of_liveness = live_range.end;
@@ -151,7 +188,8 @@ impl OccupationTracker {
         }
 
         let existing_entries = self.occupation.reg_occupation(live_range.clone());
-        self.allocate_where_possible(origin, size, live_range, existing_entries);
+        self.allocate_where_possible(origin, size, live_range, existing_entries)
+            .expect("overflow in allocation");
 
         Some(end_of_liveness)
     }
@@ -173,6 +211,7 @@ impl OccupationTracker {
         &mut self,
         call_index: usize,
         output_sizes: impl Iterator<Item = u32>,
+        number_of_saved_copies: &mut usize,
     ) -> u32 {
         // For the frame start, find the highest allocated register at this point,
         // excluding the outputs of this call itself, that may already be allocated
@@ -184,7 +223,7 @@ impl OccupationTracker {
             .values_overlap(call_index)
             .filter_map(|entry_idx| {
                 let alloc = &self.occupation.allocations[*entry_idx];
-                if let AllocationType::Value(origin) = alloc.kind
+                if let AllocationType::Value { origin, .. } = alloc.kind
                     && origin.node == call_index
                 {
                     // This is an output of the call itself, ignore it.
@@ -198,15 +237,47 @@ impl OccupationTracker {
 
         self.call_frames.insert(call_index, frame_start);
 
-        // Either an output is already allocated, or it is not used, and its
-        // liveness must be the current node only.
+        // If an output is already allocated, and the placement was not
+        // explicitly requested, and it is not at its natural position,
+        // we remove it so we can try to relocate it at its natural position,
+        // to avoid unnecessary copies.
+        //
+        // If it was explicitly requested, we keep it there, because the value
+        // will be needed at that register anyway, so a copy is unavoidable.
+        //
+        // If the output is not allocated, it means it is not used, and its
+        // liveness must be the current node only. In this case, we also allocate
+        // at its natural position. It will not clobber any other allocation
+        // because it will expire immediately.
+        let mut to_relocate = Vec::new();
         let mut accumulated_offset = frame_start;
         for (output_idx, size) in output_sizes.enumerate() {
             let origin = ValueOrigin {
                 node: call_index,
                 output_idx: output_idx as u32,
             };
-            if !self.origin_map.contains_key(&origin) {
+            let natural_range = accumulated_offset..(accumulated_offset + size);
+
+            if let Some(alloc_idx) = self.origin_map.get(&origin) {
+                let alloc = &self.occupation.allocations[*alloc_idx];
+                if alloc.reg_range != natural_range
+                    && !matches!(
+                        alloc.kind,
+                        AllocationType::Value {
+                            do_not_relocate: true,
+                            ..
+                        }
+                    )
+                {
+                    // Maybe this output can be relocated at its natural position.
+                    to_relocate.push(OutputForRelocations {
+                        output_idx: origin.output_idx,
+                        natural_range,
+                        original_range: alloc.reg_range.clone(),
+                    });
+                    self.remove(origin);
+                }
+            } else {
                 // Output was not allocated yet, allocate it at its natural position
                 let live_range = self.natural_liveness(origin);
                 assert_eq!(
@@ -215,12 +286,21 @@ impl OccupationTracker {
                     "unused function output should have one node liveness"
                 );
 
-                let reg_range = accumulated_offset..(accumulated_offset + size);
-                self.insert(AllocationType::Value(origin), reg_range, live_range);
+                self.insert(
+                    AllocationType::Value {
+                        origin,
+                        do_not_relocate: true,
+                    },
+                    natural_range,
+                    live_range,
+                );
             }
 
             accumulated_offset += size;
         }
+
+        // Relocate the outputs that can be relocated at their natural position.
+        *number_of_saved_copies += self.relocate_fn_call_outputs(call_index, to_relocate);
 
         // Reserve the entire remaining space for the function frame.
         // May overlap with some unused function outputs, but that is fine.
@@ -233,6 +313,111 @@ impl OccupationTracker {
         );
 
         frame_start
+    }
+
+    pub fn mark_as_fixed(&mut self, origin: &ValueOrigin) {
+        let alloc_idx = self.origin_map[origin];
+        if let AllocationType::Value {
+            do_not_relocate, ..
+        } = &mut self.occupation.allocations[alloc_idx].kind
+        {
+            *do_not_relocate = true;
+        } else {
+            unreachable!();
+        }
+    }
+
+    /// Tries to place the outputs of a function call at their natural
+    /// position on the call frame.
+    fn relocate_fn_call_outputs(
+        &mut self,
+        call_index: usize,
+        mut to_relocate: Vec<OutputForRelocations>,
+    ) -> usize {
+        // The algorithm is a bit tricky, because in some (hopefully rare)
+        // ocasions, the full relocation might fail. So we must clear our
+        // relocation attempt, restore the failing entry to its original state
+        // (that we know to be valid), remove the offending entry from the set
+        // of outputs to relocate, and retry.
+        //
+        // Since every fail removes one entry from the set of outputs to relocate,
+        // this terminates.
+        let mut new_allocs = vec![None; to_relocate.len()];
+
+        'retry: loop {
+            let mut copies_saved = 0;
+
+            // First, try to set all the allocations at their natural position.
+            // Some might fail because of overlaps with other allocations, but
+            // that is fine.
+            for (entry_idx, entry) in to_relocate.iter().enumerate() {
+                let result = self.try_allocate_at(
+                    ValueOrigin {
+                        node: call_index,
+                        output_idx: entry.output_idx,
+                    },
+                    entry.natural_range.clone(),
+                );
+
+                match result {
+                    TryAllocResult::AlreadyAllocated => unreachable!(),
+                    TryAllocResult::NotAllocated { .. } => {
+                        // We try allocating later, so this doesn't block the natural
+                        // placement of the other outputs.
+                    }
+                    TryAllocResult::AllocatedAtHint { .. } => {
+                        // Allocated at natural position, great!
+                        new_allocs[entry_idx] = Some(entry.output_idx);
+                        copies_saved += entry.original_range.len();
+                    }
+                }
+            }
+
+            // Allocate the remaining wherever possible
+            for (entry_idx, entry) in to_relocate.iter().enumerate() {
+                if new_allocs[entry_idx].is_some() {
+                    continue;
+                }
+
+                let origin = ValueOrigin {
+                    node: call_index,
+                    output_idx: entry.output_idx,
+                };
+
+                let live_range = self.natural_liveness(origin);
+                let existing_entries = self.occupation.reg_occupation(live_range.clone());
+                if let Ok(()) = self.allocate_where_possible(
+                    origin,
+                    (entry.original_range.len() as u32).try_into().unwrap(),
+                    live_range.clone(),
+                    existing_entries,
+                ) {
+                    new_allocs[entry_idx] = Some(entry.output_idx);
+                } else {
+                    // Relocation failed!
+                    //
+                    // Clear our allocation attempt, restore the failing entry and remove it
+                    // from the set of outputs to relocate.
+                    for output_idx in new_allocs.iter().flatten().copied() {
+                        self.remove(ValueOrigin {
+                            node: call_index,
+                            output_idx,
+                        });
+                    }
+
+                    self.set_allocation(origin, entry.original_range.clone());
+
+                    to_relocate.swap_remove(entry_idx);
+                    new_allocs.truncate(to_relocate.len());
+                    new_allocs.fill(None);
+
+                    continue 'retry;
+                }
+            }
+
+            // If we got here, it means all entries were relocated successfully, we are done.
+            break copies_saved;
+        }
     }
 
     /// Creates a new occupation tracker, with all the allocations crossing the given
@@ -285,7 +470,7 @@ impl OccupationTracker {
     pub fn into_allocations(self, labels: HashMap<u32, usize>) -> Allocation {
         let mut nodes_outputs = BTreeMap::new();
         for alloc in &self.occupation.allocations {
-            if let AllocationType::Value(origin) = alloc.kind {
+            if let AllocationType::Value { origin, .. } = alloc.kind {
                 nodes_outputs.insert(origin, alloc.reg_range.clone());
             }
         }
@@ -308,7 +493,7 @@ impl OccupationTracker {
                 AllocationType::SubBlockInternal => 'S',
                 AllocationType::BlockedRegistersAtParent => 'B',
                 AllocationType::ExplicitlyBlocked => 'E',
-                AllocationType::Value(_) => 'A',
+                AllocationType::Value { .. } => 'A',
             };
             writeln!(
                 file,
@@ -328,7 +513,7 @@ impl OccupationTracker {
         size: NonZeroU32,
         live_range: Range<usize>,
         existing_entries: Vec<Range<u32>>,
-    ) {
+    ) -> Result<(), ()> {
         // Track the end of the current occupied space
         let mut curr_end = 0;
 
@@ -342,25 +527,69 @@ impl OccupationTracker {
         }
 
         // Allocate at the first gap found (or at the end).
-        let alloc = curr_end
-            ..(curr_end
-                .checked_add(size.get())
-                .expect("overflow in allocation"));
-        self.insert(AllocationType::Value(origin), alloc, live_range);
+        let alloc = curr_end..(curr_end.checked_add(size.get()).ok_or(())?);
+        self.insert(
+            AllocationType::Value {
+                origin,
+                do_not_relocate: false,
+            },
+            alloc,
+            live_range,
+        );
+        Ok(())
     }
 
     fn insert(&mut self, kind: AllocationType, reg_range: Range<u32>, live_range: Range<usize>) {
         let entry_idx = self.occupation.allocations.len();
-        if let AllocationType::Value(origin) = kind {
+        if let AllocationType::Value { origin, .. } = kind {
             self.origin_map.insert(origin, entry_idx);
         }
-        self.occupation
-            .allocations
-            .push(AllocationEntry { kind, reg_range });
+
         // Force insert because live ranges are not unique.
         self.occupation
             .alive_interval_map
-            .force_insert(live_range, entry_idx);
+            .force_insert(live_range.clone(), entry_idx);
+
+        self.occupation.allocations.push(AllocationEntry {
+            kind,
+            reg_range,
+            live_range,
+        });
+    }
+
+    fn remove(&mut self, origin: ValueOrigin) {
+        // Remove the entry from the origin_map
+        let entry_idx = self
+            .origin_map
+            .remove(&origin)
+            .expect("origin not allocated");
+
+        // Remove the entry itself
+        let alloc = self.occupation.allocations.swap_remove(entry_idx);
+
+        // Remove the entry from the interval map.
+        self.occupation
+            .alive_interval_map
+            .remove_where(alloc.live_range.clone(), |idx| *idx == entry_idx);
+
+        // Now we need to fix the references to the entry moved by swap_remove.
+        let old_idx = self.occupation.allocations.len();
+        if entry_idx == old_idx {
+            // We removed the last entry, no need to fix anything.
+            return;
+        }
+
+        let moved_entry = &self.occupation.allocations[entry_idx];
+        if let AllocationType::Value { origin, .. } = moved_entry.kind {
+            *self.origin_map.get_mut(&origin).unwrap() = entry_idx;
+        }
+
+        self.occupation
+            .alive_interval_map
+            .remove_where(moved_entry.live_range.clone(), |idx| *idx == old_idx);
+        self.occupation
+            .alive_interval_map
+            .force_insert(moved_entry.live_range.clone(), entry_idx);
     }
 
     fn natural_liveness(&self, origin: ValueOrigin) -> Range<usize> {
@@ -378,6 +607,23 @@ impl OccupationTracker {
             range
         }
     }
+}
+
+enum TryAllocResult {
+    AlreadyAllocated,
+    AllocatedAtHint {
+        end_of_liveness: usize,
+    },
+    NotAllocated {
+        live_range: Range<usize>,
+        existing_entries: Vec<Range<u32>>,
+    },
+}
+
+struct OutputForRelocations {
+    output_idx: u32,
+    original_range: Range<u32>,
+    natural_range: Range<u32>,
 }
 
 fn overlaps_any<'a, T>(mut set: impl Iterator<Item = &'a Range<T>>, target: &Range<T>) -> bool
