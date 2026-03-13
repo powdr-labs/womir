@@ -532,7 +532,10 @@ fn emit_jump<'a, S: Settings<'a>>(
     let target_entry = &ctrl_stack[target.depth as usize];
     let (output_node_idx, target) = match target.kind {
         TargetType::Loop => {
-            let loop_label = target_entry.loop_label.as_ref().expect("Loop target should have a loop label");
+            let loop_label = target_entry
+                .loop_label
+                .as_ref()
+                .expect("Loop target should have a loop label");
             // This is a jump to a new loop iteration.
             // The node whose outputs we want are the Inputs node of the loop (index 0).
             (0, loop_label.as_str().into())

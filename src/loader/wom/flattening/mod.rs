@@ -305,7 +305,12 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // If None, this loop does not return from the function nor iterate to any outer loop.
             let shallowest_iter_or_ret = break_targets
                 .iter()
-                .find(|(_, targets)| matches!(targets.first(), Some(TargetType::Function | TargetType::Loop)))
+                .find(|(_, targets)| {
+                    matches!(
+                        targets.first(),
+                        Some(TargetType::Function | TargetType::Loop)
+                    )
+                })
                 .map(|(depth, _)| *depth);
 
             let mut saved_fps = BTreeSet::new();
