@@ -305,7 +305,12 @@ fn translate_single_node<'a, S: Settings<'a>>(
             // If None, this loop does not return from the function nor iterate to any outer loop.
             let shallowest_iter_or_ret = break_targets
                 .iter()
-                .find(|(_, targets)| targets.first() == Some(&TargetType::FunctionOrLoop))
+                .find(|(_, targets)| {
+                    matches!(
+                        targets.first(),
+                        Some(TargetType::Function | TargetType::Loop)
+                    )
+                })
                 .map(|(depth, _)| *depth);
 
             let mut saved_fps = BTreeSet::new();
@@ -952,52 +957,59 @@ fn emit_jump<'a, S: Settings<'a>>(
         }
         BreakTarget {
             depth,
-            kind: TargetType::FunctionOrLoop,
+            kind: TargetType::Function,
         } => {
             let target_stack_entry = &ctrl_stack[*depth as usize];
-            match &target_stack_entry.entry_type {
+            let CtrlStackType::TopLevelFunction { output_regs } = &target_stack_entry.entry_type
+            else {
+                panic!("Function break target must point to TopLevelFunction, not Loop")
+            };
+            // This is a function return.
+            match &curr_entry.entry_type {
                 CtrlStackType::TopLevelFunction { output_regs } => {
-                    // This is a function return.
-                    match &curr_entry.entry_type {
-                        CtrlStackType::TopLevelFunction { output_regs } => {
-                            // This is a return from the toplevel frame.
-                            top_level_return::<S>(
-                                s,
-                                ctx,
-                                ret_info.as_ref().unwrap(),
-                                &curr_entry.allocation,
-                                node_inputs,
-                                output_regs,
-                            )
-                        }
-                        CtrlStackType::Loop(loop_entry) => {
-                            // This is a return from a loop.
-                            assert_eq!(loop_entry.layout.ret_info.as_ref(), ret_info);
-                            return_from_loop::<S>(
-                                s,
-                                ctx,
-                                ctrl_stack.len(),
-                                output_regs,
-                                node_inputs,
-                                &curr_entry.allocation,
-                                loop_entry,
-                            )
-                        }
-                    }
-                }
-                CtrlStackType::Loop(loop_entry) => {
-                    // This is a loop iteration.
-                    jump_into_loop(
+                    // This is a return from the toplevel frame.
+                    top_level_return::<S>(
                         s,
                         ctx,
-                        loop_entry,
-                        *depth as i64,
-                        ret_info,
-                        curr_entry,
+                        ret_info.as_ref().unwrap(),
+                        &curr_entry.allocation,
                         node_inputs,
+                        output_regs,
+                    )
+                }
+                CtrlStackType::Loop(loop_entry) => {
+                    // This is a return from a loop.
+                    assert_eq!(loop_entry.layout.ret_info.as_ref(), ret_info);
+                    return_from_loop::<S>(
+                        s,
+                        ctx,
+                        ctrl_stack.len(),
+                        output_regs,
+                        node_inputs,
+                        &curr_entry.allocation,
+                        loop_entry,
                     )
                 }
             }
+        }
+        BreakTarget {
+            depth,
+            kind: TargetType::Loop,
+        } => {
+            let target_stack_entry = &ctrl_stack[*depth as usize];
+            let CtrlStackType::Loop(loop_entry) = &target_stack_entry.entry_type else {
+                panic!("Loop break target must point to Loop, not TopLevelFunction")
+            };
+            // This is a loop iteration.
+            jump_into_loop(
+                s,
+                ctx,
+                loop_entry,
+                *depth as i64,
+                ret_info,
+                curr_entry,
+                node_inputs,
+            )
         }
     }
 }

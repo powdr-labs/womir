@@ -531,35 +531,36 @@ fn emit_jump<'a, S: Settings<'a>>(
 
     let target_entry = &ctrl_stack[target.depth as usize];
     let (output_node_idx, target) = match target.kind {
-        TargetType::FunctionOrLoop => {
-            match &target_entry.loop_label {
-                Some(loop_label) => {
-                    // This is a jump to a new loop iteration.
-                    // The node whose outputs we want are the Inputs node of the loop (index 0).
-                    (0, loop_label.as_str().into())
-                }
-                None => {
-                    // This is a return from the function.
-                    // Calculate the outputs registers from the function type.
-                    let func_type = &ctx.common.prog.get_func_type(func_idx).ty;
-                    let ret_types = func_type.results();
-                    // They are tightly packed at the top of the frame.
-                    let mut fn_output_size = 0;
-                    let input_ranges = ranges_for_types::<S>(ret_types, &mut fn_output_size);
+        TargetType::Loop => {
+            let loop_label = target_entry
+                .loop_label
+                .as_ref()
+                .expect("Loop target should have a loop label");
+            // This is a jump to a new loop iteration.
+            // The node whose outputs we want are the Inputs node of the loop (index 0).
+            (0, loop_label.as_str().into())
+        }
+        TargetType::Function => {
+            assert!(target_entry.loop_label.is_none());
+            // This is a return from the function.
+            // Calculate the outputs registers from the function type.
+            let func_type = &ctx.common.prog.get_func_type(func_idx).ty;
+            let ret_types = func_type.results();
+            // They are tightly packed at the top of the frame.
+            let mut fn_output_size = 0;
+            let input_ranges = ranges_for_types::<S>(ret_types, &mut fn_output_size);
 
-                    // Use the current block's allocation to source the copied inputs:
-                    let mut directives = copy_inputs_if_needed(s, ctx, inputs, input_ranges);
+            // Use the current block's allocation to source the copied inputs:
+            let mut directives = copy_inputs_if_needed(s, ctx, inputs, input_ranges);
 
-                    // Also calculate the space needed by the function inputs, to calculate where
-                    // the return address and caller frame pointer are stored.
-                    let fn_input_size = word_count_types::<S>(func_type.params());
-                    let (ra, caller_fp) = calculate_ra_and_fp::<S>(fn_input_size, fn_output_size);
+            // Also calculate the space needed by the function inputs, to calculate where
+            // the return address and caller frame pointer are stored.
+            let fn_input_size = word_count_types::<S>(func_type.params());
+            let (ra, caller_fp) = calculate_ra_and_fp::<S>(fn_input_size, fn_output_size);
 
-                    directives.push(s.emit_return(ctx, ra, caller_fp).into());
+            directives.push(s.emit_return(ctx, ra, caller_fp).into());
 
-                    return JumpResult::Directives(directives);
-                }
-            }
+            return JumpResult::Directives(directives);
         }
         TargetType::Label(id) => {
             // This is a jump to a label in the current function.

@@ -27,8 +27,10 @@ pub struct BreakTarget {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TargetType {
-    /// The target is the function or loop itself.
-    FunctionOrLoop,
+    /// The target is the function itself (return).
+    Function,
+    /// The target is a loop back-edge (new iteration).
+    Loop,
     /// The target is a label within the loop or function body.
     Label(u32),
 }
@@ -94,7 +96,7 @@ impl<'a, T> GenericBlocklessDag<'a, T> {
         let mut new_nodes = Vec::new();
 
         let mut ctrl_stack = VecDeque::from([BlockStack {
-            target_type: TargetType::FunctionOrLoop,
+            target_type: TargetType::Function,
             frame_level: 0,
         }]);
 
@@ -195,7 +197,7 @@ fn process_nodes<'a, T>(
                     let mut loop_nodes = Vec::new();
 
                     ctrl_stack.push_front(BlockStack {
-                        target_type: TargetType::FunctionOrLoop,
+                        target_type: TargetType::Loop,
                         frame_level: ctrl_stack[0].frame_level + 1,
                     });
 

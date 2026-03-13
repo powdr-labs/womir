@@ -281,7 +281,7 @@ pub fn optimistic_allocation<'a, S: Settings<'a>>(
             let origin = inputs.and_then(|inputs| {
                 match &inputs[input_idx] {
                     NodeInput::Reference(origin) => {
-                        if origin.node == 0 && target.kind == TargetType::FunctionOrLoop {
+                        if origin.node == 0 && target.kind == TargetType::Function {
                             // The target is the function output and the origin is the function
                             // input, due to calling convention they must necessarily be different
                             // registers, so we can't do optimistic allocation.

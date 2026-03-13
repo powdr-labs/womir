@@ -168,7 +168,7 @@ fn handle_break<'a, S: Settings>(
 
     let curr_depth = oa.len() as u32 - 1;
     match break_target.kind {
-        TargetType::FunctionOrLoop if break_target.depth >= curr_depth => {
+        TargetType::Function => {
             // This is a function return. We must try to place the outputs in the expected registers
             // for function return.
             assert!(break_target.depth == curr_depth);
@@ -182,7 +182,7 @@ fn handle_break<'a, S: Settings>(
                 next_reg += num_words;
             }
         }
-        TargetType::FunctionOrLoop => {
+        TargetType::Loop => {
             // This is a break to a loop iteration.
 
             // For each input, we try to mirror the allocation expected by the loop input.
