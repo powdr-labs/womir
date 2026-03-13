@@ -3,10 +3,10 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::loader::{
-    CommonStages, FunctionAsm, FunctionProcessingStage, Module, Statistics, wom::settings::Settings,
+    CommonStages, FunctionAsm, FunctionProcessingStage, Module, Statistics,
+    passes::dumb_jump_removal, wom::settings::Settings,
 };
 
-pub mod dumb_jump_removal;
 pub mod flattening;
 pub mod settings;
 
