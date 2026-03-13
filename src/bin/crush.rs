@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use womir::{
+use crush::{
     interpreter::{
         ExecutionModel, ExternalFunctions, Interpreter, MemoryAccessor,
         generic_ir::{Directive, GenericIrSetting},
@@ -170,13 +170,13 @@ fn main() -> wasmparser::Result<()> {
         }
     }
 
-    /// Simple CLI for the `womir` binary.
+    /// Simple CLI for the `crush` binary.
     ///
     /// Two subcommands are supported:
     ///   compile <wasm-file>
     ///   run <wasm-file> <function> --func-inputs 1,2 --data-inputs 3,4
     #[derive(Parser)]
-    #[command(author, version, about = "womir tool: compile or run a Wasm file", long_about = None)]
+    #[command(author, version, about = "crush tool: compile or run a Wasm file", long_about = None)]
     struct Cli {
         /// Execution model (wom = write-once registers, rw = infinite/read-write registers)
         #[arg(short = 'e', long = "exec-model", default_value = "rw", global = true, value_parser = parse_exec_model)]
@@ -224,7 +224,7 @@ fn main() -> wasmparser::Result<()> {
     match cli.command {
         Command::Compile { wasm_file } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
-            let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_bytes)?;
+            let program = crush::loader::load_wasm(GenericIrSetting::default(), &wasm_bytes)?;
             let program = process_functions(cli.exec_model, program)?;
 
             if let Err(err) = dump_ir(&program) {
@@ -242,7 +242,7 @@ fn main() -> wasmparser::Result<()> {
             trace,
         } => {
             let wasm_bytes = std::fs::read(&wasm_file).unwrap();
-            let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_bytes)?;
+            let program = crush::loader::load_wasm(GenericIrSetting::default(), &wasm_bytes)?;
             let program = process_functions(cli.exec_model, program)?;
 
             if let Err(err) = dump_ir(&program) {
@@ -307,7 +307,7 @@ mod tests {
     use std::process::Command;
     use tempfile::NamedTempFile;
     use test_log::test;
-    use womir::interpreter::NULL_REF;
+    use crush::interpreter::NULL_REF;
 
     fn test_interpreter(
         path: &str,
@@ -320,7 +320,7 @@ mod tests {
             "Run function: {main_function} with inputs: {func_inputs:?} and data inputs: {data_inputs:?}"
         );
         let wasm_file = std::fs::read(path).unwrap();
-        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+        let program = crush::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
 
         let pipelines = [
             (
@@ -477,7 +477,7 @@ mod tests {
         );
 
         let wasm_file = std::fs::read(&wasm_path).unwrap();
-        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+        let program = crush::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
 
         let processed_programs = [
             program
@@ -490,7 +490,7 @@ mod tests {
         ];
 
         for processed in processed_programs {
-            let (_, labels) = womir::interpreter::linker::link(processed.functions, 1);
+            let (_, labels) = crush::interpreter::linker::link(processed.functions, 1);
             let all_labels = labels.keys().cloned().collect::<Vec<_>>();
 
             // Function 0 is internal (not exported): namespace should come from name section.
@@ -580,7 +580,7 @@ mod tests {
             .map(|p| std::fs::read(format!("{base}/{p}")).expect("failed to read binary input"))
             .collect();
 
-        let program = womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+        let program = crush::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
 
         let program = program
             .default_par_process_all_functions::<RWMStages<GenericIrSetting>>()
@@ -828,7 +828,7 @@ mod tests {
                     println!("Testing module: {} at line {line}", mod_name.display());
                     let wasm_file = std::fs::read(mod_name).unwrap();
                     let program =
-                        womir::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
+                        crush::loader::load_wasm(GenericIrSetting::default(), &wasm_file).unwrap();
 
                     // TODO: change the processing stages interface so we can process the common
                     // stages just once, and resume for each independent pipeline (WOM and RWM).

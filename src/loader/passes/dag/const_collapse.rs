@@ -137,7 +137,7 @@ impl ConstantInputFinder {
             let origin = match input {
                 NodeInput::Reference(value_origin) => value_origin,
                 NodeInput::Constant(wasm_value) => {
-                    // In default Womir pipeline, there shouldn't be any constant
+                    // In default crush pipeline, there shouldn't be any constant
                     // before this pass. But we handle it anyway, in case this pass
                     // is used in a different context by the user.
                     return MaybeConstant::CollapsedConstant(wasm_value.clone());

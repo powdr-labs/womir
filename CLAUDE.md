@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-WOMIR (Write Once Memory IR) is a compiler from WebAssembly to an intermediate representation that flattens stack and locals into abstract infinite registers. It supports two execution models: write-once memory (WOM) and read-write (RW) registers, making it suitable for zkVMs and other specialized virtual machines.
+crush is a compiler from WebAssembly to an intermediate representation that flattens stack and locals into abstract infinite registers. It supports two execution models: write-once memory (WOM) and read-write (RW) registers, making it suitable for zkVMs and other specialized virtual machines.
 
 ## Common Development Commands
 
@@ -19,16 +19,16 @@ cargo test
 cargo test test_name
 
 # Compile a WASM file (dumps IR to ir_dump.txt, default: WOM pipeline)
-cargo run --bin womir -- compile <wasm_file>
+cargo run --bin crush -- compile <wasm_file>
 
 # Compile using the read-write registers pipeline
-cargo run --bin womir -- -e rw compile <wasm_file>
+cargo run --bin crush -- -e rw compile <wasm_file>
 
 # Run a function from a WASM file
-cargo run --bin womir -- run <wasm_file> <function> --func-inputs 1,2 --data-inputs 3,4
+cargo run --bin crush -- run <wasm_file> <function> --func-inputs 1,2 --data-inputs 3,4
 
 # Run with read-write registers execution model
-cargo run --bin womir -- -e rw run <wasm_file> <function> --func-inputs 1,2 --data-inputs 3,4
+cargo run --bin crush -- -e rw run <wasm_file> <function> --func-inputs 1,2 --data-inputs 3,4
 
 # Format code
 cargo fmt
