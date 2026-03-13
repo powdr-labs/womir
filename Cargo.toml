@@ -1,6 +1,6 @@
 [package]
-name = "womir"
-description = "Compiles WebAssembly into a ZK friendly IR with infinite-registers and write-once memory."
+name = "crush"
+description = "Compiles WebAssembly into a ZK friendly IR with infinite registers."
 edition = "2024"
 
 [dependencies]

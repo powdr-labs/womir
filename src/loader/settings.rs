@@ -49,7 +49,7 @@ pub enum MaybeConstant {
     /// and we don't know the value at compile time.
     NonConstant,
     /// The corresponding input is a constant already set to be collapsed into the instruction.
-    /// Can not happen in the default Womir pipeline, as the constant collapsing optimization
+    /// Can not happen in the default crush pipeline, as the constant collapsing optimization
     /// pass is executed only once. This is defined for completeness.
     CollapsedConstant(WasmValue),
     /// The corresponding input is a reference to a constant node,
@@ -64,7 +64,7 @@ pub enum MaybeConstant {
     },
 }
 
-/// Trait providing settings for WOMIR loader passes.
+/// Trait providing settings for crush loader passes.
 pub trait Settings {
     type Directive;
 
