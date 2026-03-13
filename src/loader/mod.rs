@@ -1574,7 +1574,7 @@ fn generate_imported_func_wrapper<'a, S: Settings>(
             blockless_dag::GenericNode {
                 operation: blockless_dag::Operation::Br(BreakTarget {
                     depth: 0,
-                    kind: blockless_dag::TargetType::FunctionOrLoop,
+                    kind: blockless_dag::TargetType::Function,
                 }),
                 inputs: (0..func_type.results().len() as u32)
                     .map(|i| {
