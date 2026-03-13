@@ -1,6 +1,6 @@
 # crush
 
-crush is a compiler pipeline from [WebAssembly](https://webassembly.org/) to machines with infinite registers and two possible execution models: write-once memory (WOM) and read-write (RW) registers.
+crush is a compiler pipeline from [WebAssembly](https://webassembly.org/) to machines with infinite registers, making it suitable for zkVMs and other specialized virtual machines. It supports two execution models: write-once memory (WOM) and read-write (RW) registers.
 
 In the WOM model, machines provide as many registers as needed, but each register can only be written once.
 To differentiate between multiple calls of the same function, or multiple iterations of the same loop, references to registers are relative

@@ -301,13 +301,13 @@ fn dump_ir(program: &Program<FunctionAsm<Directive>>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crush::interpreter::NULL_REF;
     use serde::Deserialize;
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
     use tempfile::NamedTempFile;
     use test_log::test;
-    use crush::interpreter::NULL_REF;
 
     fn test_interpreter(
         path: &str,

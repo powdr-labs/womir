@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-crush is a compiler from WebAssembly to an intermediate representation that flattens stack and locals into abstract infinite registers. It supports two execution models: write-once memory (WOM) and read-write (RW) registers, making it suitable for zkVMs and other specialized virtual machines.
+crush is a compiler from WebAssembly to an intermediate representation that flattens stack and locals into abstract infinite registers, making it suitable for zkVMs and other specialized virtual machines. It supports two execution models: write-once memory (WOM) and read-write (RW) registers.
 
 ## Common Development Commands
 
