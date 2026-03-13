@@ -4,8 +4,8 @@ use std::sync::atomic::AtomicU32;
 
 use crate::loader::{
     CommonStages, FunctionAsm, FunctionProcessingStage, Module, Statistics,
+    passes::dumb_jump_removal,
     rwm::{liveness_dag::LivenessDag, register_allocation::AllocatedDag, settings::Settings},
-    wom::dumb_jump_removal,
 };
 
 pub mod flattening;
