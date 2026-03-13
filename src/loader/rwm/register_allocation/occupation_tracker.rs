@@ -163,7 +163,7 @@ impl OccupationTracker {
         } else {
             // Can allocate at hint
             let end_of_liveness = live_range.end;
-            let alloc_idx = self.insert(
+            self.insert(
                 AllocationType::Value {
                     origin,
                     do_not_relocate: true,
@@ -171,10 +171,7 @@ impl OccupationTracker {
                 hint,
                 live_range,
             );
-            TryAllocResult::AllocatedAtHint {
-                end_of_liveness,
-                alloc_idx,
-            }
+            TryAllocResult::AllocatedAtHint { end_of_liveness }
         }
     }
 
@@ -252,7 +249,7 @@ impl OccupationTracker {
         // liveness must be the current node only. In this case, we also allocate
         // at its natural position. It will not clobber any other allocation
         // because it will expire immediately.
-        let mut to_rellocate = Vec::new();
+        let mut to_relocate = Vec::new();
         let mut accumulated_offset = frame_start;
         for (output_idx, size) in output_sizes.enumerate() {
             let origin = ValueOrigin {
@@ -273,12 +270,12 @@ impl OccupationTracker {
                     )
                 {
                     // Maybe this output can be relocated at its natural position.
-                    to_rellocate.push(OutputForRelocations {
+                    to_relocate.push(OutputForRelocations {
                         output_idx: origin.output_idx,
                         natural_range,
                         original_range: alloc.reg_range.clone(),
                     });
-                    self.remove(*alloc_idx);
+                    self.remove(origin);
                 }
             } else {
                 // Output was not allocated yet, allocate it at its natural position
@@ -303,7 +300,7 @@ impl OccupationTracker {
         }
 
         // Relocate the outputs that can be relocated at their natural position.
-        *number_of_saved_copies += self.relocate_fn_call_outputs(call_index, to_rellocate);
+        *number_of_saved_copies += self.relocate_fn_call_outputs(call_index, to_relocate);
 
         // Reserve the entire remaining space for the function frame.
         // May overlap with some unused function outputs, but that is fine.
@@ -335,7 +332,7 @@ impl OccupationTracker {
     fn relocate_fn_call_outputs(
         &mut self,
         call_index: usize,
-        mut to_rellocate: Vec<OutputForRelocations>,
+        mut to_relocate: Vec<OutputForRelocations>,
     ) -> usize {
         // The algorithm is a bit tricky, because in some (hopefully rare)
         // ocasions, the full relocation might fail. So we must clear our
@@ -345,7 +342,7 @@ impl OccupationTracker {
         //
         // Since every fail removes one entry from the set of outputs to relocate,
         // this terminates.
-        let mut new_allocs = vec![None; to_rellocate.len()];
+        let mut new_allocs = vec![None; to_relocate.len()];
 
         'retry: loop {
             let mut copies_saved = 0;
@@ -353,7 +350,7 @@ impl OccupationTracker {
             // First, try to set all the allocations at their natural position.
             // Some might fail because of overlaps with other allocations, but
             // that is fine.
-            for (entry_idx, entry) in to_rellocate.iter().enumerate() {
+            for (entry_idx, entry) in to_relocate.iter().enumerate() {
                 let result = self.try_allocate_at(
                     ValueOrigin {
                         node: call_index,
@@ -368,16 +365,16 @@ impl OccupationTracker {
                         // We try allocating later, so this doesn't block the natural
                         // placement of the other outputs.
                     }
-                    TryAllocResult::AllocatedAtHint { alloc_idx, .. } => {
+                    TryAllocResult::AllocatedAtHint { .. } => {
                         // Allocated at natural position, great!
-                        new_allocs[entry_idx] = Some(alloc_idx);
+                        new_allocs[entry_idx] = Some(entry.output_idx);
                         copies_saved += entry.original_range.len();
                     }
                 }
             }
 
             // Allocate the remaining wherever possible
-            for (entry_idx, entry) in to_rellocate.iter().enumerate() {
+            for (entry_idx, entry) in to_relocate.iter().enumerate() {
                 if new_allocs[entry_idx].is_some() {
                     continue;
                 }
@@ -389,26 +386,29 @@ impl OccupationTracker {
 
                 let live_range = self.natural_liveness(origin);
                 let existing_entries = self.occupation.reg_occupation(live_range.clone());
-                if let Ok(alloc_idx) = self.allocate_where_possible(
+                if let Ok(()) = self.allocate_where_possible(
                     origin,
                     (entry.original_range.len() as u32).try_into().unwrap(),
                     live_range.clone(),
                     existing_entries,
                 ) {
-                    new_allocs[entry_idx] = Some(alloc_idx);
+                    new_allocs[entry_idx] = Some(entry.output_idx);
                 } else {
                     // Relocation failed!
                     //
                     // Clear our allocation attempt, restore the failing entry and remove it
                     // from the set of outputs to relocate.
-                    for alloc_idx in new_allocs.iter().flatten() {
-                        self.remove(*alloc_idx);
+                    for output_idx in new_allocs.iter().flatten().copied() {
+                        self.remove(ValueOrigin {
+                            node: call_index,
+                            output_idx,
+                        });
                     }
 
                     self.set_allocation(origin, entry.original_range.clone());
 
-                    to_rellocate.swap_remove(entry_idx);
-                    new_allocs.truncate(to_rellocate.len());
+                    to_relocate.swap_remove(entry_idx);
+                    new_allocs.truncate(to_relocate.len());
                     new_allocs.fill(None);
 
                     continue 'retry;
@@ -513,7 +513,7 @@ impl OccupationTracker {
         size: NonZeroU32,
         live_range: Range<usize>,
         existing_entries: Vec<Range<u32>>,
-    ) -> Result<usize, ()> {
+    ) -> Result<(), ()> {
         // Track the end of the current occupied space
         let mut curr_end = 0;
 
@@ -528,22 +528,18 @@ impl OccupationTracker {
 
         // Allocate at the first gap found (or at the end).
         let alloc = curr_end..(curr_end.checked_add(size.get()).ok_or(())?);
-        Ok(self.insert(
+        self.insert(
             AllocationType::Value {
                 origin,
                 do_not_relocate: false,
             },
             alloc,
             live_range,
-        ))
+        );
+        Ok(())
     }
 
-    fn insert(
-        &mut self,
-        kind: AllocationType,
-        reg_range: Range<u32>,
-        live_range: Range<usize>,
-    ) -> usize {
+    fn insert(&mut self, kind: AllocationType, reg_range: Range<u32>, live_range: Range<usize>) {
         let entry_idx = self.occupation.allocations.len();
         if let AllocationType::Value { origin, .. } = kind {
             self.origin_map.insert(origin, entry_idx);
@@ -559,17 +555,19 @@ impl OccupationTracker {
             reg_range,
             live_range,
         });
-        entry_idx
     }
 
-    fn remove(&mut self, entry_idx: usize) {
+    fn remove(&mut self, origin: ValueOrigin) {
+        // Remove the entry from the origin_map
+        let entry_idx = self
+            .origin_map
+            .remove(&origin)
+            .expect("origin not allocated");
+
         // Remove the entry itself
         let alloc = self.occupation.allocations.swap_remove(entry_idx);
 
-        // Remove the entry from the two indices
-        if let AllocationType::Value { origin, .. } = alloc.kind {
-            self.origin_map.remove(&origin);
-        }
+        // Remove the entry from the interval map.
         self.occupation
             .alive_interval_map
             .remove_where(alloc.live_range.clone(), |idx| *idx == entry_idx);
@@ -615,7 +613,6 @@ enum TryAllocResult {
     AlreadyAllocated,
     AllocatedAtHint {
         end_of_liveness: usize,
-        alloc_idx: usize,
     },
     NotAllocated {
         live_range: Range<usize>,
